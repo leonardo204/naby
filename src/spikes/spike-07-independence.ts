@@ -21,7 +21,7 @@ import { ClaudeAgentSdkEngine } from '../engines/claude-agent-sdk-engine.js';
 import { MockEngine } from '../engines/mock-engine.js';
 import type { EngineEvent, Executor, ToolSchema } from '../runtime/engine.js';
 import { makeGate, scriptedPolicy } from '../runtime/gate.js';
-import { MemoryStore } from '../runtime/memory.js';
+import { MemoryStore } from '../runtime/store/memory-store.js';
 import { runTurn } from '../runtime/session.js';
 import { buildToolset, Outbox } from '../runtime/tools.js';
 
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const historyAfterTurn1 = store.session(sessionId).messages.length;
+  const historyAfterTurn1 = store.getMessages(sessionId).length;
   const memoryAfterTurn1 = store.getMemory(sessionId, 'userName');
 
   // ---- Turn 2: MockEngine (different provider, same seam) --------------
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
     gate: gate.gate, // SAME gate
   });
 
-  const historyAfterTurn2 = store.session(sessionId).messages.length;
+  const historyAfterTurn2 = store.getMessages(sessionId).length;
   const memoryAfterTurn2 = store.getMemory(sessionId, 'userName');
 
   // ---- Assertion 1: memory visible to engine 2 -------------------------
@@ -158,7 +158,8 @@ async function main(): Promise<void> {
   // history / memory (asserted above) — here we additionally confirm the store
   // exposes exactly ONE session for the id and both turns' side effects landed
   // in the SAME outbox.
-  const oneSessionForId = store.has(sessionId);
+  const oneSessionForId =
+    store.getSession(sessionId) !== undefined && store.listSessions().length === 1;
   const bothTurnsHitSameOutbox = outbox.size >= 2; // turn1 (claude) + turn2 (mock)
   checks.push({
     name: '4. nothing about the store was keyed to the engine or a provider',

@@ -17,7 +17,7 @@
 import { ClaudeAgentSdkEngine } from '../engines/claude-agent-sdk-engine.js';
 import type { EngineEvent, ModelSelection } from '../runtime/engine.js';
 import { makeGate, scriptedPolicy, type MakeGateResult } from '../runtime/gate.js';
-import { MemoryStore } from '../runtime/memory.js';
+import { MemoryStore } from '../runtime/store/memory-store.js';
 import { runTurn } from '../runtime/session.js';
 import { buildToolset, Outbox } from '../runtime/tools.js';
 

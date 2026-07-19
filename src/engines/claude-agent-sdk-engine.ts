@@ -327,6 +327,10 @@ export class ClaudeAgentSdkEngine implements Engine {
         // deny is authoritative even here:
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
+        // The system prompt travels on its OWN field (contract §2/§6), never as
+        // a `role:'system'` message. The Agent SDK's native slot for it is
+        // `systemPrompt`; passing a bare string replaces the default preset.
+        ...(input.system ? { systemPrompt: input.system } : {}),
         // NOTE: allowedTools is deliberately UNSET — listing our tool there
         // would auto-approve it and silently shadow the gate.
         abortController: ac,

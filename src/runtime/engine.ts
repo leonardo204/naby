@@ -84,13 +84,34 @@ export type ModelSelection = {
 // Runtime message — provider-independent internal shape (contract §6).
 // ---------------------------------------------------------------------------
 
+// NOTE on the two shapes below (both are deliberate contract decisions):
+//
+//   * there is NO `role:'system'`. A system prompt is NOT a message — it rides
+//     on `EngineRunInput.system` and each engine forwards it through its
+//     provider's dedicated slot. `ai@7` rejects `role:'system'` inside
+//     `messages` outright ("System messages are not allowed in the prompt or
+//     messages fields. Use the instructions option instead."), and modelling it
+//     as a message also made "which system prompt wins" ambiguous on replay.
+//
+//   * a tool result carries its `toolName`. Without it a persisted tool result
+//     cannot be replayed: the originating tool call may have been written by a
+//     previous turn or by a DIFFERENT engine (the provider-switch case), so the
+//     name cannot be recovered from the history being mapped, and providers
+//     reject an orphan tool result. Carrying the name makes tool results
+//     self-describing and round-trippable across a provider switch.
+
 export type RuntimeMessage =
   | {
-      role: 'system' | 'user' | 'assistant';
+      role: 'user' | 'assistant';
       content: string;
       toolCalls?: ToolCall[];
     }
-  | { role: 'tool'; toolCallId: string; output: ToolOutput };
+  | {
+      role: 'tool';
+      toolCallId: string;
+      toolName: string; // BARE name — see the note above
+      output: ToolOutput;
+    };
 
 // ---------------------------------------------------------------------------
 // Engine events — the narrowed projection uniform across both engines
@@ -138,6 +159,11 @@ export type EngineRunInput = {
   model: ModelSelection;
   /** conversation so far, from our provider-independent store. */
   messages: RuntimeMessage[];
+  /** System prompt / instructions for the turn. NOT a message — each engine
+   * forwards this through its provider's dedicated slot (`ai@7`'s `system`
+   * option, the Agent SDK's `systemPrompt`). Provider-independent: the same
+   * string is passed whichever engine runs. */
+  system?: string;
   /** JSON-schema tool definitions; NO execute — the engine surfaces, we run. */
   toolSchemas: ToolSchema[];
   /** runtime-owned gate; the engine attaches it at its pre-execution point. */

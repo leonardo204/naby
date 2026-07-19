@@ -23,7 +23,20 @@ import type {
   ToolCall,
 } from '../runtime/engine.js';
 
+/** What the engine was handed on its most recent run. Lets a spike assert on
+ *  the INPUTS at the seam — notably that the system prompt arrived on its own
+ *  field and not smuggled into `messages` (contract §2/§6). */
+export type MockEngineDiagnostics = {
+  /** the `EngineRunInput.system` value received, if any. */
+  system: string | undefined;
+  /** the message history received, verbatim. */
+  messages: EngineRunInput['messages'];
+};
+
 export class MockEngine implements Engine {
+  /** Diagnostics from the most recent run(); the spike asserts on this. */
+  diagnostics: MockEngineDiagnostics = { system: undefined, messages: [] };
+
   /** The deterministic tool call this engine always makes. */
   private readonly plannedCall = {
     toolName: 'send_message',
@@ -31,6 +44,7 @@ export class MockEngine implements Engine {
   };
 
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
+    this.diagnostics = { system: input.system, messages: [...input.messages] };
     const model = input.model.model ?? 'mock-model-v0';
     yield { kind: 'init', providerId: input.model.providerId, model };
 

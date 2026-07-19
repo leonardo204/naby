@@ -62,7 +62,8 @@ export type AiSdkEngineOptions = {
   resolveModel: ModelResolver;
   /** Loop bound (contract §2.1 requires the loop be bounded). Default 16. */
   maxSteps?: number;
-  /** Optional system prompt prepended when the history has no system message. */
+  /** Engine-level DEFAULT system prompt, used when a run does not supply its
+   * own `EngineRunInput.system`. The per-run field wins. */
   system?: string;
 };
 
@@ -133,33 +134,25 @@ function buildToolSet(schemas: EngineRunInput['toolSchemas']): ToolSet {
 /**
  * Map our history into the SDK's prompt shape.
  *
- * INTERPRETATION (contract §6 leaves this open): a `role:'tool'` RuntimeMessage
- * carries only a `toolCallId`, so a tool result whose originating tool call is
- * not present in the mapped history (e.g. it was written by a previous turn,
- * or by a DIFFERENT engine — the SPIKE-07 provider-switch case) would become an
- * ORPHAN tool result, which providers reject. Such orphans are folded into a
- * plain user message instead, preserving the content without emitting an
- * invalid prompt. Tool results that DO pair with a call in this history are
- * mapped as proper tool-result parts.
+ * A `role:'tool'` RuntimeMessage carries its own `toolName` (contract §6), so a
+ * tool result maps to a REAL tool message regardless of whether its originating
+ * tool call appears in the history being mapped. That is what makes a persisted
+ * transcript replayable after a restart or a provider switch, where the call
+ * was written by a previous turn or by a different engine.
+ *
+ * There is no `role:'system'` case: a system prompt is not a message, it comes
+ * in on `EngineRunInput.system` and is passed to `generateText`'s own `system`
+ * option (`ai@7` rejects `role:'system'` inside `messages`).
  */
 export function toModelMessages(messages: readonly RuntimeMessage[]): ModelMessage[] {
   const out: ModelMessage[] = [];
-  const knownCallIds = new Map<string, string>(); // toolCallId -> toolName
 
   for (const m of messages) {
     if (m.role === 'tool') {
-      const toolName = knownCallIds.get(m.toolCallId);
-      if (!toolName) {
-        out.push({
-          role: 'user',
-          content: `[prior tool result ${m.toolCallId}]: ${m.output.content}`,
-        });
-        continue;
-      }
       const part: ToolResultPart = {
         type: 'tool-result',
         toolCallId: m.toolCallId,
-        toolName,
+        toolName: m.toolName,
         output: m.output.isError
           ? { type: 'error-text', value: m.output.content }
           : { type: 'text', value: m.output.content },
@@ -173,10 +166,6 @@ export function toModelMessages(messages: readonly RuntimeMessage[]): ModelMessa
       continue;
     }
 
-    if (m.role === 'system') {
-      out.push({ role: 'system', content: m.content });
-      continue;
-    }
     if (m.role === 'user') {
       out.push({ role: 'user', content: m.content });
       continue;
@@ -196,7 +185,6 @@ export function toModelMessages(messages: readonly RuntimeMessage[]): ModelMessa
           toolName: c.toolName,
           input: c.input,
         });
-        knownCallIds.set(c.toolCallId, c.toolName);
       }
       out.push({ role: 'assistant', content });
     } else {
@@ -229,11 +217,15 @@ export function toRuntimeMessages(
         out.push({
           role: 'tool',
           toolCallId: part.toolCallId,
+          toolName: part.toolName,
           output: { content, isError },
         });
       }
       continue;
     }
+    // A system message has no RuntimeMessage counterpart — the system prompt
+    // rides on EngineRunInput.system, not on the history (contract §6).
+    if (m.role === 'system') continue;
     if (typeof m.content === 'string') {
       out.push({ role: m.role, content: m.content });
       continue;
@@ -346,6 +338,12 @@ export class AiSdkEngine implements Engine {
     const tools = buildToolSet(input.toolSchemas);
     const messages = toModelMessages(input.messages);
 
+    // The system prompt is NOT a message (contract §6): `ai@7` rejects
+    // `role:'system'` inside `messages` and directs it to the dedicated
+    // instructions slot, which is exactly what `system` is here. Per-run wins
+    // over the engine-level default.
+    const system = input.system ?? this.system;
+
     // -- OUR loop. One model step per iteration; the SDK never continues on
     //    its own (no multi-step stopWhen; v7 default is stepCountIs(1)).
     for (let step = 0; ; step++) {
@@ -367,9 +365,7 @@ export class AiSdkEngine implements Engine {
           tools,
           messages,
           abortSignal: input.signal,
-          ...(this.system && !input.messages.some((m) => m.role === 'system')
-            ? { system: this.system }
-            : {}),
+          ...(system ? { system } : {}),
           // NOTE: `stopWhen` is deliberately UNSET. The v7 default is
           // stepCountIs(1) — a single model step, then control back to us.
           // Passing a multi-step stopWhen would let the SDK drive the loop.

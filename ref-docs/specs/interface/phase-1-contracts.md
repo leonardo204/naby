@@ -102,6 +102,7 @@ interface Engine {
 type EngineRunInput = {
   model: ModelSelection;               // provider + model id/deployment — the ONLY key-dependent input
   messages: RuntimeMessage[];          // conversation so far (from our store, provider-independent)
+  system?: string;                     // system prompt — its OWN field, never a message (see §6)
   toolSchemas: ToolSchema[];           // JSON-schema tool definitions; NO execute — the engine surfaces, we run
   gate: Gate;                          // runtime-owned; the engine attaches it at its pre-execution point
   executors: Record<string, Executor>; // runtime-owned; keyed by tool name
@@ -117,7 +118,8 @@ type Executor = (input: unknown, ctx: ExecCtx) => Promise<ToolOutput>;
 type ToolCall = { toolCallId: string; toolName: string; input: unknown };
 ```
 
-- **`model` is the only key-dependent field.** The engine reads the provider key (via the credential vault) solely to construct the model. `messages`, `toolSchemas`, `gate`, and `executors` are all provider-independent — the same values are passed whether the backend is `AiSdkEngine` or `ClaudeAgentSdkEngine`, and whichever provider is selected.
+- **`system` is not a message.** It travels on its own field and each engine forwards it through its provider's dedicated slot (`ai` v7's `system`/instructions option; the Agent SDK's `systemPrompt`). `ai` v7 **rejects** `role:'system'` inside `messages` outright — *"System messages are not allowed in the prompt or messages fields. Use the instructions option instead."* — so a system prompt is neither stored in the transcript nor replayed as history; it is supplied per turn.
+- **`model` is the only key-dependent field.** The engine reads the provider key (via the credential vault) solely to construct the model. `messages`, `system`, `toolSchemas`, `gate`, and `executors` are all provider-independent — the same values are passed whether the backend is `AiSdkEngine` or `ClaudeAgentSdkEngine`, and whichever provider is selected.
 - **Tool schemas carry no `execute`.** The engine must surface each tool call; the runtime runs the gate and the executor. Any engine that cannot honor this (executes tools itself) does not implement the interface.
 
 ### 2.1 `AiSdkEngine` (production)
@@ -191,6 +193,8 @@ The MCP registry is **provider- and key-independent** — it lives in the runtim
 
 Unlike the Agent-SDK plan, **no engine persists for us.** The runtime owns a local SQLite database; the AI SDK does not write transcripts, and the dev Agent SDK's own transcript directory is ignored.
 
+The runtime depends on a narrow `Store` interface, not on a driver. The F1-05 driver is **`node:sqlite`** (built into Node 24) rather than better-sqlite3, which as a native module would reintroduce the `electron-rebuild` / `asar-unpack` / per-OS-prebuild burden that dropping the Agent SDK from production just removed. `node:sqlite` is **experimental** in Node 24 and its availability inside Electron is **unverified — F1-02 / SPIKE-04 must confirm it**; the `Store` interface exists so that a negative result is a new driver file, not a change to the runtime.
+
 | What | Where | Owner | Notes |
 |---|---|---|---|
 | Provider keys | OS keychain via `safeStorage` | main | One per provider; verify backend ≠ `basic_text` on Linux before writing |
@@ -211,9 +215,14 @@ type SessionRef = {
 };
 
 type RuntimeMessage =    // provider-independent internal message shape
-  | { role: 'system' | 'user' | 'assistant'; content: string; toolCalls?: ToolCall[] }
-  | { role: 'tool'; toolCallId: string; output: ToolOutput };
+  | { role: 'user' | 'assistant'; content: string; toolCalls?: ToolCall[] }
+  | { role: 'tool'; toolCallId: string; toolName: string; output: ToolOutput };
 ```
+
+Two shapes above are deliberate and load-bearing for replay:
+
+- **There is no `role:'system'`.** A system prompt is not part of the transcript — it rides on `EngineRunInput.system` (§2) and is supplied per turn. Besides `ai` v7 rejecting system messages in `messages`, storing one would make "which system prompt wins" ambiguous on replay.
+- **A tool result carries its `toolName`.** The originating tool call may have been written by an earlier turn, an earlier *process*, or a **different engine** (the provider-switch case), so the name cannot be recovered from the history being replayed. Without it, a persisted tool result becomes an orphan that providers reject. Carrying the name makes tool results self-describing. The runtime also persists the assistant tool-call message adjacent to its result, so every call/result pair stays intact across a restart or a provider switch.
 
 **We hold the full conversation and re-send it each turn** (the engine is stateless across turns at our seam). This is what makes a session provider-independent: switching provider mid-conversation just changes which model receives the same `RuntimeMessage[]`. Losing `providers.json` loses credentials’ handles, not history; losing the SQLite db loses history.
 

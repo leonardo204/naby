@@ -32,6 +32,17 @@
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// The shell adapter now opens a SQLite store (F1-05). Point it at a throwaway
+// directory BEFORE importing the adapter, so this spike never touches the
+// developer's real ~/.naby/app.db. This is the documented NABY_DB_PATH
+// override, not a test-only branch inside the adapter.
+const TMP_DIR = mkdtempSync(join(tmpdir(), 'naby-spike02-'));
+process.env.NABY_DB_PATH = join(TMP_DIR, 'app.db');
+
 import type {
   LanguageModelV4GenerateResult,
 } from '@ai-sdk/provider';
@@ -430,7 +441,11 @@ async function main(): Promise<void> {
   if (!allPass) process.exit(1);
 }
 
-main().catch((e) => {
-  console.error('SPIKE-02 crashed:', e);
-  process.exit(1);
-});
+main()
+  .catch((e) => {
+    console.error('SPIKE-02 crashed:', e);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    rmSync(TMP_DIR, { recursive: true, force: true });
+  });

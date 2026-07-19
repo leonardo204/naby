@@ -55,7 +55,13 @@ export {
   type OutboxEntry,
 } from './runtime/tools.js';
 
-export { MemoryStore, type SessionState } from './runtime/memory.js';
+// Persistence (F1-05). The shell depends on the `Store` INTERFACE; the driver
+// it constructs is its own choice. SqliteStore is the durable one — note that
+// `node:sqlite` is experimental and its availability inside Electron is still
+// to be verified in F1-02/SPIKE-04 (see sqlite-store.ts).
+export type { McpEntry, SessionRef, Store } from './runtime/store/store.js';
+export { MemoryStore } from './runtime/store/memory-store.js';
+export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
 export { runTurn, type RunTurnOptions } from './runtime/session.js';
 
