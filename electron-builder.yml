@@ -1,0 +1,151 @@
+# electron-builder.yml — F1-02 packaging.
+#
+# SCOPE. This produces a RUNNABLE app for the host OS. The three-OS CI matrix is
+# F1-10, and the signing/notarisation and auto-update wiring are F1-09; neither
+# is configured here. What is set here are the things that are wrong by DEFAULT
+# for this app and would silently ship broken.
+#
+# Targets are the ones design §6.1 fixes:
+#   Windows NSIS — MSI is not an option, electron-updater cannot update it
+#   macOS dmg + zip — the zip is not optional even when only shipping a dmg,
+#     because Squirrel.Mac updates via zip
+#   Linux AppImage AND deb — deb is close to mandatory: Chromium's SUID sandbox
+#     needs chrome-sandbox root-owned 4755, a user-owned FUSE mount cannot
+#     provide that, and Ubuntu 23.10+ blocks the namespace fallback, so an
+#     AppImage alone fails to launch without --no-sandbox
+
+appId: dev.naby.app
+productName: Naby
+copyright: Naby
+
+directories:
+  output: release
+  buildResources: build
+
+# ---------------------------------------------------------------------------
+# npmRebuild — design §3.2
+# ---------------------------------------------------------------------------
+# electron-builder defaults this to true and would recompile native modules
+# against Electron's ABI on every packaging run. The natives that reach this
+# build (see asarUnpack) are all N-API prebuilds, which are ABI-stable across
+# Electron versions; rebuilding them forfeits the prebuild and forces a full
+# native toolchain onto every runner for no benefit.
+npmRebuild: false
+
+asar: true
+
+# ---------------------------------------------------------------------------
+# What ships
+# ---------------------------------------------------------------------------
+# The parent's own node_modules is EXCLUDED wholesale, deliberately:
+#
+#   * nothing needs it. `dist/electron/*` is bundled, and `dist/naby-runtime.mjs`
+#     is self-contained by construction (scripts/build-runtime.mjs inlines ai@7
+#     and the five provider adapters, leaving only node builtins).
+#   * @anthropic-ai/claude-agent-sdk is a parent dependency and is the DEV/TEST
+#     engine. Design §3.3: it must never be in a shipped build. Excluding the
+#     whole tree makes that structural rather than a glob nobody re-checks.
+files:
+  - dist/electron/**
+  - dist/naby-runtime.mjs
+  - package.json
+  - '!node_modules/**'
+  # The shell (our OpenCockpit fork) ships as the Next app dir. It keeps its own
+  # node_modules because Next is resolved out of the shell's tree at runtime.
+  #
+  # SIZE IS A KNOWN PROBLEM HERE and is F1-03's to fix, not this file's: the
+  # shell is still untrimmed (7 feature packages, 6 of which are being removed),
+  # so its dependency tree is ~1 GB installed. The exclusions below drop the
+  # unambiguously build-time-only native toolchains; the rest waits for the trim.
+  - shell/package.json
+  - shell/next.config.mjs
+  - shell/.next-prod/**
+  - shell/dist/**
+  - shell/public/**
+  - shell/packages/**
+  - shell/node_modules/**
+  # ---------------------------------------------------------------------
+  # THE DEV-ONLY ENGINE MUST NOT SHIP — design §3.3
+  # ---------------------------------------------------------------------
+  # Excluding the parent's node_modules is NOT sufficient, which is a trap
+  # worth spelling out. The SHELL has its own dependency on the Claude Agent
+  # SDK (upstream OpenCockpit drives Claude Code with it), so it arrives
+  # through the shell's tree regardless of what the parent ships.
+  #
+  # Measured on the first packaging run of this config: 224 MB of
+  # `claude-agent-sdk-darwin-arm64` — the non-OSS engine binary — landed
+  # INSIDE app.asar. Two separate problems in one: design §3.3 says it is
+  # never in a shipped build (the redistribution question the engine pivot
+  # exists to avoid), and a binary inside an asar cannot be spawned anyway,
+  # so it was pure dead weight. F1-03 removes the feature package that pulls
+  # it; until then this exclusion is what keeps it out.
+  - '!shell/node_modules/@anthropic-ai/claude-agent-sdk/**'
+  - '!shell/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
+  - '!shell/node_modules/@rolldown/**'
+  - '!shell/node_modules/@rollup/**'
+  - '!shell/node_modules/@tailwindcss/oxide*/**'
+  - '!shell/node_modules/lightningcss*/**'
+  - '!shell/node_modules/@unrs/**'
+  - '!shell/node_modules/typescript/**'
+  - '!shell/node_modules/eslint*/**'
+  - '!shell/node_modules/@typescript-eslint/**'
+  - '!shell/node_modules/**/*.map'
+  - '!shell/.next-prod/cache/**'
+
+# ---------------------------------------------------------------------------
+# asarUnpack — design §3.1
+# ---------------------------------------------------------------------------
+# Anything dlopen'd or spawn'd must live OUTSIDE the archive; asar is transparent
+# to `require` but not to `dlopen`/`LoadLibraryW`/`posix_spawn`.
+#
+# FINDING, recorded because it contradicts the design's current expectation:
+# design §3.3 says the production engine is pure JS and there should be nothing
+# to unpack. That is true of OUR engine, but NOT of the untrimmed shell, which
+# drags in native modules of its own — sharp (Next image optimisation),
+# @napi-rs/canvas, @next/swc, fsevents, node-pty. They are listed EXPLICITLY
+# rather than left to smartUnpack, whose auto-detection is gated on the file
+# resolving as part of an npm module. Re-audit this list after F1-03's trim.
+#
+# NOTE the paths are anchored with a trailing `/**` on the module directory.
+# Never compute an unpacked path with `.replace('app.asar', 'app.asar.unpacked')`
+# — 'app.asar.unpacked' itself contains 'app.asar', so an already-unpacked path
+# becomes `app.asar.unpacked.unpacked/…` → ENOENT, surfacing as a generic spawn
+# failure. That is a live upstream bug in node-pty; the same footgun applies to
+# any path arithmetic we write ourselves.
+asarUnpack:
+  - '**/node_modules/sharp/**'
+  - '**/node_modules/@img/**'
+  - '**/node_modules/@napi-rs/canvas*/**'
+  - '**/node_modules/@next/swc-*/**'
+  - '**/node_modules/node-pty/**'
+  - '**/node_modules/fsevents/**'
+  - '**/node_modules/web-tree-sitter/**'
+  - '**/node_modules/@vscode/ripgrep/**'
+
+mac:
+  # macos-latest runners are arm64 (design §6.1); per-arch until there is a
+  # reason to fight the universal-binary asar merge.
+  target:
+    - target: dmg
+      arch: [arm64]
+    # Not optional even though we ship dmg: Squirrel.Mac updates via zip.
+    - target: zip
+      arch: [arm64]
+  category: public.app-category.productivity
+  # hardenedRuntime defaults true. Electron needs both of these entitlements;
+  # they are inert until F1-09 turns on signing.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Development

@@ -16,3 +16,6 @@ dist/
 .env.local
 .claude/db/context.db-shm
 .claude/db/context.db-wal
+
+# electron-builder output
+release/

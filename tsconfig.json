@@ -13,5 +13,8 @@
     "verbatimModuleSyntax": false,
     "noEmit": true
   },
-  "include": ["src/**/*.ts"]
+  // `electron/` is compiled by scripts/build-electron.mjs (esbuild), which does
+  // no type checking of its own — so it is included here to keep the main
+  // process, the preload and the hardening rules inside `npm run typecheck`.
+  "include": ["src/**/*.ts", "electron/**/*.ts"]
 }

@@ -4,15 +4,21 @@
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app — spike harness (Phase 0)",
+  "main": "dist/electron/main.mjs",
   "scripts": {
     "build:runtime": "node scripts/build-runtime.mjs",
+    "build:electron": "node scripts/build-electron.mjs",
     "build:shell": "npm run build:runtime && cd shell && npm run build:server && npm run build",
+    "build:app": "npm run build:shell && npm run build:electron",
+    "electron:dev": "npm run build:app && electron dist/electron/main.mjs",
+    "electron:pack": "npm run build:app && electron-builder --dir",
     "spike:02": "npm run build:runtime && tsx src/spikes/spike-02-shell-engine.ts",
     "spike:03": "tsx src/spikes/spike-03-gate.ts",
     "spike:03b": "tsx src/spikes/spike-03b-aisdk-gate.ts",
+    "spike:04": "npm run build:electron && tsx src/spikes/spike-04-electron.ts",
     "spike:07": "tsx src/spikes/spike-07-independence.ts",
-    "spike:all": "npm run spike:02 && npm run spike:03 && npm run spike:03b && npm run spike:07 && npm run spike:f105",
-    "spike:nokeys": "npm run spike:02 && npm run spike:03b && npm run spike:07 && npm run spike:f105",
+    "spike:all": "npm run spike:02 && npm run spike:03 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105",
+    "spike:nokeys": "npm run spike:02 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105",
     "spikes": "npm run spike:all",
     "typecheck": "tsc --noEmit",
     "spike:f105": "tsx src/spikes/spike-f105-persistence.ts"
@@ -30,6 +36,9 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "electron": "43.1.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0"
   }
