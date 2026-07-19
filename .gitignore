@@ -14,3 +14,5 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
+.claude/db/context.db-shm
+.claude/db/context.db-wal

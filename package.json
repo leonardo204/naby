@@ -6,12 +6,21 @@
   "description": "Personalized persona agent desktop app — spike harness (Phase 0)",
   "scripts": {
     "spike:03": "tsx src/spikes/spike-03-gate.ts",
+    "spike:03b": "tsx src/spikes/spike-03b-aisdk-gate.ts",
     "spike:07": "tsx src/spikes/spike-07-independence.ts",
-    "spikes": "npm run spike:03 && npm run spike:07",
+    "spike:all": "npm run spike:03 && npm run spike:03b && npm run spike:07",
+    "spikes": "npm run spike:all",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/amazon-bedrock": "5.0.24",
+    "@ai-sdk/anthropic": "4.0.16",
+    "@ai-sdk/azure": "4.0.17",
+    "@ai-sdk/google": "4.0.18",
+    "@ai-sdk/mcp": "2.0.15",
+    "@ai-sdk/openai": "4.0.16",
     "@anthropic-ai/claude-agent-sdk": "0.3.215",
+    "ai": "7.0.31",
     "zod": "^4.0.0"
   },
   "devDependencies": {
