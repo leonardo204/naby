@@ -1,0 +1,4 @@
+[submodule "shell"]
+	path = shell
+	url = git@github.com:leonardo204/cockpit.git
+	branch = main
