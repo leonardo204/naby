@@ -1,0 +1,86 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_B=\"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/.claude/dist/hooks/bridge.js\"; [ -f \"$_B\" ] || _B=\"$HOME/.claude/dist/hooks/bridge.js\"; HOOK_EVENT=session-start node --no-warnings=ExperimentalWarning \"$_B\""
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings=ExperimentalWarning ~/.claude/dist/hud/fetcher.js &"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_B=\"$(cat .claude/.project_root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || echo .)/.claude/dist/hooks/bridge.js\"; [ -f \"$_B\" ] || _B=\"$HOME/.claude/dist/hooks/bridge.js\"; HOOK_EVENT=prompt node --no-warnings=ExperimentalWarning \"$_B\""
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings=ExperimentalWarning ~/.claude/dist/hud/fetcher.js &"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_B=\"$(cat .claude/.project_root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || echo .)/.claude/dist/hooks/bridge.js\"; [ -f \"$_B\" ] || _B=\"$HOME/.claude/dist/hooks/bridge.js\"; HOOK_EVENT=post-edit node --no-warnings=ExperimentalWarning \"$_B\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_B=\"$(cat .claude/.project_root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || echo .)/.claude/dist/hooks/bridge.js\"; [ -f \"$_B\" ] || _B=\"$HOME/.claude/dist/hooks/bridge.js\"; HOOK_EVENT=post-bash node --no-warnings=ExperimentalWarning \"$_B\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_B=\"$(cat .claude/.project_root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || echo .)/.claude/dist/hooks/bridge.js\"; [ -f \"$_B\" ] || _B=\"$HOME/.claude/dist/hooks/bridge.js\"; HOOK_EVENT=post-bash-fail node --no-warnings=ExperimentalWarning \"$_B\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "_B=\"$(cat .claude/.project_root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || echo .)/.claude/dist/hooks/bridge.js\"; [ -f \"$_B\" ] || _B=\"$HOME/.claude/dist/hooks/bridge.js\"; HOOK_EVENT=stop node --no-warnings=ExperimentalWarning \"$_B\""
+          }
+        ]
+      }
+    ]
+  }
+}
