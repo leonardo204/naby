@@ -2,7 +2,7 @@
 id: phase-1-contracts
 title: Phase 1 — Interface Contracts (IPC, engine interface, provider config, storage)
 type: interface
-version: 0.2.0
+version: 0.2.1
 status: draft
 scope: Contracts between renderer and main, the engine abstraction seam and its two backends, the gate contract, the provider configuration schema, and the on-disk storage layout for Phase 1
 related: [phase-1-shell-architecture, phase-1-desktop-shell, phase-1-test-plan, personalized-agent-desktop-app]
@@ -135,7 +135,7 @@ Wraps `@anthropic-ai/claude-agent-sdk`. Config: `tools: []` (strip built-ins) + 
 The gate is defined **once, in the runtime**, and passed into whichever engine runs. Each engine attaches it at the only sound pre-execution point it has. These invariants hold on both:
 
 1. **A tool never executes until the gate returns `allow`.** In `AiSdkEngine`, our loop holds the surfaced call; in `ClaudeAgentSdkEngine`, the `PreToolUse` hook fires before our handler and its deny is authoritative even under `bypassPermissions`.
-2. **`allow` may rewrite input** (`GateDecision.input`); the executor then runs on the rewritten input. There is no window between approval and execution in which the input can change.
+2. **`allow` may rewrite input** (`GateDecision.input`); the executor then runs on the rewritten input, with no window between approval and execution in which the input can change. **Implementation note (verified in the spike harness):** apply the rewrite in the **executor wrapper** — the runtime runs the executor on the gate-approved input — rather than relying on an engine's own input-rewrite path. In `ClaudeAgentSdkEngine`, `PreToolUse`'s `updatedInput` is *also* returned so the model transcript reflects the rewrite, but its propagation into the in-process tool handler is not a guarantee we depend on; the wrapper is the source of truth. SPIKE-03(a) confirms this end to end (a gate-rewritten `send_message` landed the rewritten text, not the model's original).
 3. **No auto-execution path may bypass the gate.** For `AiSdkEngine`: tools are always execute-less, and MCP tools use `listTools()`/`callTool()` (never the auto-executing `tools()`). For `ClaudeAgentSdkEngine`: built-ins are stripped and no tool is listed in `allowedTools`. **Provider-side server-executed tools are never enabled** on any provider.
 4. **If the gate cannot be attached, the session refuses to start** and surfaces `GATE_UNSOUND`. Running ungated is the failure the product exists to prevent, not a degraded mode.
 

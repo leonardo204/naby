@@ -2,7 +2,7 @@
 id: phase-1-desktop-shell
 title: Phase 1 — Chat-first Desktop Shell (incl. Phase 0 spike)
 type: impl
-version: 0.3.0
+version: 0.3.1
 status: review
 scope: Phase 0 feasibility spike and Phase 1 execution — Electron packaging of the OpenCockpit fork, chat-first trimming, the engine abstraction (AI SDK v7 prod + Agent SDK dev/test), per-provider API-key auth, provider-independent runtime scaffold, local SQLite sessions
 related: [personalized-agent-desktop-app, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-2-personalization-hitl]
@@ -34,7 +34,7 @@ The plan was rewritten twice as investigation invalidated earlier premises. Each
 | 7 | Code signing can come after F1-09 | macOS auto-update **requires** signing; the cert choice is a **one-way door** | F1-09 splits by platform; macOS signing decided before first macOS release |
 | 8 | We redistribute the Agent SDK's ~247 MB non-OSS engine binaries | With AI SDK v7 in production we **do not** bundle the Agent SDK. The dev engine uses it, but the dev build is never shipped | Redistribution concern gone from prod; installer shrinks; SPIKE narrows |
 
-**Confirmed premises**: the OpenCockpit fork is MIT (SPIKE-01 part 1); a `PreToolUse` gate on the dev Agent SDK fires on every tool call and its deny survives `bypassPermissions` (SPIKE-03a); AI SDK v7's execute-less tools surface calls to our loop so the gate is ours (SPIKE-03b).
+**Confirmed premises**: the OpenCockpit fork is MIT (SPIKE-01 part 1). A **spike harness at the repo root** (`src/`, run via `npm run spike:03` / `spike:07`) proves on the real dev engine that the `PreToolUse` gate fires on every tool call, its deny blocks execution and survives `bypassPermissions`, allow-with-rewrite runs on the rewritten input, and no `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` warning appears (SPIKE-03a, 6/6); and that switching engine mid-session leaves memory, history, and executors unchanged (SPIKE-07, 4/4). The prod-engine execute-less path (SPIKE-03b) rides on SPIKE-05 and awaits provider keys.
 
 ---
 
@@ -46,12 +46,12 @@ Verify within one week; all blocking spikes pass before Phase 1. Fallback if a s
 |---|---|---|---|
 | SPIKE-01 | License scan | Upstream MIT confirmed **and** no GPL/AGPL in the transitive tree of the fork + AI SDK provider adapters | Upstream MIT **confirmed**; transitive audit outstanding |
 | SPIKE-02 | Boot the fork locally | `@surething/cockpit` boots; one chat round trip after the engine is swapped to `AiSdkEngine` | Not run |
-| SPIKE-03 | Gate soundness on both engines | **(a)** dev Agent SDK: a `PreToolUse` hook fires on every call, deny survives `bypassPermissions`. **(b)** prod AI SDK v7: execute-less tools surface every call to our loop; nothing auto-executes | **Confirmed empirically** (§3) |
+| SPIKE-03 | Gate soundness on both engines | **(a)** dev Agent SDK: a `PreToolUse` hook fires on every call, deny survives `bypassPermissions`. **(b)** prod AI SDK v7: execute-less tools surface every call to our loop; nothing auto-executes | **(a) proven in the harness** — 6/6 assertions on the real dev engine (surface-before-execute, deny blocks, allow, allow-with-rewrite, no shadow warning). **(b) pending provider keys** (rides on SPIKE-05) |
 | SPIKE-04 | Electron wrapping PoC | Custom Next server boots in the Electron main process; webview loads `127.0.0.1` | Not run |
 | SPIKE-05 | Five-provider round trip | `AiSdkEngine` completes a chat turn on **all five** providers via first-party adapters, each with its own API key | Not run — the multi-provider requirement rests on this |
 | SPIKE-06 | node-pty in a packaged app *(only if a shell tool ships)* | If we ship a shell executor, a packaged app spawns a shell via node-pty on all 3 OSes with `npmRebuild: false` | Not run — conditional on the Phase 2 tool set |
-| SPIKE-07 | Provider-independence | Switching provider (and switching to the dev engine) mid-session leaves memory, MCP, and session state unchanged — only the answering model differs | Not run — the layering requirement rests on this |
-| SPIKE-08 | Dev engine parity | `ClaudeAgentSdkEngine` on local OAuth (no API key) runs the **same** runtime — same gate, executors, memory, MCP — with the seven divergence points normalized ([design](../design/personalized-agent-desktop-app.md) §3.4) | **Feasibility confirmed** (§3); integration not run |
+| SPIKE-07 | Provider-independence | Switching provider (and switching to the dev engine) mid-session leaves memory, MCP, and session state unchanged — only the answering model differs | **Proven in the harness** — 4/4 assertions across a real-dev-engine → mock-engine switch on one session: memory/history carry over, executors are the identical instances, the store is keyed by session id only |
+| SPIKE-08 | Dev engine parity | `ClaudeAgentSdkEngine` on local OAuth (no API key) runs the **same** runtime — same gate, executors, memory, MCP — with the seven divergence points normalized ([design](../design/personalized-agent-desktop-app.md) §3.4) | **Substantially proven** by SPIKE-03a + SPIKE-07 (the dev engine ran the shared runtime end to end); full seven-point normalization vs a live prod engine awaits SPIKE-05 |
 
 **Sequencing**: SPIKE-05 and SPIKE-07 gate the whole architecture — run them first. SPIKE-04 gates packaging. SPIKE-06 is conditional. macOS signing (SPIKE for the notarization toolchain) is now a Phase 1 build-pipeline task, not an engine-binary risk.
 

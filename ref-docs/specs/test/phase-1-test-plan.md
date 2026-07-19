@@ -2,7 +2,7 @@
 id: phase-1-test-plan
 title: Phase 1 — Verification Plan (spikes, acceptance, 3-OS matrix)
 type: test
-version: 0.2.0
+version: 0.2.1
 status: draft
 scope: How Phase 0 spikes and Phase 1 acceptance criteria are verified — spikes, per-feature acceptance, security tests, the 3-OS matrix, and irreversible release checkpoints
 related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, personalized-agent-desktop-app]
@@ -24,8 +24,8 @@ IDs match [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md) §2. **SPI
 | ID | Question | Method | Pass | Fails ⟹ |
 |---|---|---|---|---|
 | **SPIKE-05** | Does `AiSdkEngine` complete a chat turn on **all five** providers? | One round trip each on Anthropic, Bedrock (Claude), Azure OpenAI, Gemini, OpenAI, each with its own key/config | All five return a coherent turn | The multi-provider requirement fails; escalate before Phase 1 |
-| **SPIKE-07** | Is the runtime provider-independent? | Start a session, write memory, connect an MCP server; switch provider mid-session (and switch to the dev engine); read memory/MCP/history back | All unchanged; only the answering model differs | The layering requirement fails; the store or MCP is wrongly key-scoped |
-| **SPIKE-03** | Is the gate sound on **both** engines? | **(a)** `AiSdkEngine`: execute-less tools surface every call to our loop; nothing auto-executes; a denied call never runs. **(b)** dev `ClaudeAgentSdkEngine`: a `PreToolUse` hook fires on every call incl. when the tool is defined, deny survives `bypassPermissions`, `allowedTools` shadowing is avoided | Every tool call gated on both; deny blocks execution on both | The product's core feature fails |
+| **SPIKE-07** ✅ | Is the runtime provider-independent? | `npm run spike:07` — write memory + run a tool on the real dev engine, then run the same session on a second (mock) engine; read memory/history/executors back | All unchanged; only the answering model differs | The layering requirement fails; the store or MCP is wrongly key-scoped |
+| **SPIKE-03** (a ✅ / b ⏳) | Is the gate sound on **both** engines? | **(a)** dev `ClaudeAgentSdkEngine`: `PreToolUse` fires on every call, deny survives `bypassPermissions`, `allowedTools` shadowing avoided — **`npm run spike:03`, 6/6**. **(b)** `AiSdkEngine`: execute-less tools surface every call to our loop; nothing auto-executes; a denied call never runs — **pending keys, rides on SPIKE-05** | Every tool call gated on both; deny blocks execution on both | The product's core feature fails |
 | **SPIKE-04** | Does a custom Next server boot inside Electron and load from asar? | Package `asar: true`, install read-only, exercise a page that writes ISR + image caches | Boots, loads, writes only under `userData` | Fall back to `asar: false` or unpack `.next` |
 | **SPIKE-01** | License scan | `license-checker` over the fork + five provider adapters' transitive tree | Upstream MIT; no GPL/AGPL downstream | Remove/replace the offending dependency |
 | **SPIKE-02** | Fork boots with the swapped engine | `@surething/cockpit` boots; one chat turn through `AiSdkEngine` after the engine layer is replaced | Round trip succeeds | Re-evaluate the fork vs a thin self-built shell |
@@ -39,7 +39,7 @@ Not release gates, but each is an unverified assumption.
 | Question | Minimal check | Why it matters |
 |---|---|---|
 | Which Electron major shipped async `safeStorage`? | `typeof safeStorage.encryptStringAsync` on the target version | Determines whether `await` can be written into the credential path |
-| Do all five AI SDK adapters surface tool calls identically for our execute-less loop? | Run SPIKE-03a against each provider adapter, not just the mock | The gate must behave the same on every provider; core-side behavior is `[V]` but per-provider normalization is `[?]` until run live |
+| Do all five AI SDK adapters surface tool calls identically for our execute-less loop? | Run SPIKE-03b against each provider adapter, not just the mock | The gate must behave the same on every provider; core-side behavior is `[V]` but per-provider normalization is `[?]` until run live |
 | Does `npm pack` of any provider adapter pull a native transitive dependency? | Inspect the five adapters' dependency trees | Would reintroduce an asar-unpack concern the pure-JS assumption rules out |
 | Does electron-builder cross-build `--universal`/`--x64` on an arm64 macOS runner? | Run it; watch for the "same in both x64 and arm64" asar-merge error | Known-fragile — now only if node-pty ships. Hard deadline: Intel runners retire |
 | Does Next write outside the configured cache dir? | Package, install read-only, exercise ISR + images, watch with `fs_usage`/Process Monitor | Read-only-install failures surface only after install |
