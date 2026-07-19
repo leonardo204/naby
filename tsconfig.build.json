@@ -1,0 +1,15 @@
+{
+  // Declaration-only build for the shell-facing bundle. `files` names just the
+  // public barrel; tsc pulls in everything it imports, which keeps the spikes
+  // out of the emitted type tree.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "outDir": "dist/types"
+  },
+  "files": ["src/runtime-entry.ts"],
+  "include": []
+}
