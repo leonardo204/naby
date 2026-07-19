@@ -9,3 +9,8 @@
 .claude/.hook_feedback
 .claude/.project_root
 .claude/.messenger_enabled
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
