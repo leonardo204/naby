@@ -261,6 +261,24 @@ function evaluate(outcome: ChildOutcome): Check[] {
       : 'no `home` observation',
   });
 
+  // -- (c2) the home screen scrolls ----------------------------------------
+  //
+  // Separate from (c) on purpose: (c) proves the home screen APPEARS, and it
+  // passed throughout the bug where the screen appeared but the project list
+  // ran off the bottom of the window with nothing scrollable.
+  checks.push({
+    name: '(c2) the home screen is clipped to the viewport and its project list actually scrolls',
+    pass:
+      home?.homeScrollProbe === 'ok' &&
+      home.homeFitsViewport === true &&
+      home.scrollerOverflows === true &&
+      home.scrollerMoved === true,
+    evidence: home
+      ? `probe=${String(home.homeScrollProbe)} fitsViewport=${String(home.homeFitsViewport)} ` +
+        `overflows=${String(home.scrollerOverflows)} scrolled=${String(home.scrollerMoved)}`
+      : 'no `home` observation',
+  });
+
   // -- (d) the window title -------------------------------------------------
   //
   // The title is the product name and NOTHING else. It used to append the

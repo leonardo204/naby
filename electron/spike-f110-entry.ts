@@ -575,6 +575,30 @@ async function run(): Promise<void> {
          // return.
          iframeTabsAfter: doc2 ? doc2.querySelectorAll('[data-testid="tab-close"]').length : -1,
          titleAfter: document.title,
+         // The home screen SCROLLS. A long project list used to overflow the
+         // viewport with nothing scrollable, because the root was a flex item
+         // with the default min-height:auto — it grew to fit its content, so
+         // the inner overflow-y-auto never received a bounded height. Asserting
+         // "a scroll container exists" would have passed throughout that bug, so
+         // this measures the two things that were actually wrong: the root must
+         // be clipped to the viewport, and the scroller must actually move.
+         ...(() => {
+           const home = homeEl();
+           const scroller = home ? home.querySelector('.overflow-y-auto') : null;
+           if (!home || !scroller) return { homeScrollProbe: 'no-scroller' };
+           const before = scroller.scrollTop;
+           scroller.scrollTop = before + 300;
+           const moved = scroller.scrollTop > before;
+           scroller.scrollTop = before;
+           return {
+             homeScrollProbe: 'ok',
+             homeFitsViewport:
+               home.getBoundingClientRect().height <= window.innerHeight + 4,
+             scrollerOverflows:
+               scroller.scrollHeight > scroller.clientHeight + 4,
+             scrollerMoved: moved,
+           };
+         })(),
        };
      })()`,
   )) as Record<string, unknown>;
