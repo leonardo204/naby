@@ -53,10 +53,13 @@ files:
   # The shell (our OpenCockpit fork) ships as the Next app dir. It keeps its own
   # node_modules because Next is resolved out of the shell's tree at runtime.
   #
-  # SIZE IS A KNOWN PROBLEM HERE and is F1-03's to fix, not this file's: the
-  # shell is still untrimmed (7 feature packages, 6 of which are being removed),
-  # so its dependency tree is ~1 GB installed. The exclusions below drop the
-  # unambiguously build-time-only native toolchains; the rest waits for the trim.
+  # F1-03 has since trimmed the shell to chat + session list + settings: five of
+  # the seven feature packages are gone (comments/console/explorer/review/skills,
+  # 276 files / ~61k lines) and with them the DB drivers (pg / mysql2 / ioredis /
+  # neo4j-driver), the code-map toolchain (web-tree-sitter, @vscode/tree-sitter-wasm),
+  # pdfjs-dist, the xterm addons, @xyflow/react + graphology and
+  # react-syntax-highlighter. The exclusions below still drop the build-time-only
+  # native toolchains, which no trim can remove (they are Next's own deps).
   - shell/package.json
   - shell/next.config.mjs
   - shell/.next-prod/**
@@ -100,11 +103,23 @@ files:
 #
 # FINDING, recorded because it contradicts the design's current expectation:
 # design §3.3 says the production engine is pure JS and there should be nothing
-# to unpack. That is true of OUR engine, but NOT of the untrimmed shell, which
-# drags in native modules of its own — sharp (Next image optimisation),
-# @napi-rs/canvas, @next/swc, fsevents, node-pty. They are listed EXPLICITLY
-# rather than left to smartUnpack, whose auto-detection is gated on the file
-# resolving as part of an npm module. Re-audit this list after F1-03's trim.
+# to unpack. That is true of OUR engine, but NOT of the shell, which drags in
+# native modules of its own. They are listed EXPLICITLY rather than left to
+# smartUnpack, whose auto-detection is gated on the file resolving as part of an
+# npm module.
+#
+# RE-AUDITED after F1-03's trim (the audit this comment used to ask for), by
+# checking each entry against a clean `npm install` of the trimmed shell:
+#   sharp + @img       KEPT — transitive dep of next@16 (image optimisation)
+#   @next/swc-*        KEPT — Next's own native compiler
+#   node-pty           KEPT — feature-agent's Claude PTY driver still uses it
+#   fsevents           KEPT — macOS fs watching, transitive
+#   @vscode/ripgrep    KEPT — feature-agent's ollama Grep tool imports rgPath
+#   @napi-rs/canvas    DROPPED — was pulled in by pdfjs-dist (explorer's PDF
+#                      preview); no longer installed. Only @napi-rs/wasm-runtime
+#                      remains and it is pure wasm, nothing to dlopen.
+#   web-tree-sitter    DROPPED — feature-explorer's code map was the only user;
+#                      package and its WASM copy step are both gone.
 #
 # NOTE the paths are anchored with a trailing `/**` on the module directory.
 # Never compute an unpacked path with `.replace('app.asar', 'app.asar.unpacked')`
@@ -115,11 +130,9 @@ files:
 asarUnpack:
   - '**/node_modules/sharp/**'
   - '**/node_modules/@img/**'
-  - '**/node_modules/@napi-rs/canvas*/**'
   - '**/node_modules/@next/swc-*/**'
   - '**/node_modules/node-pty/**'
   - '**/node_modules/fsevents/**'
-  - '**/node_modules/web-tree-sitter/**'
   - '**/node_modules/@vscode/ripgrep/**'
 
 mac:
