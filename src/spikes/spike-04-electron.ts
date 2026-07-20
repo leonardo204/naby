@@ -115,7 +115,14 @@ async function runElectron(): Promise<ChildOutcome> {
         timedOut = true;
         child.kill('SIGKILL');
       }, RUN_TIMEOUT_MS);
-      child.on('exit', (code, signal) => {
+      // 'close', NOT 'exit'. 'exit' fires as soon as the process terminates,
+      // while its stdio pipes may still hold bytes we have not been handed yet;
+      // resolving there raced the last `emit('shutdown', …)` line and made
+      // assertion (f) read `storeClosed=undefined` on a genuinely clean
+      // teardown. The race is load-dependent, so it showed up when spike:04 ran
+      // inside `spike:nokeys` (after 02/03b) but almost never standalone.
+      // 'close' fires only once every stdio stream is drained and closed.
+      child.on('close', (code, signal) => {
         clearTimeout(timer);
         resolvePromise({ code, signal });
       });

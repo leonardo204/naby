@@ -331,14 +331,23 @@ async function run(): Promise<void> {
   // (f) report `undefined` even on a clean teardown. Wait for the flush, then
   // exit.
   //
+  // The guard must wait on a WRITE CALLBACK, not on the return value of
+  // `write('')`. `write()` returns false only when the internal buffer exceeds
+  // highWaterMark (64 KiB for a pipe); the `emit('shutdown', …)` line above is
+  // ~60 bytes, so it sits queued-but-under-watermark and `write('')` returns
+  // TRUE — we resolved immediately and exited before the kernel took the data,
+  // losing the event. That made assertion (f) report `storeClosed=undefined`
+  // intermittently (~1 run in 3) even though teardown was clean. The callback
+  // form fires only once the write has actually been handed off, which is the
+  // condition we actually need. Same fix as shell/bin/cock.mjs's flushAndExit.
+  //
   // `app.exit(0)` rather than `app.quit()`: quit runs the `before-quit` handler,
   // which belongs to main.ts and is not loaded here. Teardown has already been
   // done explicitly above, so exiting directly is both correct and the thing
   // that makes a HANG (assertion f) detectable rather than masked by a forced
   // kill in the driver.
   await new Promise<void>((resolve) => {
-    if (process.stdout.write('')) resolve();
-    else process.stdout.once('drain', () => resolve());
+    process.stdout.write('', 'utf8', () => resolve());
   });
   app.exit(0);
 }
