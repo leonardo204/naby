@@ -15,10 +15,74 @@
 // backoff net, not as the readiness signal.
 
 import { app, BrowserWindow, dialog } from 'electron';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
+
+// ---------------------------------------------------------------------------
+// Identity — must run before anything reads `userData`
+// ---------------------------------------------------------------------------
+//
+// Unpackaged, Electron names the app "Electron", so `userData` resolved to
+// Application Support/Electron in development and Application Support/Naby once
+// packaged. Two different data directories meant a developer's projects,
+// credentials and chat history simply were not the ones the shipped app would
+// use — and the intended difference between dev and prod is which ENGINE
+// answers, nothing else.
+//
+// `setName` must precede the first `app.getPath('userData')`; Electron caches
+// the resolved path.
+app.setName('Naby');
+
+/**
+ * Move data written under the old development directory to the unified one.
+ *
+ * Runs once and only when the destination does not exist, so it can never
+ * overwrite real data, and a failure is logged rather than thrown — an
+ * un-migratable old profile must not stop the app from starting. Without this,
+ * unifying the path would silently orphan every session recorded before it.
+ */
+function migrateLegacyUserData(): void {
+  const current = join(app.getPath('userData'), 'naby');
+  const legacy = join(dirname(app.getPath('userData')), 'Electron', 'naby');
+  if (legacy === current || !existsSync(legacy)) return;
+
+  // Two things this has to get right, both learned the hard way.
+  //
+  // Gate on the DATABASE, not on the directory: boot creates the directory (for
+  // credentials) before this runs, so a directory check is permanently true and
+  // the old sessions stay orphaned forever.
+  //
+  // And move the set ATOMICALLY. A -wal/-shm pair belongs to one specific
+  // database file; migrating them independently can pair a WAL with a different
+  // database, which is a corruption risk rather than an inconvenience. So the
+  // sidecars move only alongside the db they belong to, and only when the
+  // destination has no real database to lose.
+  const fromDb = join(legacy, 'app.db');
+  const toDb = join(current, 'app.db');
+  if (!existsSync(fromDb)) return;
+
+  // An empty file counts as absent: boot creates a 0-byte app.db before the
+  // schema is applied, and refusing to migrate because of that placeholder is
+  // how the real data gets stranded.
+  const destHasData = existsSync(toDb) && statSync(toDb).size > 0;
+  if (destHasData) return;
+
+  try {
+    mkdirSync(current, { recursive: true });
+    for (const name of ['app.db', 'app.db-wal', 'app.db-shm']) {
+      const from = join(legacy, name);
+      if (!existsSync(from)) continue;
+      rmSync(join(current, name), { force: true }); // clears the empty placeholder
+      renameSync(from, join(current, name));
+    }
+    console.log(`[userData] migrated the database from the legacy dev directory`);
+  } catch (err) {
+    // Never fatal: an un-migratable old profile must not stop the app.
+    console.warn(`[userData] could not migrate the legacy database: ${String(err)}`);
+  }
+}
 
 let bootResult: BootResult | undefined;
 let mainWindow: BrowserWindow | undefined;
@@ -71,6 +135,7 @@ function applyDevDockIcon(): void {
 async function start(): Promise<void> {
   await app.whenReady();
 
+  migrateLegacyUserData();
   applyDevDockIcon();
 
   try {
