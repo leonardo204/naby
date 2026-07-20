@@ -36,6 +36,13 @@
 //       status matches the runtime's independent answer
 //   (i) the chat stream's WebSocket channel is dispatched: a same-origin
 //       handshake from the page OPENS and is answered with a snapshot
+//   (j) a fresh profile's home screen lists NOTHING — not the machine-wide
+//       scan of ~/.claude/projects — and offers Open and Create
+//   (k) opening a project adds EXACTLY ONE entry, at the top, and it survives
+//       a real reload
+//   (l) the × removes that entry, the removal survives a reload, and
+//  (l2) the project's directory and past sessions are untouched — reopening it
+//       brings the same sessions back
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -48,7 +55,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ENTRY = resolve(ROOT, 'dist/electron/spike-f110-entry.mjs');
 const MARK = '##SPIKEF110##';
 
-const RUN_TIMEOUT_MS = 240_000;
+// Raised from 240s for the recents assertions (j/k/l), which add three real
+// page loads — persistence has to be proven across a navigation, not across a
+// re-render, so the reloads are the assertion and cannot be traded away.
+const RUN_TIMEOUT_MS = 420_000;
 
 /** The product name, duplicated from the shell's branding module on purpose.
  *  Importing it would make this assertion tautological — it would prove the two
@@ -379,6 +389,134 @@ function evaluate(outcome: ChildOutcome): Check[] {
         `remedy=${JSON.stringify(so.remedyText)} recheckButton=${String(so.recheckOffered)} ` +
         `composerDisabled=${String(so.composerDisabled)} tooltip=${JSON.stringify(so.tooltip)}`
       : 'no `signedOut` observation',
+  });
+
+  // -- (j) a fresh profile shows an empty recents list, not a disk scan -----
+  //
+  // THE ASSERTION THIS CHANGE EXISTS FOR. The home screen used to render
+  // `/api/sessions/projects`, i.e. every directory the user had ever run Claude
+  // Code in — 39 of them on the machine this was written on. The spike boots
+  // with a temp COCKPIT_HOME (so the app's own record of opened projects is
+  // empty) but the developer's REAL home (so the scan is still full). The scan
+  // must therefore return many while the screen shows none.
+  //
+  // `machineProjects > 0` is part of the assertion, not decoration: on a
+  // machine with no Claude history at all, "the list is empty" would be true
+  // for the wrong reason and would prove nothing.
+  const fresh = findOne(obs, 'fresh');
+  checks.push({
+    name: '(j) a fresh profile lands on an empty recents list — no machine-wide project scan — and is offered Open and Create',
+    pass:
+      fresh?.homeVisible === true &&
+      fresh.rows === 0 &&
+      fresh.emptyStateShown === true &&
+      // Not a blank panel: it explains itself.
+      typeof fresh.emptyStateWords === 'number' &&
+      (fresh.emptyStateWords as number) >= 10 &&
+      fresh.openAffordances === 1 &&
+      fresh.createAffordances === 1 &&
+      typeof fresh.machineProjects === 'number' &&
+      (fresh.machineProjects as number) > 0 &&
+      fresh.machinePathsOnScreen === 0,
+    evidence: fresh
+      ? `rowsOnHome=${String(fresh.rows)} emptyState=${String(fresh.emptyStateShown)} ` +
+        `emptyStateWords=${String(fresh.emptyStateWords)} openButtons=${String(fresh.openAffordances)} ` +
+        `createButtons=${String(fresh.createAffordances)} openLabel=${JSON.stringify(fresh.openLabel)} ` +
+        `projectsAScanWouldOffer=${String(fresh.machineProjects)} ofThoseRendered=${String(fresh.machinePathsOnScreen)}`
+      : 'no `fresh` observation',
+  });
+
+  // -- (k) opening a project adds exactly one entry, and it persists --------
+  //
+  // The expected count is derived from the FIXTURE's own observation rather
+  // than hard-coded, so a fixture that seeds a different number fails loudly
+  // instead of quietly agreeing with a stale constant.
+  const seeded = findOne(obs, 'seeded');
+  const seedCount = typeof seeded?.seeded === 'number' ? (seeded.seeded as number) : -1;
+  const afterOpen = findOne(obs, 'recentsAfterOpen');
+  const afterReload = findOne(obs, 'recentsAfterReload');
+  checks.push({
+    name: '(k) opening a project adds EXACTLY ONE entry, sorted to the top, and it survives a real reload',
+    pass:
+      seedCount > 0 &&
+      afterOpen?.rows === seedCount + 1 &&
+      afterOpen.targetRows === 1 &&
+      // lastOpenedAt is doing its job: the seeded entries are hours older.
+      afterOpen.targetIsFirst === true &&
+      // …and again after a full page load, so the list came from the persisted
+      // store rather than from React state that happened to survive.
+      afterReload?.reachedHome === true &&
+      afterReload.rows === seedCount + 1 &&
+      afterReload.targetRows === 1 &&
+      afterReload.targetIsFirst === true,
+    evidence:
+      afterOpen && afterReload
+        ? `seeded=${String(seedCount)} rowsAfterOpen=${String(afterOpen.rows)} (expected ${String(seedCount + 1)}) ` +
+          `entriesForOpenedProject=${String(afterOpen.targetRows)} sortedFirst=${String(afterOpen.targetIsFirst)} ` +
+          `afterReload: reachedHome=${String(afterReload.reachedHome)} rows=${String(afterReload.rows)} ` +
+          `entriesForOpenedProject=${String(afterReload.targetRows)} sortedFirst=${String(afterReload.targetIsFirst)}`
+        : 'missing `recentsAfterOpen` or `recentsAfterReload` observation',
+  });
+
+  // -- (l) the × removes it from the list, and that sticks ------------------
+  const removed = findOne(obs, 'removed');
+  const afterRemoveReload = findOne(obs, 'recentsAfterRemoveReload');
+  const tooltip = String(afterOpen?.removeTooltip ?? '');
+  checks.push({
+    name: '(l) the × removes that entry and only that entry, the removal survives a reload, and the button says it only touches the list',
+    pass:
+      removed?.clicked === true &&
+      removed.before === seedCount + 1 &&
+      removed.after === seedCount &&
+      removed.targetGone === true &&
+      removed.homeStillVisible === true &&
+      afterRemoveReload?.reachedHome === true &&
+      afterRemoveReload.rows === seedCount &&
+      afterRemoveReload.targetRows === 0 &&
+      // Unmistakable in the UI, per the requirement — the tooltip on the button
+      // itself, plus a standing note beside the list.
+      /stay on disk/i.test(tooltip) &&
+      String(afterOpen?.removalNote ?? '').length > 0,
+    evidence: removed
+      ? `clicked=${String(removed.clicked)} rows ${String(removed.before)} → ${String(removed.after)} ` +
+        `targetGone=${String(removed.targetGone)} stayedOnHome=${String(removed.homeStillVisible)} ` +
+        `afterReload: rows=${String(afterRemoveReload?.rows)} entriesForRemovedProject=${String(afterRemoveReload?.targetRows)} ` +
+        `tooltip=${JSON.stringify(tooltip)} note=${JSON.stringify(afterOpen?.removalNote ?? '')}`
+      : 'no `removed` observation',
+  });
+
+  // -- (l2) nothing on disk was touched ------------------------------------
+  //
+  // The half of "remove" that would be catastrophic to get wrong. Checked from
+  // both sides: the main process stats the directory and the fixture session
+  // file, and the app is asked for that path's session history — which must
+  // still answer — before the project is reopened and the SAME session is read
+  // back out of the DOM.
+  const untouched = findOne(obs, 'untouched');
+  const reopened = findOne(obs, 'reopened');
+  checks.push({
+    name: "(l2) removal touches no files: the directory, its contents and its past sessions survive, and reopening the project brings them back",
+    pass:
+      untouched?.dirExists === true &&
+      typeof untouched.dirEntries === 'number' &&
+      (untouched.dirEntries as number) >= 1 &&
+      untouched.sessionFileExists === true &&
+      typeof untouched.sessionsViaApi === 'number' &&
+      (untouched.sessionsViaApi as number) >= 1 &&
+      reopened?.reachedHome === true &&
+      reopened.rowBack === true &&
+      reopened.rows === seedCount + 1 &&
+      typeof reopened.sessions === 'number' &&
+      (reopened.sessions as number) >= 1 &&
+      // Read from the rendered row, not from the API a second time.
+      reopened.fixtureVisible === true,
+    evidence:
+      untouched && reopened
+        ? `projectDirExists=${String(untouched.dirExists)} entriesInDir=${String(untouched.dirEntries)} ` +
+          `sessionFileExists=${String(untouched.sessionFileExists)} sessionsFromApiWhileRemoved=${String(untouched.sessionsViaApi)} ` +
+          `afterReopen: reachedHome=${String(reopened.reachedHome)} entryBack=${String(reopened.rowBack)} rows=${String(reopened.rows)} ` +
+          `sessionsRenderedInRow=${String(reopened.sessions)} fixtureSessionTextVisible=${String(reopened.fixtureVisible)}`
+        : 'missing `untouched` or `reopened` observation',
   });
 
   // -- housekeeping ---------------------------------------------------------

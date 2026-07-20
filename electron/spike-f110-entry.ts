@@ -33,7 +33,7 @@
 // credential vault are never read or written.
 
 import { app } from 'electron';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boot, createMainWindow } from './boot.js';
@@ -72,6 +72,78 @@ writeFileSync(join(projectDir, 'README.md'), '# spike f110\n');
 /** How long any single "wait for the DOM to settle" poll may take. */
 const DOM_TIMEOUT_MS = 40_000;
 
+// ---------------------------------------------------------------------------
+// Recents fixture (assertions j / k / l)
+// ---------------------------------------------------------------------------
+
+/** Mirrors `encodePath` in @cockpit/shared-utils — the session directory name
+ *  for a cwd. Duplicated rather than imported so this file stays free of the
+ *  shell's module graph, exactly as EXPECTED_TITLE is duplicated in the driver. */
+const encodePath = (p: string): string => p.replace(/[/.]/g, '-');
+
+/**
+ * A REAL past session for the opened project, written into the temp
+ * COCKPIT_HOME (`ollama-sessions/<encoded-cwd>/`) — one of the four session
+ * sources the sessions API reads. It exists so assertion (l) can prove that
+ * removing a project from the list leaves its history intact: without a
+ * session there would be nothing to leave intact, and the assertion would pass
+ * vacuously. Nothing is written under the developer's real ~/.claude.
+ */
+const SESSION_FIXTURE_TEXT = 'spike f110 recents fixture message';
+const sessionDirFor = (cwd: string): string =>
+  join(process.env.COCKPIT_HOME ?? '', 'ollama-sessions', encodePath(cwd));
+
+function seedSessionHistory(cwd: string): string {
+  const dir = sessionDirFor(cwd);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, 'f110-recents-fixture.jsonl');
+  writeFileSync(
+    file,
+    `${JSON.stringify({ type: 'summary', summary: 'F110 recents fixture session' })}\n` +
+      `${JSON.stringify({ type: 'user', message: { role: 'user', content: SESSION_FIXTURE_TEXT } })}\n`,
+  );
+  return file;
+}
+
+/**
+ * 24 real, empty directories recorded as already-opened projects.
+ *
+ * WHY: assertion (c2) requires the home screen's list to actually OVERFLOW and
+ * scroll. Before this change the list was the machine-wide scan of
+ * ~/.claude/projects, so on any real machine it overflowed by accident; now the
+ * list is only what the user opened, and a one-item list cannot exercise the
+ * scroll bug (c2) exists to catch. So the fixture supplies the length.
+ *
+ * `activeIndex: -1` is deliberate: no seeded project may mount an iframe. Every
+ * pre-existing assertion here reads `document.querySelector('iframe')` — the
+ * first one in the DOM — and expects it to be the project the spike opened. One
+ * mounted iframe in, one mounted iframe out.
+ *
+ * Written through the app's own store file (~/.cockpit/projects.json in the
+ * TEMP home) and read back through /api/projects, so the list still arrives the
+ * way the app loads it.
+ */
+function seedRecents(parent: string, count: number): string[] {
+  const dirs: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const dir = join(parent, `f110-seed-${i}`);
+    mkdirSync(dir, { recursive: true });
+    dirs.push(dir);
+  }
+  const now = Date.now();
+  writeFileSync(
+    join(process.env.COCKPIT_HOME ?? '', 'projects.json'),
+    JSON.stringify({
+      // Staggered into the past, so the project the spike opens must sort to
+      // the top on its own merits rather than by luck of insertion order.
+      projects: dirs.map((cwd, i) => ({ cwd, lastOpenedAt: now - (i + 1) * 3_600_000 })),
+      activeIndex: -1,
+      collapsed: false,
+    }),
+  );
+  return dirs;
+}
+
 async function run(): Promise<void> {
   await app.whenReady();
 
@@ -84,18 +156,83 @@ async function run(): Promise<void> {
   // WITHOUT focus so a spike run does not steal the developer's keyboard.
   const win = createMainWindow(bootResult, { show: false });
   win.showInactive();
-  const loaded = new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), 90_000);
-    win.webContents.once('did-finish-load', () => {
-      clearTimeout(timer);
-      resolve(true);
+
+  /** A full page load, awaited to `did-finish-load`. Used for the initial boot
+   *  and for the reload assertions in (k)/(l), where "survives a reload" must
+   *  mean a real navigation that re-reads the persisted list from the server. */
+  const load = async (path: string): Promise<boolean> => {
+    const finished = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 90_000);
+      win.webContents.once('did-finish-load', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
     });
-  });
+    await win.loadURL(bootResult.windowUrl(path));
+    return finished;
+  };
+
+  // -------------------------------------------------------------------------
+  // (j) A FRESH PROFILE'S HOME SCREEN IS EMPTY — not a scan of the machine.
+  // -------------------------------------------------------------------------
+  //
+  // Observed FIRST, before anything is opened, because "fresh" is a state this
+  // spike destroys the moment it opens a project. COCKPIT_HOME is a temp dir,
+  // so the app's own record of opened projects is empty — but HOME is the
+  // developer's real one, so ~/.claude/projects still holds every directory
+  // they have ever run Claude Code in. That gap IS the assertion: the scan
+  // returns many, the home screen must show none.
+  //
+  // Only COUNTS cross the observation boundary. The paths in that scan are the
+  // developer's machine layout and have no business in a log.
+  const freshLoaded = await load('/');
+  const fresh = (await win.webContents.executeJavaScript(
+    `(async () => {
+       const deadline = Date.now() + ${DOM_TIMEOUT_MS};
+       const home = () => document.querySelector('[data-testid="home-screen"]');
+       while (Date.now() < deadline && !home()) {
+         await new Promise((r) => setTimeout(r, 200));
+       }
+       const el = home();
+       if (!el) return { homeVisible: false };
+       // The machine-wide session scan — the list the home screen used to be.
+       let scan = [];
+       try { scan = await (await fetch('/api/sessions/projects')).json(); } catch { scan = []; }
+       const paths = Array.isArray(scan) ? scan.map((p) => String(p.fullPath || '')).filter(Boolean) : [];
+       const text = el.innerText || '';
+       const openBtn = document.querySelectorAll('[data-testid="home-open-project"]');
+       const createBtn = document.querySelectorAll('[data-testid="home-create-project"]');
+       const emptyPanel = document.querySelector('[data-testid="home-empty-recents"]');
+       return {
+         homeVisible: true,
+         rows: document.querySelectorAll('[data-testid="recent-project"]').length,
+         emptyStateShown: !!emptyPanel,
+         // A blank panel is not an acceptable empty state: it has to say
+         // something and offer both ways in.
+         emptyStateWords: emptyPanel ? (emptyPanel.innerText || '').trim().split(/\\s+/).length : 0,
+         openAffordances: openBtn.length,
+         createAffordances: createBtn.length,
+         openLabel: openBtn[0] ? (openBtn[0].innerText || '').trim() : '',
+         // How many projects a disk scan WOULD have offered, and how many of
+         // their paths actually appear on screen. Counts only.
+         machineProjects: paths.length,
+         machinePathsOnScreen: paths.filter((p) => text.includes(p)).length,
+       };
+     })()`,
+  )) as Record<string, unknown>;
+  emit('fresh', { ...fresh, loaded: freshLoaded });
+
+  // Now the fixture: 24 already-opened projects (so the list can overflow for
+  // (c2)) and one real past session for the project about to be opened (so (l)
+  // has history to prove it did not destroy).
+  const seededDirs = seedRecents(tempProject, 24);
+  const sessionFixture = seedSessionHistory(projectDir);
+  emit('seeded', { seeded: seededDirs.length, sessionFixture });
+
   // `?cwd=` is the deterministic way in: Workspace adds the project to its list
   // and mounts its iframe, which is what gives us a tab bar to assert against.
   // Seeding ~/.cockpit/state.json instead would test our seeding, not the app.
-  await win.loadURL(bootResult.windowUrl(`/?cwd=${encodeURIComponent(projectDir)}`));
-  const windowLoaded = await loaded;
+  const windowLoaded = await load(`/?cwd=${encodeURIComponent(projectDir)}`);
   emit('window', { finished: windowLoaded, projectDir, projectName });
 
   // -------------------------------------------------------------------------
@@ -603,6 +740,163 @@ async function run(): Promise<void> {
      })()`,
   )) as Record<string, unknown>;
   emit('home', home);
+
+  // -------------------------------------------------------------------------
+  // (k) OPENING A PROJECT ADDS EXACTLY ONE ENTRY, AND IT SURVIVES A RELOAD.
+  // (l) THE × REMOVES IT FROM THE LIST ONLY — NOTHING ON DISK IS TOUCHED.
+  // -------------------------------------------------------------------------
+  //
+  // The home screen is already on screen (the (c) probe closed the last tab to
+  // get here), and the list should now be the 24 seeded projects plus the ONE
+  // this run opened, sorted most-recent-first — so the opened one is at the top.
+  const exec = (js: string) => win.webContents.executeJavaScript(js) as Promise<Record<string, unknown>>;
+  const q = JSON.stringify(projectDir);
+
+  /** Get back to the home screen after a reload: the app reopens the project it
+   *  had, so reaching home means closing its last tab — the same route a user
+   *  takes, and the one (c) already proves works.
+   *
+   *  THE VISIBLE IFRAME, not the first one in the DOM. By this point the run has
+   *  25 projects, and a reload mounts the iframe of the project that was active
+   *  when it was saved BEFORE `?cwd=` switches to another — so two iframes can
+   *  be mounted at once, the earlier one first in document order. "Close the
+   *  last tab" only goes home for the project the user is actually looking at
+   *  (Workspace guards GO_HOME on the sender being active), which is precisely
+   *  the one with a non-zero box: the others are `display:none`. */
+  const goHomeJs = `(async () => {
+       const deadline = Date.now() + ${DOM_TIMEOUT_MS};
+       const homeEl = () => document.querySelector('[data-testid="home-screen"]');
+       const visibleIframe = () =>
+         Array.from(document.querySelectorAll('iframe'))
+           .find((f) => f.getBoundingClientRect().width > 0) ?? null;
+       const doc = () => { try { return visibleIframe()?.contentDocument ?? null; } catch { return null; } };
+       const closeBtn = () => (doc() ? doc().querySelector('[data-testid="tab-close"]') : null);
+       while (Date.now() < deadline && !homeEl() && !closeBtn()) {
+         await new Promise((r) => setTimeout(r, 250));
+       }
+       if (!homeEl()) {
+         const b = closeBtn();
+         if (b) b.click();
+         while (Date.now() < deadline && !homeEl()) {
+           await new Promise((r) => setTimeout(r, 200));
+         }
+       }
+       return { reachedHome: !!homeEl() };
+     })()`;
+
+  const recentsJs = `(async () => {
+       const deadline = Date.now() + ${DOM_TIMEOUT_MS};
+       const rows = () => Array.from(document.querySelectorAll('[data-testid="recent-project"]'));
+       while (Date.now() < deadline && rows().length === 0 &&
+              !document.querySelector('[data-testid="home-empty-recents"]')) {
+         await new Promise((r) => setTimeout(r, 200));
+       }
+       const all = rows();
+       const target = all.filter((r) => r.getAttribute('data-cwd') === ${q});
+       const remove = target[0] ? target[0].querySelector('[data-testid="recent-remove"]') : null;
+       return {
+         homeVisible: !!document.querySelector('[data-testid="home-screen"]'),
+         rows: all.length,
+         targetRows: target.length,
+         // Ordering is the point of storing lastOpenedAt: the project opened
+         // most recently must lead a list whose other entries are hours older.
+         targetIsFirst: all.length > 0 && all[0].getAttribute('data-cwd') === ${q},
+         // The × must SAY that it only touches the list.
+         removeTooltip: remove ? (remove.getAttribute('title') || '') : '',
+         removalNote: (() => {
+           const n = document.querySelector('[data-testid="recents-removal-note"]');
+           return n ? (n.innerText || '').trim() : '';
+         })(),
+       };
+     })()`;
+
+  const recentsAfterOpen = await exec(recentsJs);
+  emit('recentsAfterOpen', recentsAfterOpen);
+
+  // Survives a reload — a real navigation, so the list comes back from
+  // ~/.cockpit/projects.json through /api/projects, not from React state.
+  await load('/');
+  const home1 = await exec(goHomeJs);
+  const recentsAfterReload = await exec(recentsJs);
+  emit('recentsAfterReload', { ...recentsAfterReload, ...home1 });
+
+  // The ×.
+  const removed = await exec(
+    `(async () => {
+       const rows = () => Array.from(document.querySelectorAll('[data-testid="recent-project"]'));
+       const target = () => document.querySelector('[data-testid="recent-project"][data-cwd=' + ${JSON.stringify(q)} + ']');
+       const before = rows().length;
+       const btn = document.querySelector('[data-testid="recent-remove"][data-cwd=' + ${JSON.stringify(q)} + ']');
+       if (!btn) return { clicked: false, before };
+       btn.click();
+       const deadline = Date.now() + ${DOM_TIMEOUT_MS};
+       while (Date.now() < deadline && target()) {
+         await new Promise((r) => setTimeout(r, 150));
+       }
+       return {
+         clicked: true,
+         before,
+         after: rows().length,
+         targetGone: !target(),
+         // Removing one project must not take the others with it, and must not
+         // throw the user off the home screen.
+         homeStillVisible: !!document.querySelector('[data-testid="home-screen"]'),
+       };
+     })()`,
+  );
+  emit('removed', removed);
+
+  await load('/');
+  const home2 = await exec(goHomeJs);
+  const recentsAfterRemoveReload = await exec(recentsJs);
+  emit('recentsAfterRemoveReload', { ...recentsAfterRemoveReload, ...home2 });
+
+  // NOTHING ON DISK MOVED. Checked from the main process (the directory and its
+  // contents) and from the app (the session history API still answers for that
+  // path), because "removed from the list" has to mean exactly that.
+  const sessionsApi = await exec(
+    `(async () => {
+       try {
+         const res = await fetch('/api/sessions/projects/' + encodeURIComponent(${JSON.stringify(encodePath(projectDir))}));
+         const body = await res.json();
+         return { count: Array.isArray(body) ? body.length : -1 };
+       } catch (e) { return { count: -2 }; }
+     })()`,
+  );
+  emit('untouched', {
+    dirExists: existsSync(projectDir),
+    dirEntries: existsSync(projectDir) ? readdirSync(projectDir).length : -1,
+    sessionFileExists: existsSync(sessionFixture),
+    sessionsViaApi: sessionsApi.count,
+  });
+
+  // Reopen it: the entry comes back AND its past sessions come back with it.
+  await load(`/?cwd=${encodeURIComponent(projectDir)}`);
+  const home3 = await exec(goHomeJs);
+  const reopened = await exec(
+    `(async () => {
+       const deadline = Date.now() + ${DOM_TIMEOUT_MS};
+       const row = () => document.querySelector('[data-testid="recent-project"][data-cwd=' + ${JSON.stringify(q)} + ']');
+       while (Date.now() < deadline && !row()) {
+         await new Promise((r) => setTimeout(r, 200));
+       }
+       if (!row()) return { rowBack: false };
+       const expand = row().querySelector('[data-testid="recent-expand"]');
+       if (expand) expand.click();
+       while (Date.now() < deadline &&
+              row().querySelectorAll('[data-testid="recent-session"]').length === 0) {
+         await new Promise((r) => setTimeout(r, 250));
+       }
+       return {
+         rowBack: true,
+         rows: document.querySelectorAll('[data-testid="recent-project"]').length,
+         sessions: row().querySelectorAll('[data-testid="recent-session"]').length,
+         // The session that existed before the removal, still readable in the UI.
+         fixtureVisible: (row().innerText || '').includes(${JSON.stringify(SESSION_FIXTURE_TEXT)}),
+       };
+     })()`,
+  );
+  emit('reopened', { ...reopened, ...home3 });
 
   // -- teardown ------------------------------------------------------------
   //
