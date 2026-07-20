@@ -35,7 +35,7 @@ import { createRequire } from 'node:module';
 // actual load happens lazily inside openSilently() below.
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import type { RuntimeMessage } from '../engine.js';
-import type { McpEntry, SessionRef, Store } from './store.js';
+import type { McpEntry, SessionRef, Store, UsageRecord } from './store.js';
 
 // ---------------------------------------------------------------------------
 // Experimental-warning suppression — TARGETED, not blanket.
@@ -99,7 +99,11 @@ function openSilently(path: string): DatabaseSyncType {
 // engine dimension to messages/memory would break the provider-switch property
 // that F1-05 and SPIKE-07 exist to protect.
 
-const SCHEMA_VERSION = 1;
+// v2 adds the `usage` table (F1-07) and the `settings` table (F1-08). Both are
+// additive and every statement is IF NOT EXISTS, so an existing v1 database
+// picks them up on next open with no data migration — the version is stamped to
+// record that it happened.
+const SCHEMA_VERSION = 2;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -130,6 +134,34 @@ CREATE TABLE IF NOT EXISTS memory (
 CREATE TABLE IF NOT EXISTS mcp_servers (
   name    TEXT PRIMARY KEY,
   payload TEXT NOT NULL                 -- the McpEntry, as JSON
+);
+
+-- F1-07. One row per ANSWERED TURN. Keyed by session id like everything else;
+-- engine/provider/model are recorded as properties of the turn so each row can
+-- be priced against the model that actually ran (a session may switch model or
+-- provider on any turn).
+CREATE TABLE IF NOT EXISTS usage (
+  session_id          TEXT NOT NULL,
+  seq                 INTEGER NOT NULL,   -- explicit ordering, as with messages
+  at                  INTEGER NOT NULL,
+  engine              TEXT NOT NULL,
+  provider_id         TEXT NOT NULL,
+  model               TEXT NOT NULL,
+  input_tokens        INTEGER NOT NULL,
+  output_tokens       INTEGER NOT NULL,
+  cached_input_tokens INTEGER NOT NULL,
+  cost_basis          TEXT NOT NULL,      -- 'metered' | 'subscription'
+  reported_cost_usd   REAL,               -- NULL when the engine reported none
+  PRIMARY KEY (session_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS usage_by_session ON usage (session_id, seq);
+
+-- F1-08. App-wide, provider-independent preferences (e.g. which provider
+-- answers). Deliberately NOT session-keyed: see the note on Store.getSetting.
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `;
 
@@ -276,6 +308,7 @@ export class SqliteStore implements Store {
     this.assertOpen();
     this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM memory WHERE session_id = ?').run(sessionId);
+    this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
   }
 
@@ -328,6 +361,101 @@ export class SqliteStore implements Store {
     const rows = this.db
       .prepare('SELECT key, value FROM memory WHERE session_id = ? ORDER BY key ASC')
       .all(sessionId) as { key: string; value: string }[];
+    const out: Record<string, string> = {};
+    for (const r of rows) out[r.key] = r.value;
+    return out;
+  }
+
+  // -- usage (F1-07) -------------------------------------------------------
+
+  appendUsage(sessionId: string, record: UsageRecord): void {
+    this.assertOpen();
+    if (!this.getSession(sessionId)) this.touchSession(sessionId);
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(seq), -1) AS m FROM usage WHERE session_id = ?')
+      .get(sessionId) as { m: number } | undefined;
+    const seq = Number(row?.m ?? -1) + 1;
+    this.db
+      .prepare(
+        `INSERT INTO usage (
+           session_id, seq, at, engine, provider_id, model,
+           input_tokens, output_tokens, cached_input_tokens,
+           cost_basis, reported_cost_usd
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sessionId,
+        seq,
+        record.at,
+        record.engine,
+        record.providerId,
+        record.model,
+        record.inputTokens,
+        record.outputTokens,
+        record.cachedInputTokens,
+        record.costBasis,
+        record.reportedCostUsd ?? null,
+      );
+  }
+
+  listUsage(sessionId: string): UsageRecord[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare('SELECT * FROM usage WHERE session_id = ? ORDER BY seq ASC')
+      .all(sessionId) as {
+      at: number;
+      engine: string;
+      provider_id: string;
+      model: string;
+      input_tokens: number;
+      output_tokens: number;
+      cached_input_tokens: number;
+      cost_basis: string;
+      reported_cost_usd: number | null;
+    }[];
+    return rows.map((r) => {
+      const record: UsageRecord = {
+        at: Number(r.at),
+        engine: r.engine,
+        providerId: r.provider_id,
+        model: r.model,
+        inputTokens: Number(r.input_tokens),
+        outputTokens: Number(r.output_tokens),
+        cachedInputTokens: Number(r.cached_input_tokens),
+        costBasis: r.cost_basis === 'subscription' ? 'subscription' : 'metered',
+      };
+      if (r.reported_cost_usd !== null && r.reported_cost_usd !== undefined) {
+        record.reportedCostUsd = Number(r.reported_cost_usd);
+      }
+      return record;
+    });
+  }
+
+  // -- app settings (F1-08) ------------------------------------------------
+
+  getSetting(key: string): string | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.assertOpen();
+    this.db
+      .prepare(
+        `INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  listSettings(): Record<string, string> {
+    this.assertOpen();
+    const rows = this.db
+      .prepare('SELECT key, value FROM settings ORDER BY key ASC')
+      .all() as { key: string; value: string }[];
     const out: Record<string, string> = {};
     for (const r of rows) out[r.key] = r.value;
     return out;

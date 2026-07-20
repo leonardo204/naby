@@ -165,6 +165,72 @@ const onboarding = {
   complete: (): Promise<Result<void>> => ipcRenderer.invoke('onboarding:complete'),
 };
 
+// ---------------------------------------------------------------------------
+// F1-09 — auto-update (contract §1.3)
+// ---------------------------------------------------------------------------
+//
+// `update:status` is the FIRST M→R channel on this bridge, so it is also the
+// first place the one-function-per-channel rule has to be restated for a
+// direction it has not covered before. It holds: `onStatus` hardcodes its
+// channel name and there is no `on(channel, fn)` helper, for the same reason
+// there is no `invoke(channel, payload)` — a generic listener registrar would
+// let page code subscribe to every present and future main→renderer message.
+//
+// TWO THINGS THE CALLBACK MUST NOT SEE, both of which the naive wiring leaks:
+//
+//   1. `IpcRendererEvent`. It carries `sender` — a live `ipcRenderer` — so
+//      passing the event through would hand the renderer the exact object this
+//      whole file exists to withhold, through the back door of an event
+//      listener. Only `status` crosses.
+//   2. A raw `ipcRenderer.off` binding. The unsubscriber returned below closes
+//      over the wrapper, so the caller can detach its own listener and nothing
+//      else.
+//
+// The status object is plain data by construction (see updater.ts) — the same
+// structured-clone discipline as everything else here.
+
+type UpdateStatus = {
+  state: 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'unsupported';
+  version?: string;
+  percent?: number;
+  reason?: string;
+  error?: string;
+  releasesUrl: string;
+  currentVersion: string;
+};
+
+const updates = {
+  /** Current status, for a component that mounted after the last push. */
+  get: (): Promise<Result<UpdateStatus>> => ipcRenderer.invoke('update:get'),
+
+  /** User-initiated check. Resolves when the check settles, not when it starts. */
+  check: (): Promise<Result<UpdateStatus>> => ipcRenderer.invoke('update:check'),
+
+  /** Restart into an already-downloaded update. No-op unless state is `ready`. */
+  install: (): Promise<Result<void>> => ipcRenderer.invoke('update:install'),
+
+  /**
+   * Open the public releases page in the user's browser.
+   *
+   * This is the whole point of the `unsupported` state: on an unsigned macOS
+   * build the app CANNOT update itself (Squirrel.Mac validates against the
+   * running app's designated requirement), so the UI must offer a real way
+   * forward rather than a disabled button.
+   */
+  openReleasesPage: (): Promise<Result<void>> => ipcRenderer.invoke('update:open-releases'),
+
+  /** Subscribe to `update:status`. Returns an unsubscriber. */
+  onStatus: (fn: (status: UpdateStatus) => void): (() => void) => {
+    const wrapped = (_event: unknown, status: UpdateStatus): void => {
+      fn(status);
+    };
+    ipcRenderer.on('update:status', wrapped);
+    return () => {
+      ipcRenderer.off('update:status', wrapped);
+    };
+  },
+};
+
 contextBridge.exposeInMainWorld('naby', {
   /** Per-launch session token (design §5.4). Required on every request. */
   sessionToken,
@@ -180,4 +246,6 @@ contextBridge.exposeInMainWorld('naby', {
   providers,
   /** F1-06 — first-run wizard state. */
   onboarding,
+  /** F1-09 — auto-update status and controls. */
+  updates,
 });

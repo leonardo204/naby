@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  F1-10 — hardened runtime entitlements (design §6.3).
+
+  `hardenedRuntime: true` is required for notarisation, and the hardened runtime
+  is precisely what makes these two entitlements necessary: it blocks writable-
+  executable memory by default, and V8 is a JIT. Without them the app is signed,
+  notarised, and crashes on launch — which is the worst possible failure mode,
+  because every check in the pipeline passes.
+
+    allow-jit                        V8 needs MAP_JIT pages.
+    allow-unsigned-executable-memory V8 writes code into them. Both are needed;
+                                     allow-jit alone is not sufficient for
+                                     Electron.
+
+  DELIBERATELY ABSENT — do not add without a specific reason:
+
+    com.apple.security.cs.disable-library-validation
+      Only needed to load unsigned third-party native modules. Everything we
+      ship is signed by the same team, and this entitlement is a real weakening
+      of the runtime, so it stays off until a concrete dlopen actually fails.
+
+    com.apple.security.cs.allow-dyld-environment-variables
+      Same story — a debugging convenience that widens the attack surface.
+
+    com.apple.security.app-sandbox
+      This is a Developer ID build for direct distribution, NOT the Mac App
+      Store. The App Sandbox would break the embedded loopback HTTP server the
+      whole shell runs on (design §2.2).
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>

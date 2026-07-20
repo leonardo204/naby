@@ -40,6 +40,25 @@ export type RunTurnOptions = {
    * aborts the turn. */
   onEvent?: (ev: EngineEvent) => void;
   signal?: AbortSignal;
+
+  // -- usage accounting (F1-07) ---------------------------------------------
+  //
+  // These two describe the ENGINE that is about to run, which `runTurn` cannot
+  // infer: `Engine` is an interface and deliberately says nothing about which
+  // backend implements it or what it costs. The composition root (the shell's
+  // adapter) picks the engine, so it is the only place that knows.
+  //
+  // They are recorded, never used for control flow — the keying invariant
+  // (contract §6) is untouched.
+
+  /** Which backend answers: 'ai-sdk' | 'dev-claude'. Default 'ai-sdk'. */
+  engineId?: string;
+  /**
+   * Whether this turn's tokens are billed to the user. Default 'metered'.
+   * 'subscription' means a local sign-in paid for it and no dollar figure may
+   * be presented as a charge (see runtime/usage.ts).
+   */
+  costBasis?: 'metered' | 'subscription';
 };
 
 /** Run one turn on the given engine, folding its events into the store. Returns
@@ -58,6 +77,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   const signal = opts.signal ?? controller.signal;
 
   const events: EngineEvent[] = [];
+
+  // The model that ACTUALLY answered, for the usage row (F1-07).
+  //
+  // `model.model` is what we ASKED for, and it is routinely not what ran: it is
+  // optional (the dev engine has its own default and picks one itself), and an
+  // engine may resolve an alias to a concrete id. Pricing is keyed by model, so
+  // recording the request rather than the result would price the wrong thing —
+  // or, when we asked for nothing at all, price nothing. Every engine reports
+  // what it settled on in its `init` event, so that is what gets recorded.
+  let answeringModel = model.model ?? '';
 
   // -- Tool-call PAIRING -----------------------------------------------------
   // A persisted tool result is only replayable if the assistant tool-call that
@@ -114,7 +143,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     events.push(ev);
     opts.onEvent?.(ev);
 
-    if (ev.kind === 'text' && ev.role === 'assistant') {
+    if (ev.kind === 'init') {
+      if (ev.model) answeringModel = ev.model;
+    } else if (ev.kind === 'text' && ev.role === 'assistant') {
       store.appendMessage(sessionId, { role: 'assistant', content: ev.text });
     } else if (ev.kind === 'tool_request') {
       pending.set(ev.toolCallId, ev.toolName);
@@ -132,6 +163,34 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       });
     } else if (ev.kind === 'tool_result') {
       closeCall(ev.toolCallId, ev.output);
+    } else if (ev.kind === 'result') {
+      // F1-07. One row per ANSWERED turn, recorded here rather than in the
+      // shell adapter so that every caller of runTurn — the app, the spikes, a
+      // future scheduled task — accounts identically and none can forget.
+      //
+      // A pure failure (no tokens reported, not ok) is NOT recorded: a row of
+      // zeros would inflate the turn count without adding information. A turn
+      // that failed AFTER consuming tokens still is, because those tokens were
+      // still billed.
+      const usage = ev.usage;
+      const anyTokens =
+        (usage?.inputTokens ?? 0) > 0 ||
+        (usage?.outputTokens ?? 0) > 0 ||
+        (usage?.cachedInputTokens ?? 0) > 0;
+      if (ev.ok || anyTokens) {
+        const costBasis = opts.costBasis ?? 'metered';
+        store.appendUsage(sessionId, {
+          at: Date.now(),
+          engine: opts.engineId ?? 'ai-sdk',
+          providerId: model.providerId,
+          model: answeringModel,
+          inputTokens: usage?.inputTokens ?? 0,
+          outputTokens: usage?.outputTokens ?? 0,
+          cachedInputTokens: usage?.cachedInputTokens ?? 0,
+          costBasis,
+          ...(ev.costUsd !== undefined ? { reportedCostUsd: ev.costUsd } : {}),
+        });
+      }
     }
   }
 

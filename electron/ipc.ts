@@ -27,10 +27,11 @@
 // second boot in the same process (the spike does this) does not hit
 // "Attempted to register a second handler".
 
-import { ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { ipcMain, webContents, type IpcMainInvokeEvent } from 'electron';
 import type { CredentialVault } from './credentials.js';
 import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
+import type { Updater, UpdateStatus } from './updater.js';
 import type { ProviderDescription, ProviderProfile } from '../dist/naby-runtime.mjs';
 
 // ---------------------------------------------------------------------------
@@ -70,9 +71,33 @@ export const CHANNELS = [
   'provider:select',
   'onboarding:state',
   'onboarding:complete',
+  // -- F1-09 auto-update ---------------------------------------------------
+  //
+  // Contract §1.3 defines `update:status` as M→R only, which is the PUSH of a
+  // status change. These three are the request side that a "check for updates"
+  // button and a "restart now" button need, and they are named here as an
+  // explicit, minimal extension of the contract rather than smuggled in through
+  // a generic invoke:
+  //
+  //   update:get      — the current status, for a renderer that just mounted
+  //                     and missed the pushes that came before it
+  //   update:check    — user-initiated check, resolves when the check settles
+  //   update:install  — apply a DOWNLOADED update now (no-op unless `ready`)
+  //   update:open-releases — the `unsupported` escape hatch: open the public
+  //                     releases page in the real browser
+  //
+  // None of them can start a download of an arbitrary URL or influence WHERE an
+  // update comes from; the feed is compiled into app-update.yml at build time.
+  'update:get',
+  'update:check',
+  'update:install',
+  'update:open-releases',
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
+
+/** The M→R push channel of contract §1.3. Not an `ipcMain.handle` channel. */
+export const UPDATE_STATUS_EVENT = 'update:status';
 
 export type IpcDeps = {
   vault: CredentialVault;
@@ -89,6 +114,12 @@ export type IpcDeps = {
     describeProviders: () => ProviderDescription[];
     defaultProfileFor: (kind: ProviderProfile['kind']) => ProviderProfile;
   }>;
+  /**
+   * F1-09. Optional so the spike harness can register IPC without an updater;
+   * when absent the update channels answer a well-formed `unsupported` rather
+   * than failing, which is the same shape the renderer already has to handle.
+   */
+  updater?: Updater;
   log?: (msg: string) => void;
 };
 
@@ -244,7 +275,54 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     return ok(undefined as void);
   });
 
+  // -- auto-update (F1-09) -------------------------------------------------
+  //
+  // The `unsupported` fallback below is not defensive padding. It is the SAME
+  // state the contract already requires for unsigned macOS, so a renderer that
+  // handles the platform case correctly handles this one for free — there is no
+  // second code path for "the updater was not wired up".
+
+  const unavailable = (): UpdateStatus => ({
+    state: 'unsupported',
+    reason: 'Updates are not available in this build.',
+    releasesUrl: 'https://github.com/leonardo204/naby/releases/latest',
+    currentVersion: '0.0.0',
+  });
+
+  handle('update:get', () => ok(deps.updater ? deps.updater.status() : unavailable()));
+
+  handle('update:check', async () => {
+    if (!deps.updater) return ok(unavailable());
+    return ok(await deps.updater.checkNow());
+  });
+
+  handle('update:install', () => {
+    deps.updater?.installNow();
+    return ok(undefined as void);
+  });
+
+  handle('update:open-releases', async () => {
+    if (deps.updater) await deps.updater.openReleasesPage();
+    return ok(undefined as void);
+  });
+
+  // The M→R half of contract §1.3. Broadcast to every live webContents rather
+  // than to a remembered window handle: the window can be closed and reopened
+  // (macOS `activate`), and a stale handle would silently stop updating the UI.
+  const unsubscribe = deps.updater?.onStatus((status) => {
+    for (const wc of webContents.getAllWebContents()) {
+      if (wc.isDestroyed()) continue;
+      try {
+        wc.send(UPDATE_STATUS_EVENT, status);
+      } catch {
+        // A webContents that died between the liveness check and the send is
+        // not an error worth surfacing; the next push finds it gone.
+      }
+    }
+  });
+
   return () => {
+    unsubscribe?.();
     for (const channel of CHANNELS) ipcMain.removeHandler(channel);
   };
 }

@@ -52,6 +52,12 @@ async function start(): Promise<void> {
 
   openWindow();
 
+  // F1-09. Started HERE and nowhere else — `boot()` builds the updater but does
+  // not run it, so the SPIKE-04 entry that shares this boot path performs no
+  // network I/O. `start()` itself only arms timers; the first check is delayed
+  // (see updater.ts) so it never competes with the window's first paint.
+  bootResult.updater.start();
+
   // macOS convention: clicking the dock icon with no windows open reopens one.
   // The server is still running at that point, so this is just a window.
   app.on('activate', () => {

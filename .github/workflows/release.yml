@@ -1,0 +1,241 @@
+# .github/workflows/release.yml
+#
+# F1-10 — the three-OS release pipeline.
+#
+# WHY THREE SEPARATE JOBS AND NOT A ONE-JOB CROSS-BUILD. `.dmg` has a hard
+# macOS-host guard in electron-builder's own source: it will refuse, not degrade,
+# on a Linux runner. That alone forces macOS onto a macOS runner, and once the
+# matrix exists there is no reason to cross-build the other two either — Windows
+# NSIS and Linux AppImage/deb are each cheapest and least surprising on their
+# native runner. Note `macos-latest` is arm64, which is why the mac target is
+# pinned to arm64 in electron-builder.yml rather than attempting a universal
+# binary (the universal asar merge is known-fragile and buys us nothing yet).
+#
+# BUILD ORDER IS A REAL DEPENDENCY, NOT A STYLE CHOICE. `build:runtime` produces
+# `dist/naby-runtime.mjs`, which the shell's build imports; `build:shell` chains
+# `build:runtime` for exactly that reason, and `build:app` chains `build:shell`
+# then `build:electron`. Every job below calls `npm run dist:<os>`, which starts
+# from `build:app` — so the ordering is enforced by the npm scripts and is not
+# something this workflow can get wrong by listing steps in the wrong order.
+#
+# TAG-TRIGGERED. A release is `git tag v1.2.3 && git push --tags`. Pushing to a
+# branch builds nothing; there is a manual `workflow_dispatch` for dry runs that
+# deliberately does NOT publish.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to a GitHub Release (otherwise build only)'
+        type: boolean
+        default: false
+
+# Required so electron-builder can create the release and upload assets.
+# Scoped to contents deliberately — nothing here needs packages:, id-token: or
+# anything wider.
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS — the only job that signs, notarises and staples
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS (dmg + zip, signed & notarised)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The shell is a submodule and the app does not build without it.
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install shell dependencies
+        working-directory: shell
+        run: npm ci
+
+      # -----------------------------------------------------------------------
+      # THE SIGNING IDENTITY IS A ONE-WAY DOOR — see electron-builder.yml.
+      # Squirrel.Mac validates every future update against the designated
+      # requirement of the app the user is ALREADY RUNNING. If this job ever
+      # signs with a different certificate than the previous release, every
+      # installed user silently loses auto-update forever and has to re-download
+      # by hand. macOS offers no migration path for this; Windows does.
+      #
+      # CSC_IDENTITY_AUTO_DISCOVERY is false so electron-builder cannot pick a
+      # certificate off the keychain by itself — the identity is CSC_NAME and
+      # nothing else.
+      # -----------------------------------------------------------------------
+      - name: Import Developer ID certificate
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo "::error::CSC_LINK is not set. macOS releases must be signed — see the secrets table in the workflow header."
+            exit 1
+          fi
+          echo "certificate present; electron-builder will import it"
+
+      - name: Build, sign, notarise, staple
+        env:
+          # Signing. CSC_LINK/CSC_KEY_PASSWORD are consumed by electron-builder
+          # directly to import the .p12 into a temporary keychain.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # Notarisation (scripts/notarize.mjs → notarytool). altool is retired;
+          # there is no fallback and none should be added.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Publishing only. This token never enters the artifact — the feed repo
+          # is public precisely so no credential has to ship (design §6.3).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            npm run build:app && node scripts/build-dist.mjs --mac --publish always
+          else
+            npm run build:app && node scripts/build-dist.mjs --mac --publish never
+          fi
+
+      # The acceptance check for the macOS half of F1-10, run against the real
+      # artifact rather than assumed from a green build. codesign proves it is a
+      # Developer ID signature (not ad-hoc, which would pass a naive check and
+      # break every future update); spctl proves Gatekeeper will open it; stapler
+      # proves the ticket is embedded so the check works offline.
+      - name: Verify signature, Gatekeeper and staple
+        run: npm run verify:mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows — NSIS, UNSIGNED, and auto-update works anyway
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows (NSIS, unsigned)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install shell dependencies
+        working-directory: shell
+        run: npm ci
+
+      # NO SIGNING STEP, DELIBERATELY (design §6.2). electron-updater skips
+      # signature verification entirely when `publisherName` is null, which is
+      # exactly the unsigned case, so Windows auto-update works today with no
+      # certificate. Adding one later is a config change in electron-builder.yml
+      # (azureSignOptions + a publisherName ARRAY containing the old and new
+      # names so existing installs are not stranded), not a change here.
+      #
+      # A .pfx in CI secrets is no longer an option regardless: OV code-signing
+      # keys have been required to live on FIPS 140-2 L2 hardware or a cloud HSM
+      # since June 2023.
+      - name: Build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            npm run build:app && node scripts/build-dist.mjs --win --publish always
+          else
+            npm run build:app && node scripts/build-dist.mjs --win --publish never
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux — AppImage AND deb. The deb is not optional.
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux (AppImage + deb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # electron-builder shells out to these to build the .deb.
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot dpkg rpm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install shell dependencies
+        working-directory: shell
+        run: npm ci
+
+      # BOTH targets ship, and the .deb is the one that actually launches on a
+      # modern Ubuntu: Chromium's SUID sandbox needs chrome-sandbox root-owned
+      # 4755, a user-owned FUSE mount (which is what an AppImage is) cannot
+      # provide that, and Ubuntu 23.10+ blocks the unprivileged-namespace
+      # fallback. An AppImage-only release fails to start without --no-sandbox.
+      - name: Build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            npm run build:app && node scripts/build-dist.mjs --linux --publish always
+          else
+            npm run build:app && node scripts/build-dist.mjs --linux --publish never
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/latest-linux.yml
+          if-no-files-found: error

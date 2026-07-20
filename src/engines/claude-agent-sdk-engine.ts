@@ -28,24 +28,116 @@
 // but the wrapper is the source of truth because propagation of `updatedInput`
 // into the in-process MCP handler is not something we want to depend on.
 
-import {
-  createSdkMcpServer,
-  query,
-  tool,
-  type HookCallback,
-  type HookInput,
-  type PreToolUseHookInput,
-  type PreToolUseHookSpecificOutput,
-} from '@anthropic-ai/claude-agent-sdk';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
+import type {
+  HookCallback,
+  HookInput,
+  PreToolUseHookInput,
+  PreToolUseHookSpecificOutput,
+} from '@anthropic-ai/claude-agent-sdk';
 import type {
   Engine,
   EngineEvent,
   EngineRunInput,
   JsonSchema,
+  RuntimeMessage,
   ToolCall,
   Usage,
 } from '../runtime/engine.js';
+
+// ---------------------------------------------------------------------------
+// THE LAZY BOUNDARY — why this is not a plain `import` (design §3.3).
+// ---------------------------------------------------------------------------
+//
+// The Agent SDK must NEVER be in a shipped build. `electron-builder.yml`
+// already excludes `@anthropic-ai/claude-agent-sdk*` from the package, so in a
+// packaged app the module is simply ABSENT. A static import here would defeat
+// that twice over:
+//
+//   1. `scripts/build-runtime.mjs` bundles this file into
+//      `dist/naby-runtime.mjs` with `external: []` — every static import is
+//      INLINED. A static SDK import would therefore ship the SDK inside our own
+//      bundle, straight past the electron-builder exclusion.
+//   2. Even if it were excluded, a static import is evaluated at module load,
+//      so the shell's engine module would throw on import in the packaged app —
+//      taking the PRODUCTION path down with it.
+//
+// So the specifier is resolved at RUNTIME, through a require created from this
+// module's own URL, and imported by file URL. Both are opaque to esbuild's
+// static analysis, which is the point: nothing about the SDK ends up in the
+// bundle, and a missing module is a `null` we can explain rather than a crash.
+//
+// `import type` above is erased at compile time and costs nothing at runtime.
+
+const AGENT_SDK_SPECIFIER = '@anthropic-ai/claude-agent-sdk';
+
+/** The three runtime values this engine uses. Typed off the real package so a
+ *  bump that changes a signature fails `npm run typecheck`, not production. */
+type AgentSdk = {
+  createSdkMcpServer: typeof import('@anthropic-ai/claude-agent-sdk').createSdkMcpServer;
+  query: typeof import('@anthropic-ai/claude-agent-sdk').query;
+  tool: typeof import('@anthropic-ai/claude-agent-sdk').tool;
+};
+
+/**
+ * Where the Agent SDK lives, or null when it is not installed.
+ *
+ * Resolution is relative to THIS module's URL, which is what makes it correct
+ * in both linkages: under `tsx` that is `src/engines/`, and inside the bundle it
+ * is `dist/naby-runtime.mjs` — both walk up to the parent repo's node_modules.
+ */
+export function resolveClaudeAgentSdkPath(): string | null {
+  try {
+    return createRequire(import.meta.url).resolve(AGENT_SDK_SPECIFIER);
+  } catch {
+    return null;
+  }
+}
+
+/** True when the dev engine can actually run here. Cheap; no module is loaded. */
+export function isClaudeAgentSdkAvailable(): boolean {
+  return resolveClaudeAgentSdkPath() !== null;
+}
+
+/** What a caller is told when the SDK is missing. Written for a NON-DEVELOPER:
+ *  the dev engine is a development-only path, so the actionable advice is to
+ *  configure a provider key, not to install an npm package. */
+export const AGENT_SDK_UNAVAILABLE_MESSAGE =
+  'The built-in development model is not part of this installed app, so it cannot answer. ' +
+  'Open Settings (gear icon, bottom left) → "AI provider", pick a provider and paste its API key. ' +
+  '(Developers: the development model only works when running from a source checkout, ' +
+  'where @anthropic-ai/claude-agent-sdk is installed.)';
+
+let cachedSdk: Promise<AgentSdk> | undefined;
+
+/** Load the SDK once per process. Rejects with a readable error when absent. */
+async function loadAgentSdk(): Promise<AgentSdk> {
+  if (!cachedSdk) {
+    cachedSdk = (async (): Promise<AgentSdk> => {
+      const resolved = resolveClaudeAgentSdkPath();
+      if (!resolved) throw new Error(AGENT_SDK_UNAVAILABLE_MESSAGE);
+      // Imported by FILE URL, from a variable: esbuild cannot fold this into
+      // the bundle, and node needs a URL (not a path) on Windows.
+      //
+      // `webpackIgnore` is not decoration. The shell is a Next/webpack app that
+      // imports our esbuild bundle, so this expression gets analyzed a SECOND
+      // time by webpack, which reports "Critical dependency: the request of a
+      // dependency is an expression" and would try to trace it. esbuild
+      // preserves this specific comment through the bundle, so the marker
+      // written here is the one webpack reads there — and the import stays a
+      // plain runtime import in both toolchains, which is the whole point.
+      return (await import(/* webpackIgnore: true */ pathToFileURL(resolved).href)) as AgentSdk;
+    })().catch((e) => {
+      // Do not cache a failure forever — a dev who runs `npm i` mid-session
+      // should not have to restart the app to pick the engine up.
+      cachedSdk = undefined;
+      throw e;
+    });
+  }
+  return cachedSdk;
+}
 
 // ---------------------------------------------------------------------------
 // Small async channel: hooks, the tool handler, and the query-message loop all
@@ -145,6 +237,31 @@ function extractText(content: unknown): string {
     .join('');
 }
 
+/**
+ * Anthropic's raw token counts -> our normalized `Usage` (see the `Usage` doc
+ * in runtime/engine.ts).
+ *
+ * Exported so the normalization is assertable directly, without a live model
+ * call: this is the single most costly thing in the file to get wrong quietly,
+ * because a wrong answer here does not fail — it just prices the turn by three
+ * orders of magnitude.
+ */
+export function normalizeAgentSdkUsage(raw: {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}): Usage {
+  const cacheRead = raw.cache_read_input_tokens ?? 0;
+  const cacheWrite = raw.cache_creation_input_tokens ?? 0;
+  return {
+    // Anthropic reports these three DISJOINTLY; our contract wants a total.
+    inputTokens: (raw.input_tokens ?? 0) + cacheRead + cacheWrite,
+    outputTokens: raw.output_tokens ?? 0,
+    cachedInputTokens: cacheRead,
+  };
+}
+
 function lastUserText(messages: EngineRunInput['messages']): string {
   const users = messages.filter((m) => m.role === 'user');
   const last = users[users.length - 1];
@@ -152,6 +269,72 @@ function lastUserText(messages: EngineRunInput['messages']): string {
   // fall back to any content we have
   const any = messages.find((m) => 'content' in m);
   return any && 'content' in any ? any.content : '';
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-TURN — divergence point "loop ownership", normalized (design §3.4).
+// ---------------------------------------------------------------------------
+//
+// WE own the transcript (contract §6): `runTurn` reloads the whole history from
+// SQLite and re-sends it every turn, which is exactly what makes a session
+// provider-independent. The Agent SDK, though, takes a single `prompt` and owns
+// its own loop — it has no `messages` array to hand our history to, and its own
+// session resumption is keyed to ITS transcript directory, which contract §6
+// says we ignore.
+//
+// So the history is RENDERED into the prompt: prior turns as a clearly-fenced
+// context block, then the new user turn as the actual instruction. This keeps
+// the store as the single source of truth (a session started on the dev engine
+// and continued on a provider — or the reverse — replays identically), at the
+// cost of prior turns being framed as text rather than as native turns. That
+// tradeoff is deliberate and is the only shape the SDK's single-prompt entry
+// point allows.
+//
+// A first turn renders as the bare user text, so the single-turn spikes see
+// exactly the prompt they saw before this existed.
+
+function renderHistoryLine(m: RuntimeMessage): string | null {
+  if (m.role === 'tool') {
+    const status = m.output.isError ? ' (failed)' : '';
+    return `Tool ${m.toolName}${status} returned: ${m.output.content}`;
+  }
+  if (m.role === 'assistant') {
+    if (m.toolCalls?.length) {
+      const names = m.toolCalls.map((c) => c.toolName).join(', ');
+      return m.content ? `Assistant: ${m.content}` : `Assistant called tool: ${names}`;
+    }
+    return m.content ? `Assistant: ${m.content}` : null;
+  }
+  return m.content ? `User: ${m.content}` : null;
+}
+
+/** The prompt for this turn: prior history as context, then the new user text. */
+export function renderPrompt(messages: EngineRunInput['messages']): string {
+  // `runTurn` appends the user turn BEFORE calling the engine, so the last user
+  // message is the new one and everything before it is history.
+  let lastUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  const current = lastUserText(messages);
+  const prior = lastUserIndex >= 0 ? messages.slice(0, lastUserIndex) : [];
+  const lines = prior
+    .map(renderHistoryLine)
+    .filter((l): l is string => l !== null && l.length > 0);
+  if (lines.length === 0) return current;
+
+  return [
+    'Earlier messages in this conversation, for context only — do not answer them again:',
+    '<conversation_history>',
+    ...lines,
+    '</conversation_history>',
+    '',
+    'The user now says:',
+    current,
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +355,24 @@ export class ClaudeAgentSdkEngine implements Engine {
   diagnostics: ClaudeEngineDiagnostics = { stderr: [], shadowWarningSeen: false };
 
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
+    // The SDK is loaded HERE, inside run(), so that constructing the engine is
+    // always safe. A packaged build can hold a reference to this class without
+    // the module existing; only an attempt to actually answer fails, and it
+    // fails as a surfaced EngineEvent rather than a thrown module-load error.
+    let sdk: AgentSdk;
+    try {
+      sdk = await loadAgentSdk();
+    } catch (e) {
+      yield {
+        kind: 'error',
+        message: e instanceof Error ? e.message : String(e),
+        code: 'DEV_ENGINE_UNAVAILABLE',
+      };
+      yield { kind: 'result', ok: false };
+      return;
+    }
+    const { createSdkMcpServer, query, tool } = sdk;
+
     const channel = new Channel<EngineEvent>();
     const diagnostics: ClaudeEngineDiagnostics = {
       stderr: [],
@@ -319,7 +520,7 @@ export class ClaudeAgentSdkEngine implements Engine {
     else input.signal.addEventListener('abort', () => ac.abort(), { once: true });
 
     const q = query({
-      prompt: lastUserText(input.messages),
+      prompt: renderPrompt(input.messages),
       options: {
         tools: [], // strip ALL built-ins
         mcpServers: { [MCP_SERVER_NAME]: server },
@@ -367,13 +568,13 @@ export class ClaudeAgentSdkEngine implements Engine {
                   input_tokens?: number;
                   output_tokens?: number;
                   cache_read_input_tokens?: number;
+                  cache_creation_input_tokens?: number;
                 }
               | undefined;
-            const usage: Usage = {
-              inputTokens: u?.input_tokens,
-              outputTokens: u?.output_tokens,
-              cachedInputTokens: u?.cache_read_input_tokens,
-            };
+            // Observed in a real dev turn before this was normalized:
+            // input_tokens=4 with cache_read_input_tokens=9435 — i.e. a 9.4k
+            // prompt reported as 4 tokens.
+            const usage: Usage = normalizeAgentSdkUsage(u ?? {});
             channel.push({
               kind: 'result',
               ok: !msg.is_error,

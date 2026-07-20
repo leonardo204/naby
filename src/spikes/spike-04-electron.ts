@@ -262,7 +262,7 @@ function evaluate(outcome: ChildOutcome): Check[] {
       !fatal,
     evidence:
       (fatal ? `FATAL in main: ${String(fatal.error)} · ` : '') +
-      `storeClosed=${String(shutdown?.storeClosed)} serverClosed=${String(shutdown?.serverClosed)} ` +
+      `storeClosed=${String(shutdown?.storeClosed)} serverClosed=${String(shutdown?.serverClosed)} shutdownStalled=${String(shutdown?.shutdownStalled)} ` +
       `exitCode=${String(outcome.exitCode)} signal=${String(outcome.signal)} timedOut=${String(outcome.timedOut)}`,
   });
 

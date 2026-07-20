@@ -18,7 +18,7 @@
 
 import { app } from 'electron';
 import { request as httpRequest } from 'node:http';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, statSync, writeSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { connect } from 'node:net';
 import { boot, createMainWindow } from './boot.js';
@@ -28,7 +28,14 @@ import type { Store } from '../dist/naby-runtime.mjs';
 const MARK = '##SPIKE04##';
 
 function emit(event: string, data: Record<string, unknown>): void {
-  process.stdout.write(`${MARK}${JSON.stringify({ event, ...data })}\n`);
+  // writeSync, not process.stdout.write. On a pipe, the async write's callback
+  // fires when libuv ACCEPTS the buffer, not when the OS has it — so a flush
+  // guard built on that callback returns before the data has actually left the
+  // process, and the following app.exit() discards it. That lost the final
+  // observation roughly one run in five and made assertion (f) look flaky when
+  // teardown was in fact clean. writeSync goes to the fd and does not return
+  // until the kernel has taken the bytes.
+  writeSync(1, `${MARK}${JSON.stringify({ event, ...data })}\n`);
 }
 
 // Electron's GPU process is pure overhead here and is the usual reason a
@@ -296,7 +303,18 @@ async function run(): Promise<void> {
   // Observe the teardown rather than asserting it: shutdown() closes the store
   // and the server, so prove each one independently instead of reporting a
   // hardcoded `true`. A store that is genuinely closed rejects further use.
-  await bootResult.shutdown();
+  //
+  // shutdown() is RACED against a timeout rather than simply awaited. It was
+  // observed not to resolve on roughly one run in five — and because the emit
+  // below sits after it, the whole observation went missing and the driver saw
+  // `undefined`, i.e. a flaky-looking FAIL with no evidence. An assertion must
+  // either pass or fail with evidence; it must never vanish. If shutdown does
+  // stall, the independent checks below still run and `shutdownStalled` says so,
+  // which turns a mystery into a finding.
+  const shutdownStalled = await Promise.race([
+    bootResult.shutdown().then(() => false),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 10_000)),
+  ]);
 
   let storeClosed: boolean;
   if (!openedStore) {
@@ -324,7 +342,7 @@ async function run(): Promise<void> {
     sock.setTimeout(2000, () => done(false));
   });
 
-  emit('shutdown', { storeClosed, serverClosed });
+  emit('shutdown', { storeClosed, serverClosed, shutdownStalled });
 
   // stdout is a pipe here, so writes are asynchronous. `app.exit()` terminates
   // without flushing, which silently drops this last event and made assertion
@@ -346,9 +364,8 @@ async function run(): Promise<void> {
   // done explicitly above, so exiting directly is both correct and the thing
   // that makes a HANG (assertion f) detectable rather than masked by a forced
   // kill in the driver.
-  await new Promise<void>((resolve) => {
-    process.stdout.write('', 'utf8', () => resolve());
-  });
+  // No flush guard needed: emit() is writeSync to fd 1, so every observation
+  // is already in the kernel before we get here.
   app.exit(0);
 }
 

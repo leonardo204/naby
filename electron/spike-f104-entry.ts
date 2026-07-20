@@ -114,8 +114,16 @@ async function run(): Promise<void> {
   const wizardBefore = (await win.webContents.executeJavaScript(
     `(async () => {
        const deadline = Date.now() + 20000;
+       const LABELS = ['Anthropic', 'Amazon Bedrock', 'Azure OpenAI', 'Google Gemini', 'OpenAI'];
        const seen = () => document.body.innerText.includes('Welcome to Naby');
-       while (Date.now() < deadline && !seen()) {
+       // Wait for what is actually ASSERTED, not merely for the heading. The
+       // wizard shell renders before its provider list, which arrives only after
+       // the describeProviders() round trip — so gating on the heading alone
+       // sampled a half-rendered DOM and reported 0/5 choices on a wizard that
+       // was about to be correct. That read as flaky when the UI was fine.
+       const ready = () =>
+         seen() && LABELS.every((l) => document.body.innerText.includes(l));
+       while (Date.now() < deadline && !ready()) {
          await new Promise((r) => setTimeout(r, 250));
        }
        const text = document.body.innerText;
@@ -123,8 +131,7 @@ async function run(): Promise<void> {
          wizardVisible: seen(),
          // The five provider choices are rendered from describeProviders(), so
          // finding them proves the UI is driven off the registry.
-         providerChoices: ['Anthropic', 'Amazon Bedrock', 'Azure OpenAI', 'Google Gemini', 'OpenAI']
-           .filter((label) => text.includes(label)).length,
+         providerChoices: LABELS.filter((label) => text.includes(label)).length,
          passwordInputs: 0,
          keyInputMasked: false,
        };

@@ -59,6 +59,52 @@ export type McpEntry =
     };
 
 // ---------------------------------------------------------------------------
+// Per-turn usage (F1-07)
+// ---------------------------------------------------------------------------
+
+/**
+ * What one answered turn consumed. Written once per `result` event.
+ *
+ * WHY PER-TURN AND NOT A RUNNING TOTAL: a session's provider and model can
+ * change on any turn (contract §6 — `providerId` is a hint, and switching it
+ * mid-session is explicitly supported). A single accumulated counter could
+ * therefore only ever be priced against ONE model, which would be wrong for
+ * exactly the sessions the provider-independence property exists to enable. Per
+ * turn, each row is priced against the model that actually ran, and the total
+ * is a sum of correct parts.
+ *
+ * IT IS STILL KEYED BY SESSION ID ONLY. `providerId`/`model`/`engine` are
+ * recorded as PROPERTIES OF THE TURN, not as keys — nothing looks a session up
+ * by them, and the keying invariant at the top of this file is intact.
+ */
+export type UsageRecord = {
+  /** epoch ms */
+  at: number;
+  /** which backend answered: 'ai-sdk' | 'dev-claude'. Recorded, never keyed on. */
+  engine: string;
+  /** provider that answered this turn. */
+  providerId: string;
+  /** model id that answered this turn — what the price lookup is keyed to. */
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  /**
+   * Whether these tokens are BILLED to the user (see engines/select.ts).
+   * 'subscription' turns ran on a local Claude sign-in and cost nothing per
+   * message; presenting them as dollars would be inventing a charge.
+   */
+  costBasis: 'metered' | 'subscription';
+  /**
+   * A cost the ENGINE itself reported, when it reports one (the Agent SDK
+   * does). Kept distinct from our own priced figure because it means something
+   * different on a subscription: it is what the tokens WOULD have cost on the
+   * metered API, not what was charged.
+   */
+  reportedCostUsd?: number;
+};
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -96,6 +142,33 @@ export interface Store {
   setMemory(sessionId: string, key: string, value: string): void;
   getMemory(sessionId: string, key: string): string | undefined;
   getAllMemory(sessionId: string): Record<string, string>;
+
+  // -- usage (F1-07) -------------------------------------------------------
+
+  /** Record what one answered turn consumed. Called once per `result` event. */
+  appendUsage(sessionId: string, record: UsageRecord): void;
+
+  /** Every recorded turn for the session, oldest first. */
+  listUsage(sessionId: string): UsageRecord[];
+
+  // -- app settings (F1-08) ------------------------------------------------
+  //
+  // APP-WIDE, not session-keyed: "which provider answers" is a preference the
+  // user sets once, not a property of one conversation. It lives here rather
+  // than in `providers.json` (which main owns and which holds credential
+  // handles) because it is provider-INDEPENDENT configuration, exactly like the
+  // MCP registry above — and because the runtime must be able to read it
+  // without importing electron.
+  //
+  // NOTE this does NOT weaken the keying invariant. The invariant is that
+  // SESSION state (messages, memory, usage) is keyed by session id and nothing
+  // else. These are not session state; there is no per-session settings scope,
+  // and switching this value changes only which model answers next — which is
+  // the provider-independence property, not a violation of it.
+
+  getSetting(key: string): string | undefined;
+  setSetting(key: string, value: string): void;
+  listSettings(): Record<string, string>;
 
   // -- MCP registry (provider-independent; contract §5) --------------------
 

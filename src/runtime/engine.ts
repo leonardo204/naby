@@ -118,9 +118,37 @@ export type RuntimeMessage =
 // (contract §1.4, normalized at the engine boundary). No provider/key leaks.
 // ---------------------------------------------------------------------------
 
+/**
+ * Token accounting, NORMALIZED at the engine boundary.
+ *
+ * "Turn accounting" is one of the seven divergence points the engine boundary
+ * exists to flatten (design §3.4), and this is one of them in its sharpest
+ * form — the two engines' sources disagree about what "input tokens" MEANS:
+ *
+ *   * `ai` v7 reports `inputTokens.total` as the TOTAL prompt size, with
+ *     `cacheRead` as a SUBSET of it.
+ *   * the Agent SDK passes Anthropic's raw shape through, where `input_tokens`
+ *     counts only the NON-cached tokens and `cache_read_input_tokens` /
+ *     `cache_creation_input_tokens` are DISJOINT from it.
+ *
+ * Left unnormalized, the same conversation reports `input=4, cached=9435` on
+ * one engine and `input=9439, cached=9435` on the other — and any cost
+ * computed from the first is wrong by three orders of magnitude. So the
+ * contract is fixed here and each engine converts INTO it:
+ *
+ *   inputTokens       TOTAL prompt tokens, INCLUDING anything served from cache.
+ *   cachedInputTokens the SUBSET of `inputTokens` that was a cache read.
+ *   outputTokens      generated tokens.
+ *
+ * Consumers may therefore rely on `cachedInputTokens <= inputTokens`, which is
+ * what makes "bill the cached part at the cached rate" (runtime/pricing.ts) a
+ * correct subtraction rather than a double count.
+ */
 export type Usage = {
+  /** TOTAL input tokens, including cached ones. */
   inputTokens?: number;
   outputTokens?: number;
+  /** The subset of `inputTokens` that was read from cache. */
   cachedInputTokens?: number;
 };
 

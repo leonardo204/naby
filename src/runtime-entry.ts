@@ -59,11 +59,21 @@ export {
 // it constructs is its own choice. SqliteStore is the durable one — note that
 // `node:sqlite` is experimental and its availability inside Electron is still
 // to be verified in F1-02/SPIKE-04 (see sqlite-store.ts).
-export type { McpEntry, SessionRef, Store } from './runtime/store/store.js';
+export type { McpEntry, SessionRef, Store, UsageRecord } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
 export { runTurn, type RunTurnOptions } from './runtime/session.js';
+
+// F1-08 — the user's stored "which provider answers" choice, and the mapping
+// from it to selectEngine's options (including where the env vars rank).
+export {
+  readSettings,
+  SETTING_KEYS,
+  toSelectOptions,
+  writeSettings,
+  type NabySettings,
+} from './runtime/settings.js';
 
 export {
   AiSdkEngine,
@@ -71,6 +81,66 @@ export {
   type AiSdkEngineOptions,
   type ModelResolver,
 } from './engines/ai-sdk-engine.js';
+
+// The DEV engine (design §3.3). Exporting the class is safe even though the
+// Agent SDK is excluded from packaged builds: this module imports the SDK
+// LAZILY, by a runtime-resolved specifier, so nothing about it is bundled here
+// and constructing the engine never loads it. See the header of
+// engines/claude-agent-sdk-engine.ts for why that indirection is load-bearing.
+export {
+  AGENT_SDK_UNAVAILABLE_MESSAGE,
+  ClaudeAgentSdkEngine,
+  isClaudeAgentSdkAvailable,
+  resolveClaudeAgentSdkPath,
+  type ClaudeEngineDiagnostics,
+} from './engines/claude-agent-sdk-engine.js';
+
+// Which engine answers a turn, and the sentence that explains it to a user.
+export {
+  DEV_ENGINE_LABEL,
+  ENGINE_ENV_VAR,
+  noEngineMessage,
+  preflightEngine,
+  selectEngine,
+  type CostBasis,
+  type EngineId,
+  type EnginePreflight,
+  type EngineSelection,
+  type SelectEngineOptions,
+} from './engines/select.js';
+
+// F1-07 — usage accounting and the price table behind the cost display.
+export {
+  costOfUsage,
+  MODEL_PRICES,
+  priceModel,
+  PRICES_AS_OF,
+  type ModelPrice,
+} from './runtime/pricing.js';
+
+export {
+  formatTokens,
+  formatUsd,
+  summarizeSessionUsage,
+  summarizeUsage,
+  type ModelUsageBreakdown,
+  type SessionUsageSummary,
+} from './runtime/usage.js';
+
+// F1-08 — MCP servers, loaded via listTools()/callTool() so every call is
+// dispatched through a runtime Executor and therefore through the gate.
+export {
+  assertMcpToolsAreGateable,
+  connectMcpServer,
+  detectToolDrift,
+  fingerprintTools,
+  loadMcpToolset,
+  qualifiedToolName,
+  toRuntimeJsonSchema,
+  validateMcpEntry,
+  type McpConnection,
+  type McpLoadResult,
+} from './runtime/mcp.js';
 
 export {
   apiKeyCredential,

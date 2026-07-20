@@ -1,9 +1,10 @@
-# electron-builder.yml — F1-02 packaging.
+# electron-builder.yml — F1-02 packaging, F1-09 update feed, F1-10 signing.
 #
-# SCOPE. This produces a RUNNABLE app for the host OS. The three-OS CI matrix is
-# F1-10, and the signing/notarisation and auto-update wiring are F1-09; neither
-# is configured here. What is set here are the things that are wrong by DEFAULT
-# for this app and would silently ship broken.
+# SCOPE. This produces a RUNNABLE, DISTRIBUTABLE app. F1-02 established the
+# targets and the file lists; F1-09 added the `publish` feed that becomes
+# app-update.yml inside the artifact; F1-10 added macOS signing, the hardened
+# runtime entitlements and the notarisation hook. What is set here are the
+# things that are wrong by DEFAULT for this app and would silently ship broken.
 #
 # Targets are the ones design §6.1 fixes:
 #   Windows NSIS — MSI is not an option, electron-updater cannot update it
@@ -20,7 +21,52 @@ copyright: Naby
 
 directories:
   output: release
+  # `build/` holds icon.png (1024×1024 PLACEHOLDER — replace it, see
+  # scripts/make-icon.mjs) and entitlements.mac.plist. electron-builder derives
+  # the .icns and .ico from that single PNG; there are no per-platform icon files
+  # to keep in sync.
   buildResources: build
+
+# ---------------------------------------------------------------------------
+# afterSign — notarisation (F1-10)
+# ---------------------------------------------------------------------------
+# Runs after the .app is signed and BEFORE the dmg/zip are built, which is the
+# only correct moment: a zip cannot be stapled, so the ticket must land in the
+# bundle while it is still a bundle. See scripts/notarize.mjs.
+afterSign: scripts/notarize.mjs
+
+# ---------------------------------------------------------------------------
+# afterAllArtifactBuild — notarise the .dmg itself (F1-10)
+# ---------------------------------------------------------------------------
+# A SECOND notarisation, not a duplicate. A ticket covers one container: the
+# hook above tickets the .app, this one tickets the .dmg the user downloads.
+# Without it, opening the downloaded disk image needs a live round trip to
+# Apple, and when that round trip fails the dialog says the image is damaged.
+# The .zip is skipped — a zip cannot hold a staple, and the .app inside it
+# already has one, which is what Squirrel validates.
+afterAllArtifactBuild: scripts/notarize-dmg.mjs
+
+# ---------------------------------------------------------------------------
+# publish — the update feed (F1-09, design §6.3)
+# ---------------------------------------------------------------------------
+# GitHub Releases on leonardo204/naby, which is PUBLIC. That is the deciding
+# property, not a convenience:
+#
+#   A PRIVATE repo feed requires a GH_TOKEN baked into the installer, readable by
+#   anyone who unpacks it (design §6.3) — a published credential with repo scope.
+#   A public repo needs no token in the artifact at all. Publishing still needs a
+#   token, but only at RELEASE time, in CI, where it never enters the build.
+#
+# This block is what electron-builder turns into `app-update.yml` inside the
+# packaged app, and app-update.yml is the ONLY thing electron-updater consults at
+# runtime. The updater cannot be pointed anywhere else by the renderer.
+publish:
+  - provider: github
+    owner: leonardo204
+    repo: naby
+    # Releases stay invisible to the updater until explicitly published, so a
+    # half-uploaded set of artifacts is never offered to users.
+    releaseType: release
 
 # ---------------------------------------------------------------------------
 # npmRebuild — design §3.2
@@ -145,15 +191,87 @@ mac:
     - target: zip
       arch: [arm64]
   category: public.app-category.productivity
-  # hardenedRuntime defaults true. Electron needs both of these entitlements;
-  # they are inert until F1-09 turns on signing.
+
+  # -------------------------------------------------------------------------
+  # Signing (F1-10) — and the one-way door
+  # -------------------------------------------------------------------------
+  # THE IDENTITY IS PERMANENT. Squirrel.Mac validates a downloaded update against
+  # the designated requirement of the app that is ALREADY RUNNING, captured via
+  # SecCodeCopySelf(). Change the certificate and every installed user loses
+  # auto-update forever and must re-download by hand. Windows has an escape
+  # (publisherName takes an array of old and new names); macOS has none.
+  #
+  # The identity is `Developer ID Application: YONGSUB LEE (XU8HS9JUTS)` and it
+  # is pinned via CSC_NAME in the environment rather than named here, because it
+  # is a machine/CI credential reference, not a source-controlled fact. What IS
+  # source-controlled is the requirement that auto-discovery stays OFF — see
+  # scripts/build-dist.mjs, which enforces it before electron-builder starts.
   hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # gatekeeperAssess stays false: `spctl --assess` during the build is checked
+  # against a bundle that has not been stapled yet (stapling happens in
+  # afterSign), so it would fail on a perfectly good build. The real Gatekeeper
+  # verification is done after the fact — see `npm run verify:mac`.
   gatekeeperAssess: false
+  # electron-builder 26 has its own built-in notarisation. It is turned OFF here
+  # because scripts/notarize.mjs already does it at afterSign; leaving both on
+  # submits the same bundle to Apple twice.
+  notarize: false
 
 win:
   target:
     - target: nsis
       arch: [x64]
+  # -------------------------------------------------------------------------
+  # UNSIGNED, DELIBERATELY (design §6.2) — and auto-update still works
+  # -------------------------------------------------------------------------
+  # electron-updater skips signature verification entirely when `publisherName`
+  # is null, which is exactly the unsigned case. No announced expiry. We have no
+  # Windows certificate (OV keys have required FIPS 140-2 L2 hardware or a cloud
+  # HSM since June 2023, so a .pfx in CI secrets is no longer possible at all),
+  # so this ships unsigned and updates fine.
+  #
+  # WHEN A CERTIFICATE ARRIVES, this becomes a config change and not a rewrite:
+  # add `azureSignOptions` (Azure Artifact Signing is the default-correct answer
+  # per design §6.3) and set `publisherName` to a LIST containing both the old
+  # and the new subject names, so already-installed unsigned clients are not
+  # stranded. That array is the escape hatch macOS does not have — do not
+  # collapse it to a single string when rotating.
+  #
+  #   publisherName:
+  #     - <previous subject name>
+  #     - <new subject name>
+  #
+  # Timestamping is mandatory rather than best practice under Azure Artifact
+  # Signing: its certificates are renewed daily with 72-hour validity, so an
+  # untimestamped signature is invalid within days.
+
+dmg:
+  # electron-builder defaults this to FALSE, and the default is wrong for a
+  # Developer ID release. An unsigned disk image can still be notarised and
+  # stapled — Apple tickets it by file hash — and it will open. But it has no
+  # code signature of its own, so the documented Gatekeeper assertion for disk
+  # images reports exactly that:
+  #
+  #   spctl -a -t open --context context:primary-signature Naby.dmg
+  #     -> rejected (source=no usable signature)
+  #
+  # Signing it makes the DMG a first-class signed, notarised, stapled artifact
+  # and that assertion pass. Order is handled for us: electron-builder signs the
+  # dmg before afterAllArtifactBuild runs, so it is sign -> notarise -> staple.
+  sign: true
+
+nsis:
+  # NSIS is the ONLY updatable Windows target — electron-updater cannot update an
+  # MSI (design §6.1). If an MSI is ever added for enterprise deployment it is an
+  # ADDITIONAL artifact with its own SCCM/Intune story, never a replacement.
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  # Differential download: electron-updater uses the blockmap to fetch only the
+  # changed blocks instead of the whole installer on every patch release.
+  differentialPackage: true
 
 linux:
   target:
@@ -162,3 +280,11 @@ linux:
     - target: deb
       arch: [x64]
   category: Development
+  # The .deb is not a nicety alongside the AppImage — see the header. Chromium's
+  # SUID sandbox needs chrome-sandbox root-owned 4755, which a user-owned FUSE
+  # mount cannot provide, and Ubuntu 23.10+ blocks the unprivileged-namespace
+  # fallback, so an AppImage alone fails to launch without --no-sandbox.
+  synopsis: Personalized persona agent desktop app
+  desktop:
+    entry:
+      StartupWMClass: Naby

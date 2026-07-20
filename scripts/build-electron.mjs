@@ -37,6 +37,40 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outdir = resolve(root, 'dist/electron');
 mkdirSync(outdir, { recursive: true });
 
+/**
+ * ESM-ONLY BANNER — makes `require` exist in the .mjs outputs.
+ *
+ * THIS IS NOT BOILERPLATE. It fixes a real, silent-until-runtime break found by
+ * `npm run verify:updater`: bundling a CommonJS dependency (electron-updater)
+ * into an ESM output leaves esbuild's `__require` shim in the code, and that
+ * shim throws `Dynamic require of "fs" is not supported` the moment it is hit.
+ * Nothing catches it at build time — esbuild emits no warning, typecheck is
+ * clean, and the failure only appears when the updater is first used, which for
+ * auto-update means "in production, days later".
+ *
+ * The shim's own first branch is `typeof require !== "undefined" ? require : …`,
+ * so defining a real `require` at module scope is exactly what it is looking
+ * for, and every dynamic require then resolves normally.
+ *
+ * WHY THIS IS SAFE HERE SPECIFICALLY, and would not be everywhere: the complete
+ * set of dynamic requires in the bundle is node builtins (path, fs, url, stream,
+ * crypto, os, child_process, util, zlib, tty, events, assert, http, constants)
+ * plus `electron`. All of them resolve from Electron's own runtime with no
+ * node_modules lookup, which matters because the packaged app ships none
+ * (see electron-builder.yml `files`). Verify with:
+ *
+ *     grep -o '__require("[^"]*")' dist/electron/main.mjs | sort -u
+ *
+ * If that ever lists a third-party package, this banner is NOT sufficient for it
+ * — that package must be shipped or bundled properly instead.
+ */
+const esmBanner = {
+  js: [
+    "import { createRequire as __nabyCreateRequire } from 'node:module';",
+    'const require = __nabyCreateRequire(import.meta.url);',
+  ].join('\n'),
+};
+
 /** Node 22 is Electron 43's floor; nothing here needs to go lower. */
 const shared = {
   bundle: true,
@@ -48,24 +82,31 @@ const shared = {
   logLevel: 'warning',
 };
 
+/** Shared config for the four ESM main-process entries. */
+const esm = { ...shared, format: 'esm', banner: esmBanner };
+
 await Promise.all([
   build({
-    ...shared,
+    ...esm,
     entryPoints: [resolve(root, 'electron/main.ts')],
     outfile: resolve(outdir, 'main.mjs'),
-    format: 'esm',
   }),
   build({
-    ...shared,
+    ...esm,
     entryPoints: [resolve(root, 'electron/spike-entry.ts')],
     outfile: resolve(outdir, 'spike-entry.mjs'),
-    format: 'esm',
   }),
   build({
-    ...shared,
+    ...esm,
     entryPoints: [resolve(root, 'electron/spike-f104-entry.ts')],
     outfile: resolve(outdir, 'spike-f104-entry.mjs'),
-    format: 'esm',
+  }),
+  // F1-09 verification harness. Its own entry rather than a flag on main.mjs:
+  // the production entry must not carry a test mode that could be switched on.
+  build({
+    ...esm,
+    entryPoints: [resolve(root, 'electron/updater-probe.ts')],
+    outfile: resolve(outdir, 'updater-probe.mjs'),
   }),
   build({
     ...shared,
@@ -76,5 +117,5 @@ await Promise.all([
 ]);
 
 console.log(
-  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, preload.cjs}',
+  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, updater-probe.mjs, preload.cjs}',
 );

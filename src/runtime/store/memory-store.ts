@@ -15,12 +15,13 @@
 // state.
 
 import type { RuntimeMessage } from '../engine.js';
-import type { McpEntry, SessionRef, Store } from './store.js';
+import type { McpEntry, SessionRef, Store, UsageRecord } from './store.js';
 
 type SessionState = {
   ref: SessionRef;
   messages: RuntimeMessage[];
   memory: Record<string, string>;
+  usage: UsageRecord[];
 };
 
 let counter = 0;
@@ -34,6 +35,7 @@ function mintSessionId(): string {
 export class MemoryStore implements Store {
   private readonly sessions = new Map<string, SessionState>();
   private readonly mcp = new Map<string, McpEntry>();
+  private readonly settings = new Map<string, string>();
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -47,6 +49,7 @@ export class MemoryStore implements Store {
         ref: { sessionId, providerId, createdAt: now, lastUsedAt: now },
         messages: [],
         memory: {},
+        usage: [],
       };
       this.sessions.set(sessionId, s);
     }
@@ -108,6 +111,30 @@ export class MemoryStore implements Store {
 
   getAllMemory(sessionId: string): Record<string, string> {
     return { ...this.state(sessionId).memory };
+  }
+
+  // -- usage (F1-07) -------------------------------------------------------
+
+  appendUsage(sessionId: string, record: UsageRecord): void {
+    this.state(sessionId).usage.push(record);
+  }
+
+  listUsage(sessionId: string): UsageRecord[] {
+    return [...this.state(sessionId).usage];
+  }
+
+  // -- app settings (F1-08) ------------------------------------------------
+
+  getSetting(key: string): string | undefined {
+    return this.settings.get(key);
+  }
+
+  setSetting(key: string, value: string): void {
+    this.settings.set(key, value);
+  }
+
+  listSettings(): Record<string, string> {
+    return Object.fromEntries(this.settings);
   }
 
   // -- MCP registry --------------------------------------------------------

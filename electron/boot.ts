@@ -18,6 +18,7 @@ import { mintSessionToken, TOKEN_QUERY_PARAM } from './hardening.js';
 import { registerIpcHandlers } from './ipc.js';
 import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
 import { ProviderProfileStore } from './providers.js';
+import { createUpdater, type Updater } from './updater.js';
 // TYPE-ONLY. The runtime bundle is loaded lazily through a computed URL (see
 // `openStore`) so esbuild leaves it alone and the app loads the real
 // `dist/naby-runtime.mjs` at run time instead of inlining ai@7 into the main
@@ -50,6 +51,17 @@ export type BootResult = {
   vault: CredentialVault;
   /** F1-04. Provider profiles — no secrets (contract §4). */
   profiles: ProviderProfileStore;
+  /**
+   * F1-09. CONSTRUCTED HERE BUT NOT STARTED.
+   *
+   * That split is the point. Building it here means the `update:*` IPC channels
+   * exist on every boot — including the spike's — so the renderer surface is the
+   * same everywhere and contract §1.3 is satisfied unconditionally. Starting it
+   * is `main.ts`'s job alone, because starting is what performs network I/O, and
+   * SPIKE-04 boots this same path in CI where an update check would be both
+   * pointless and a source of flake.
+   */
+  updater: Updater;
   /** The URL to hand `loadURL`, with the first-navigation token attached. */
   windowUrl(pathAndQuery?: string): string;
   /** Lazily opened, main-process-only SQLite store. */
@@ -201,17 +213,25 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
   // server's port is not known until it is bound. A handler registered earlier
   // would have to compare against a placeholder, i.e. would be unguarded for
   // the window in which it existed.
+  // F1-09. Inert until `updater.start()` — see the BootResult field comment.
+  const updater = createUpdater({ log });
+
   const disposeIpc = registerIpcHandlers({
     vault,
     profiles,
     allowedOrigin: server.origin,
     loadRuntime,
+    updater,
     log,
   });
 
   let shuttingDown: Promise<void> | undefined;
   function shutdown(): Promise<void> {
     shuttingDown ??= (async () => {
+      // Before disposeIpc: the updater's status listener pushes through the IPC
+      // layer, and an interval that fired mid-teardown would try to send on a
+      // webContents that is already on its way out.
+      updater.dispose();
       disposeIpc();
       try {
         store?.close();
@@ -233,6 +253,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     userDataDir,
     vault,
     profiles,
+    updater,
     loadRuntime,
     windowUrl(pathAndQuery = '/') {
       // The token rides the FIRST navigation only; the guard converts it to an
