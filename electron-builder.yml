@@ -21,10 +21,15 @@ copyright: Naby
 
 directories:
   output: release
-  # `build/` holds icon.png (1024×1024 PLACEHOLDER — replace it, see
-  # scripts/make-icon.mjs) and entitlements.mac.plist. electron-builder derives
+  # `build/` holds icon.png and entitlements.mac.plist. electron-builder derives
   # the .icns and .ico from that single PNG; there are no per-platform icon files
   # to keep in sync.
+  #
+  # icon.png is the REAL Naby artwork (1024×1024 RGBA), upscaled from
+  # `assets/naby-icon-source.png` (512×512), which is kept as the editable
+  # master. The generated placeholder it replaced is gone; `scripts/make-icon.mjs`
+  # still exists but is now only a fallback for a checkout without the artwork —
+  # running it would OVERWRITE the real icon, so do not.
   buildResources: build
 
 # ---------------------------------------------------------------------------

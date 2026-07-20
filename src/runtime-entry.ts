@@ -95,6 +95,23 @@ export {
   type ClaudeEngineDiagnostics,
 } from './engines/claude-agent-sdk-engine.js';
 
+// Whether the LOCAL Claude sign-in the dev engine runs on actually exists and
+// is usable. Separate from `isClaudeAgentSdkAvailable` on purpose: that asks
+// "is the code here", this asks "is the account here", and a machine can fail
+// either one independently. Reads no credential material — see the module
+// header for what it refuses to do.
+export {
+  checkClaudeLogin,
+  CLAUDE_LOGIN_COMMAND,
+  claudeCredentialsPath,
+  describeClaudeLogin,
+  getClaudeLoginState,
+  resetClaudeLoginCache,
+  type CheckClaudeLoginOptions,
+  type ClaudeLoginState,
+  type ClaudeLoginStatus,
+} from './engines/claude-login.js';
+
 // Which engine answers a turn, and the sentence that explains it to a user.
 export {
   DEV_ENGINE_LABEL,

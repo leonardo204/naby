@@ -101,6 +101,14 @@ await Promise.all([
     entryPoints: [resolve(root, 'electron/spike-f104-entry.ts')],
     outfile: resolve(outdir, 'spike-f104-entry.mjs'),
   }),
+  // SPIKE-F110 — the UI assertions (tab close → home, title, login status).
+  // Its own entry for the same reason as the others: the production main.ts
+  // must not carry a test mode that could be switched on.
+  build({
+    ...esm,
+    entryPoints: [resolve(root, 'electron/spike-f110-entry.ts')],
+    outfile: resolve(outdir, 'spike-f110-entry.mjs'),
+  }),
   // F1-09 verification harness. Its own entry rather than a flag on main.mjs:
   // the production entry must not carry a test mode that could be switched on.
   build({
@@ -117,5 +125,5 @@ await Promise.all([
 ]);
 
 console.log(
-  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, updater-probe.mjs, preload.cjs}',
+  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, updater-probe.mjs, preload.cjs}',
 );

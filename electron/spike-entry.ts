@@ -45,6 +45,36 @@ app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
 
 // ---------------------------------------------------------------------------
+// DO NOT LET ELECTRON QUIT THE MOMENT THE WINDOW GOES AWAY.
+// ---------------------------------------------------------------------------
+//
+// This is the fourth load-dependent race in this spike's teardown, and it is
+// the one that made assertion (f) report `storeClosed=undefined` — the whole
+// `shutdown` observation missing, exit code 0, no timeout — on roughly two runs
+// in three on a busy machine.
+//
+// Assertion (f) is ABOUT teardown, so it necessarily runs AFTER `win.destroy()`:
+// race `shutdown()` (up to 10s), then probe the store, then probe the port (up
+// to 2s). But `win.destroy()` closes the last window, and Electron's DEFAULT
+// `window-all-closed` behaviour is `app.quit()` — so the process was racing its
+// own observation and usually winning. Nothing was actually broken about the
+// teardown; the evidence for it was being killed mid-flight.
+//
+// Registering ANY listener for the event replaces that default (Electron quits
+// on window-all-closed only when the event has no listeners), so this no-op is
+// the whole fix. The spike still exits deterministically via the explicit
+// `app.exit(0)` at the end of `run()` — and a genuine HANG remains detectable,
+// because the driver's own timeout is what catches it.
+//
+// The comment in spike-f104-entry.ts warning that suppressing this quit makes
+// `server.close()` never resolve is STALE: `next-server.ts` now calls
+// `server.closeAllConnections()` before `close()`, so the listener no longer
+// depends on the quit sequence to reap the renderer's keep-alive sockets.
+app.on('window-all-closed', () => {
+  /* deliberately empty — see above */
+});
+
+// ---------------------------------------------------------------------------
 // Probe helper — a raw HTTP request with fully controlled headers.
 // ---------------------------------------------------------------------------
 //
