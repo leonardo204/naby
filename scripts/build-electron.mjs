@@ -63,10 +63,18 @@ await Promise.all([
   }),
   build({
     ...shared,
+    entryPoints: [resolve(root, 'electron/spike-f104-entry.ts')],
+    outfile: resolve(outdir, 'spike-f104-entry.mjs'),
+    format: 'esm',
+  }),
+  build({
+    ...shared,
     entryPoints: [resolve(root, 'electron/preload.ts')],
     outfile: resolve(outdir, 'preload.cjs'),
     format: 'cjs',
   }),
 ]);
 
-console.log('electron: dist/electron/{main.mjs, spike-entry.mjs, preload.cjs}');
+console.log(
+  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, preload.cjs}',
+);

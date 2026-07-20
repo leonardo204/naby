@@ -220,6 +220,21 @@ export type ProviderDescription = {
   credentialKinds: ProviderCredential['kind'][];
   /** what `ProviderProfile.model` means for this kind. */
   modelMeaning: string;
+  /**
+   * F1-04. What to prefill when a user adds this provider through the UI, so
+   * onboarding is "paste key → done" rather than "go read a model catalogue".
+   * It lives HERE because this file is the single list the UI is driven off
+   * (contract §4); a default kept anywhere else would be a second list.
+   */
+  defaultModel: string;
+  /**
+   * F1-04. The env var consulted as a FALLBACK when no key is in the vault —
+   * CI and SPIKE-05 use it. Also derived from this one list rather than
+   * hardcoded at the consumer, for the same reason.
+   */
+  envVar: string;
+  /** Where a non-developer goes to obtain the key. Rendered in the wizard. */
+  keyHelp: string;
 };
 
 export const PROVIDER_KINDS: readonly ProviderKind[] = [
@@ -239,6 +254,9 @@ export function describeProviders(): ProviderDescription[] {
       configFields: [],
       credentialKinds: ['api-key'],
       modelMeaning: 'Anthropic model id, e.g. claude-sonnet-4-5',
+      defaultModel: 'claude-sonnet-4-5',
+      envVar: 'NABY_ANTHROPIC_API_KEY',
+      keyHelp: 'console.anthropic.com → Settings → API keys',
     },
     {
       kind: 'bedrock',
@@ -246,6 +264,9 @@ export function describeProviders(): ProviderDescription[] {
       configFields: ['region'],
       credentialKinds: ['api-key', 'aws-sigv4'],
       modelMeaning: 'Bedrock model id or inference-profile ID',
+      defaultModel: 'anthropic.claude-sonnet-4-5-20250929-v1:0',
+      envVar: 'NABY_BEDROCK_API_KEY',
+      keyHelp: 'AWS console → Bedrock → API keys (long-term bearer key)',
     },
     {
       kind: 'azure-openai',
@@ -253,6 +274,9 @@ export function describeProviders(): ProviderDescription[] {
       configFields: ['resource', 'deployment', 'apiVersion'],
       credentialKinds: ['api-key'],
       modelMeaning: 'the DEPLOYMENT name (must equal config.deployment)',
+      defaultModel: '',
+      envVar: 'NABY_AZURE_OPENAI_API_KEY',
+      keyHelp: 'Azure portal → your Azure OpenAI resource → Keys and Endpoint',
     },
     {
       kind: 'google',
@@ -260,6 +284,9 @@ export function describeProviders(): ProviderDescription[] {
       configFields: [],
       credentialKinds: ['api-key'],
       modelMeaning: 'Gemini model id, e.g. gemini-2.5-pro',
+      defaultModel: 'gemini-2.5-pro',
+      envVar: 'NABY_GOOGLE_API_KEY',
+      keyHelp: 'aistudio.google.com → Get API key',
     },
     {
       kind: 'openai',
@@ -267,6 +294,9 @@ export function describeProviders(): ProviderDescription[] {
       configFields: [],
       credentialKinds: ['api-key'],
       modelMeaning: 'OpenAI model id, e.g. gpt-5',
+      defaultModel: 'gpt-4o',
+      envVar: 'NABY_OPENAI_API_KEY',
+      keyHelp: 'platform.openai.com → API keys',
     },
   ];
 }

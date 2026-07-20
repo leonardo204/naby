@@ -85,3 +85,23 @@ export {
   type ProviderKind,
   type ProviderProfile,
 } from './providers/registry.js';
+
+// F1-04. The credential bridge and the provider resolution the shell's engine
+// runs on. The SECRET never crosses this barrel as data — `getKey` is called on
+// the far side of the bridge, in the same process, by the engine alone.
+export {
+  clearCredentialBridge,
+  defaultProfileFor,
+  getCredentialBridge,
+  installCredentialBridge,
+  missingConfigFields,
+  NO_CREDENTIAL_MESSAGE,
+  preflightProvider,
+  resolveProviderCredential,
+  type CredentialBridge,
+  type CredentialSecurity,
+  type CredentialSource,
+  type PreflightResult,
+  type ProviderResolution,
+  type ResolvedProvider,
+} from './providers/resolve.js';

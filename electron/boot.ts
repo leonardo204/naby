@@ -13,13 +13,31 @@ import { app, BrowserWindow } from 'electron';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { CredentialVault, type SafeStorageLike } from './credentials.js';
 import { mintSessionToken, TOKEN_QUERY_PARAM } from './hardening.js';
+import { registerIpcHandlers } from './ipc.js';
 import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
+import { ProviderProfileStore } from './providers.js';
 // TYPE-ONLY. The runtime bundle is loaded lazily through a computed URL (see
 // `openStore`) so esbuild leaves it alone and the app loads the real
 // `dist/naby-runtime.mjs` at run time instead of inlining ai@7 into the main
 // process bundle a second time.
-import type { SqliteStore as SqliteStoreType, Store } from '../dist/naby-runtime.mjs';
+import type {
+  CredentialBridge,
+  installCredentialBridge as InstallCredentialBridgeType,
+  ProviderDescription,
+  SqliteStore as SqliteStoreType,
+  Store,
+  defaultProfileFor as DefaultProfileForType,
+} from '../dist/naby-runtime.mjs';
+
+/** The subset of the runtime bundle the main process calls into. */
+type NabyRuntime = {
+  SqliteStore: typeof SqliteStoreType;
+  describeProviders: () => ProviderDescription[];
+  defaultProfileFor: typeof DefaultProfileForType;
+  installCredentialBridge: typeof InstallCredentialBridgeType;
+};
 
 export type BootResult = {
   server: EmbeddedServer;
@@ -28,10 +46,16 @@ export type BootResult = {
   /** Absolute path to the app root — the asar root in a packaged build. */
   appRoot: string;
   userDataDir: string;
+  /** F1-04. safeStorage-backed key store. Main process only. */
+  vault: CredentialVault;
+  /** F1-04. Provider profiles — no secrets (contract §4). */
+  profiles: ProviderProfileStore;
   /** The URL to hand `loadURL`, with the first-navigation token attached. */
   windowUrl(pathAndQuery?: string): string;
   /** Lazily opened, main-process-only SQLite store. */
   openStore(): Promise<Store>;
+  /** The runtime bundle, loaded through a computed URL. Cached after the first. */
+  loadRuntime(): Promise<NabyRuntime>;
   /** Idempotent teardown: closes the store, then the server. */
   shutdown(): Promise<void>;
 };
@@ -69,6 +93,15 @@ export type BootOptions = {
   /** Force Next into dev mode. Off by default; the packaged app is never dev. */
   dev?: boolean;
   log?: (msg: string) => void;
+  /**
+   * F1-04 test seam. Replaces Electron's `safeStorage` in the vault, so
+   * spike-f104 can assert the insecure-backend path (design §4.1's Linux
+   * basic_text case) without requiring a Linux box with a broken keyring.
+   * Production never sets it.
+   */
+  safeStorage?: SafeStorageLike;
+  /** Test seam paired with the above — makes the vault believe it is on linux. */
+  platform?: NodeJS.Platform;
 };
 
 export async function boot(opts: BootOptions = {}): Promise<BootResult> {
@@ -91,6 +124,51 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
 
   const token = mintSessionToken();
 
+  // -- runtime bundle ------------------------------------------------------
+  //
+  // ONE lazy loader for the whole main process. The computed URL is what keeps
+  // esbuild from inlining ai@7 here a second time (see the type-only import
+  // above); caching the module means the vault bridge, the IPC handlers and the
+  // store all share one instance rather than three copies of a 5 MB bundle.
+  let runtime: Promise<NabyRuntime> | undefined;
+  function loadRuntime(): Promise<NabyRuntime> {
+    runtime ??= import(pathToFileURL(join(appRoot, 'dist', 'naby-runtime.mjs')).href) as Promise<NabyRuntime>;
+    return runtime;
+  }
+
+  // -- credentials (F1-04) -------------------------------------------------
+  //
+  // ORDER IS LOAD-BEARING (design §4.1). `boot()` is only ever called after
+  // `app.whenReady()`, which is what makes `getSelectedStorageBackend()`
+  // meaningful — before ready it returns 'unknown' and the basic_text check
+  // would silently pass on a machine that deserves a warning.
+  const vault = new CredentialVault({
+    userDataDir,
+    ...(opts.safeStorage ? { safeStorage: opts.safeStorage } : {}),
+    ...(opts.platform ? { platform: opts.platform } : {}),
+    log,
+  });
+  const security = await vault.init();
+  if (!security.secure) {
+    // Logged here so the condition is visible in a terminal run; the USER-facing
+    // warning is the renderer's (settings + wizard both render it), because a
+    // native dialog at startup would fire before there is any context for it.
+    log(`[credentials] WARNING insecure backend "${security.backend}": ${security.warning ?? ''}`);
+  }
+  const profiles = new ProviderProfileStore({ userDataDir });
+
+  // The engine reads keys through this bridge. It is an IN-PROCESS function
+  // table, not IPC: the Next server (and therefore the shell's naby engine)
+  // runs inside this very process, so the key never crosses a process boundary
+  // and the shell never imports `electron`. Nothing here is reachable from the
+  // renderer — contextBridge exposes none of it.
+  const bridge: CredentialBridge = {
+    listProfiles: () => profiles.list(),
+    getKey: (providerId: string) => vault.get(providerId),
+    security: () => vault.security(),
+  };
+  (await loadRuntime()).installCredentialBridge(bridge);
+
   const server = await startEmbeddedNextServer({
     shellDir,
     token,
@@ -111,18 +189,30 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
   let store: Store | undefined;
   async function openStore(): Promise<Store> {
     if (store) return store;
-    const runtimeUrl = pathToFileURL(join(appRoot, 'dist', 'naby-runtime.mjs')).href;
-    const runtime = (await import(runtimeUrl)) as {
-      SqliteStore: typeof SqliteStoreType;
-    };
-    store = new runtime.SqliteStore({ path: dbPath });
+    const mod = await loadRuntime();
+    store = new mod.SqliteStore({ path: dbPath });
     log(`[store] opened ${dbPath}`);
     return store;
   }
 
+  // -- IPC (F1-04) ---------------------------------------------------------
+  //
+  // Registered only now, because `allowedOrigin` is the server's origin and the
+  // server's port is not known until it is bound. A handler registered earlier
+  // would have to compare against a placeholder, i.e. would be unguarded for
+  // the window in which it existed.
+  const disposeIpc = registerIpcHandlers({
+    vault,
+    profiles,
+    allowedOrigin: server.origin,
+    loadRuntime,
+    log,
+  });
+
   let shuttingDown: Promise<void> | undefined;
   function shutdown(): Promise<void> {
     shuttingDown ??= (async () => {
+      disposeIpc();
       try {
         store?.close();
         if (store) log('[store] closed');
@@ -141,6 +231,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     token,
     appRoot,
     userDataDir,
+    vault,
+    profiles,
+    loadRuntime,
     windowUrl(pathAndQuery = '/') {
       // The token rides the FIRST navigation only; the guard converts it to an
       // HttpOnly cookie on that request, so nothing after this carries it in a
