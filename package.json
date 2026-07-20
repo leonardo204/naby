@@ -17,6 +17,7 @@
     "spike:03b": "tsx src/spikes/spike-03b-aisdk-gate.ts",
     "spike:04": "npm run build:electron && tsx src/spikes/spike-04-electron.ts",
     "spike:07": "tsx src/spikes/spike-07-independence.ts",
+    "spike:cwd": "tsx src/spikes/spike-cwd.ts",
     "spike:all": "npm run spike:02 && npm run spike:03 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105 && npm run spike:f104 && npm run spike:f107 && npm run spike:f110",
     "spike:nokeys": "npm run spike:02 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105 && npm run spike:f104 && npm run spike:f107",
     "spikes": "npm run spike:all",

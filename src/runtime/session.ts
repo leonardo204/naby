@@ -33,6 +33,13 @@ export type RunTurnOptions = {
    * appended to the history — `ai@7` rejects `role:'system'` inside `messages`
    * and a system prompt is not part of the transcript we replay (contract §6). */
   system?: string;
+  /** The directory this turn is ABOUT — passed straight through to the engine.
+   * Callers that name a working directory in `system` should pass the SAME one
+   * here: the two disagreeing is the bug documented on `EngineRunInput.cwd`
+   * (the model is told one directory while the backend sits in another). Not
+   * persisted and not part of the transcript — it describes where the turn
+   * runs, not what was said. */
+  cwd?: string;
   /** Called for each event AS IT ARRIVES, before runTurn returns. A caller that
    * must stream (the shell adapter translating to its client's event shapes)
    * uses this instead of re-implementing the loop — which keeps the store
@@ -127,6 +134,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     // from disk, written by a previous process and possibly a different engine.
     messages: store.getMessages(sessionId),
     ...(opts.system !== undefined ? { system: opts.system } : {}),
+    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     toolSchemas,
     gate,
     executors,
@@ -141,6 +149,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     if (signal.aborted) break;
 
     events.push(ev);
+    // Every event reaches the streaming caller, INCLUDING `harness`. That is
+    // the only path a harness event takes: it is observational (see the
+    // `harness` doc in engine.ts), so it is forwarded for display and then
+    // deliberately falls off the end of the fold below without touching the
+    // store. There is no `ev.kind === 'harness'` branch there ON PURPOSE —
+    // adding one would mint a `RuntimeMessage` for it, and `RuntimeMessage` has
+    // a closed three-variant contract with NO system role (see the note at
+    // engine.ts §"Runtime message"). A harness event is transport, not
+    // conversation; persisting it would put backend-internal bookkeeping into a
+    // transcript that must replay identically on an engine that never emits it.
     opts.onEvent?.(ev);
 
     if (ev.kind === 'init') {

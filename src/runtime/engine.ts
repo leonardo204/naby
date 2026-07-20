@@ -176,7 +176,39 @@ export type EngineEvent =
       output: ToolOutput;
     }
   | { kind: 'result'; ok: boolean; usage?: Usage; costUsd?: number }
-  | { kind: 'error'; message: string; code?: string };
+  | { kind: 'error'; message: string; code?: string }
+  /**
+   * A transport-level observation from the engine's own harness — something the
+   * BACKEND did that is not part of the conversation: a background task
+   * starting or reporting back, a context compaction boundary, hook output the
+   * provider injected into its own loop.
+   *
+   * OBSERVATIONAL ONLY. This is the whole contract, and it is load-bearing in
+   * two directions:
+   *
+   *   * it must NEVER influence the model loop. Nothing downstream may branch
+   *     on a harness event to decide what to send, whether to continue, or what
+   *     the model sees next. The transcript we replay (contract §6) is built
+   *     from `text` / `tool_request` / `tool_result` alone, and adding a
+   *     harness event to it would make replay depend on backend-internal
+   *     bookkeeping that the OTHER engine does not emit — i.e. it would break
+   *     the provider-independence the seam exists to guarantee.
+   *   * it must NEVER influence the gate. The gate's inputs are ToolCalls and
+   *     nothing else (contract §3); a harness event is not a request to do
+   *     anything, so there is nothing here to authorize.
+   *
+   * Consequently it does not become a `RuntimeMessage` and is not persisted —
+   * `runTurn` deliberately has no store branch for it. It exists so the UI can
+   * show a muted "something happened in the harness" line instead of the
+   * silence that made the wrong-cwd bug (see `EngineRunInput.cwd`) invisible
+   * for as long as it was.
+   *
+   * `subtype` is a SHORT, SAFE label (e.g. `system/compact_boundary`), never a
+   * raw message body: hook output can contain arbitrary content from whatever
+   * project is open, and this string is rendered in the UI. `detail` is
+   * likewise a curated summary, not a dump.
+   */
+  | { kind: 'harness'; subtype: string; detail?: string };
 
 // ---------------------------------------------------------------------------
 // The Engine interface (contract §2). The rest of the app depends only on this.
@@ -198,6 +230,43 @@ export type EngineRunInput = {
   gate: Gate;
   /** runtime-owned executors, keyed by BARE tool name. */
   executors: Record<string, Executor>;
+  /**
+   * The directory the turn is ABOUT — the project the user actually opened.
+   *
+   * WHY THIS EXISTS (it fixes a confirmed correctness+safety bug, not a nicety)
+   * -------------------------------------------------------------------------
+   * An engine whose backend touches a filesystem needs to be TOLD where it is.
+   * Left unset, a backend inherits the host process's cwd — which for us is the
+   * Electron main process, i.e. NABY'S OWN SOURCE CHECKOUT, never the opened
+   * project. Meanwhile the shell adapter builds a system prompt that states
+   * `Working directory: <the opened project>`. The two disagreed silently, and
+   * the disagreement was invisible because nothing ever printed either one:
+   *
+   *   * the MODEL believed it was in the opened project (the prompt said so),
+   *   * the BACKEND was sitting in naby's source tree,
+   *   * so the backend loaded NABY's `.claude/` harness — its CLAUDE.md, its
+   *     hooks — instead of the opened project's. Observed in the wild: naby's
+   *     own dotclaude session counter ("Session #94") was injected into a chat
+   *     about an entirely different project. Confirmed against the databases:
+   *     naby's `.claude/db/context.db` holds the 97 sessions those numbers came
+   *     from; the opened project's holds 5.
+   *
+   * The safety half is worse than the confusion half: any file-touching tool
+   * resolving a relative path would have targeted the WRONG REPOSITORY.
+   *
+   * So the directory travels EXPLICITLY, on its own field, from the composition
+   * root that actually knows it (the shell adapter, from `RunCtx.cwd`) down to
+   * the engine — rather than being inherited from ambient process state that
+   * nothing in this contract controls.
+   *
+   * OPTIONAL, and meaningfully so. It is `undefined` when there is no directory
+   * to speak of — a headless spike, a scheduled task, `RunCtx.cwd` being the
+   * empty string. Engines must treat absent as "say nothing about a directory"
+   * and MUST NOT substitute `process.cwd()`, which is exactly the inheritance
+   * this field exists to stop. Engines with no filesystem notion at all
+   * (AiSdkEngine) correctly ignore it.
+   */
+  cwd?: string;
   signal: AbortSignal;
 };
 

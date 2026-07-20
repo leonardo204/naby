@@ -96,6 +96,76 @@ export function resolveClaudeAgentSdkPath(): string | null {
   }
 }
 
+/** The SDK's own option/server types, derived from the real package so they
+ *  cannot drift from it silently. */
+type QueryOptions = NonNullable<Parameters<AgentSdk['query']>[0]['options']>;
+type SdkMcpServer = ReturnType<AgentSdk['createSdkMcpServer']>;
+
+/**
+ * The options object handed to `query()` — built HERE, as a pure function, and
+ * exported.
+ *
+ * This is not test scaffolding bolted onto the side: it is the production call
+ * site, extracted so it can be OBSERVED. The wrong-cwd bug survived as long as
+ * it did precisely because this object was an anonymous literal buried in an
+ * argument list — there was no way to look at what the engine was actually
+ * asking the SDK for without running a live model. Two of the fields here are
+ * exactly the kind that fail silently and expensively when wrong (`cwd` points
+ * the backend at the wrong repository; `settingSources` decides whose CLAUDE.md
+ * and hooks get loaded), so "assertable without a network call" is a property
+ * worth the indirection.
+ */
+export function buildQueryOptions(args: {
+  input: EngineRunInput;
+  mcpServer: SdkMcpServer;
+  preToolUse: HookCallback;
+  abortController: AbortController;
+  onStderr: (data: string) => void;
+}): QueryOptions {
+  const { input, mcpServer, preToolUse, abortController, onStderr } = args;
+  return {
+    tools: [], // strip ALL built-ins
+    mcpServers: { [MCP_SERVER_NAME]: mcpServer },
+    hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
+    // deny is authoritative even here:
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
+    // The system prompt travels on its OWN field (contract §2/§6), never as
+    // a `role:'system'` message. The Agent SDK's native slot for it is
+    // `systemPrompt`; passing a bare string replaces the default preset.
+    ...(input.system ? { systemPrompt: input.system } : {}),
+    // WHERE THIS TURN RUNS. Omitting `cwd` does not mean "no directory" —
+    // the SDK documents it as defaulting to `process.cwd()`, which for us
+    // is the Electron main process's cwd (naby's own source checkout), NOT
+    // the project the user opened. That silent inheritance is the bug
+    // documented in full on `EngineRunInput.cwd`: the model was told one
+    // directory by the system prompt while the SDK sat in another, and so
+    // loaded NABY's `.claude/` harness instead of the opened project's.
+    // Absent stays absent — we never substitute a default here.
+    ...(input.cwd ? { cwd: input.cwd } : {}),
+    // SET EXPLICITLY, and the explicitness is the point.
+    //
+    // The SDK's own type doc: "When omitted, all sources are loaded
+    // (matches CLI defaults)." So this was never off — leaving it unset was
+    // already loading user + project + local settings, including the
+    // project's CLAUDE.md and hooks. Being IMPLICIT is precisely what kept
+    // the wrong-cwd bug invisible: a whole harness was being loaded from a
+    // directory nobody had chosen, and no line of code said so.
+    //
+    // Loading the OPENED PROJECT's harness is intentional and desirable —
+    // its CLAUDE.md and hooks are what the user expects to apply. But that
+    // is only TRUE now that `cwd` above points at the opened project; with
+    // the old inherited cwd this same setting was actively harmful. The two
+    // lines are a pair: do not keep this one without that one.
+    settingSources: ['user', 'project', 'local'],
+    // NOTE: allowedTools is deliberately UNSET — listing our tool there
+    // would auto-approve it and silently shadow the gate.
+    abortController,
+    stderr: onStderr,
+    ...(input.model.model ? { model: input.model.model } : {}),
+  };
+}
+
 /** True when the dev engine can actually run here. Cheap; no module is loaded. */
 export function isClaudeAgentSdkAvailable(): boolean {
   return resolveClaudeAgentSdkPath() !== null;
@@ -338,6 +408,105 @@ export function renderPrompt(messages: EngineRunInput['messages']): string {
 }
 
 // ---------------------------------------------------------------------------
+// HARNESS MESSAGES — the ones the driver loop used to drop on the floor.
+// ---------------------------------------------------------------------------
+//
+// `SDKMessage` is a ~35-member union. The driver below acts on exactly three of
+// them (system/init, assistant, result) and every other one — background task
+// lifecycle, compaction boundaries, and the `user` messages through which the
+// SDK surfaces hook output and injected system-reminders — used to vanish
+// silently. Silence is what let the wrong-cwd bug run: another project's hooks
+// were firing into our loop and NOTHING was in a position to notice.
+//
+// This maps a dropped message onto an OBSERVATIONAL label (see the `harness`
+// doc in runtime/engine.ts). Two rules, both deliberate:
+//
+//   1. NEVER copy a raw message body into `detail`. Hook output, task
+//      summaries and subagent descriptions are arbitrary text from whatever
+//      project is open — and `detail` is rendered in the UI. Only CLOSED-SET or
+//      NUMERIC fields (a status enum, a trigger, a token count) are echoed.
+//      Free text is reported by its presence, never by its content.
+//   2. Return null for anything high-frequency or already represented. A
+//      dropped message is not automatically worth a line in the transcript.
+//
+// Exported so the mapping is assertable without a live model call.
+
+export function describeHarnessMessage(
+  msg: unknown,
+): { subtype: string; detail?: string } | null {
+  if (!msg || typeof msg !== 'object') return null;
+  const m = msg as {
+    type?: unknown;
+    subtype?: unknown;
+    status?: unknown;
+    task_type?: unknown;
+    subagent_type?: unknown;
+    compact_metadata?: { trigger?: unknown; pre_tokens?: unknown; post_tokens?: unknown };
+    message?: { content?: unknown };
+  };
+  const type = typeof m.type === 'string' ? m.type : null;
+  if (!type) return null;
+
+  // Partial assistant deltas: one per token. Already rendered as assistant
+  // text; forwarding them would flood the transcript.
+  if (type === 'stream_event') return null;
+
+  // `user` is how the SDK reports BOTH tool results and injected content
+  // (hook output, system-reminders). Tool results already have a first-class
+  // event, so only report the injected case — and only that it HAPPENED. The
+  // injected text itself is exactly the arbitrary project content rule 1 is
+  // about, so it is never echoed.
+  if (type === 'user') {
+    const content = m.message?.content;
+    const hasToolResult =
+      Array.isArray(content) &&
+      content.some(
+        (b) =>
+          !!b && typeof b === 'object' && (b as { type?: unknown }).type === 'tool_result',
+      );
+    if (hasToolResult) return null;
+    const hasText =
+      typeof content === 'string' ? content.length > 0 : extractText(content).length > 0;
+    return hasText ? { subtype: 'user/injected' } : null;
+  }
+
+  const subtype = typeof m.subtype === 'string' ? m.subtype : null;
+  const label = subtype ? `${type}/${subtype}` : type;
+
+  // Curated details — closed-set or numeric fields ONLY (rule 1).
+  if (subtype === 'compact_boundary') {
+    const meta = m.compact_metadata;
+    const trigger = meta?.trigger === 'manual' || meta?.trigger === 'auto' ? meta.trigger : null;
+    const pre = typeof meta?.pre_tokens === 'number' ? meta.pre_tokens : null;
+    const post = typeof meta?.post_tokens === 'number' ? meta.post_tokens : null;
+    const parts = [
+      trigger ? `trigger=${trigger}` : null,
+      pre !== null ? `pre_tokens=${pre}` : null,
+      post !== null ? `post_tokens=${post}` : null,
+    ].filter((p): p is string => p !== null);
+    return parts.length ? { subtype: label, detail: parts.join(' ') } : { subtype: label };
+  }
+
+  if (subtype === 'task_started' || subtype === 'task_notification') {
+    // `description` / `summary` are model-authored free text — omitted by rule 1.
+    const status =
+      m.status === 'completed' || m.status === 'failed' || m.status === 'stopped'
+        ? `status=${m.status}`
+        : null;
+    const kind =
+      typeof m.subagent_type === 'string' && /^[\w-]{1,40}$/.test(m.subagent_type)
+        ? `agent=${m.subagent_type}`
+        : typeof m.task_type === 'string' && /^[\w-]{1,40}$/.test(m.task_type)
+          ? `task=${m.task_type}`
+          : null;
+    const parts = [status, kind].filter((p): p is string => p !== null);
+    return parts.length ? { subtype: label, detail: parts.join(' ') } : { subtype: label };
+  }
+
+  return { subtype: label };
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostics surfaced to the spike (stderr + shadow-warning detection).
 // ---------------------------------------------------------------------------
 
@@ -521,26 +690,18 @@ export class ClaudeAgentSdkEngine implements Engine {
 
     const q = query({
       prompt: renderPrompt(input.messages),
-      options: {
-        tools: [], // strip ALL built-ins
-        mcpServers: { [MCP_SERVER_NAME]: server },
-        hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
-        // deny is authoritative even here:
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        // The system prompt travels on its OWN field (contract §2/§6), never as
-        // a `role:'system'` message. The Agent SDK's native slot for it is
-        // `systemPrompt`; passing a bare string replaces the default preset.
-        ...(input.system ? { systemPrompt: input.system } : {}),
-        // NOTE: allowedTools is deliberately UNSET — listing our tool there
-        // would auto-approve it and silently shadow the gate.
+      // Built by the exported pure function above, so the EXACT object this
+      // production path sends can be asserted without a model call.
+      options: buildQueryOptions({
+        input,
+        mcpServer: server,
+        preToolUse,
         abortController: ac,
-        stderr: (data: string) => {
+        onStderr: (data: string) => {
           diagnostics.stderr.push(data);
           if (data.includes(SHADOW_WARNING)) diagnostics.shadowWarningSeen = true;
         },
-        ...(input.model.model ? { model: input.model.model } : {}),
-      },
+      }),
     });
 
     const driver = (async () => {
@@ -581,6 +742,19 @@ export class ClaudeAgentSdkEngine implements Engine {
               usage,
               costUsd: msg.total_cost_usd,
             });
+          } else {
+            // Everything else the SDK emits. Previously dropped silently; now
+            // surfaced as an OBSERVATIONAL harness event (a short safe label,
+            // never a raw body — see describeHarnessMessage). It does not enter
+            // the transcript and cannot influence the loop or the gate.
+            const described = describeHarnessMessage(msg);
+            if (described) {
+              channel.push({
+                kind: 'harness',
+                subtype: described.subtype,
+                ...(described.detail ? { detail: described.detail } : {}),
+              });
+            }
           }
         }
       } catch (e) {
