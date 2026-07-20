@@ -136,15 +136,35 @@ app.on('window-all-closed', () => {
 // process exit rather than by us. (WAL means that is survivable, not that it is
 // acceptable.)
 
+// The timeout is not belt-and-braces, it is the whole point. Deferring the quit
+// means the app can only exit if `shutdown()` settles — and SPIKE-04 already
+// caught it failing to, which is exactly how Cmd+Q became unable to quit the
+// app. A clean release of the SQLite handle is worth waiting a moment for; it
+// is not worth trapping the user in a process they cannot close. WAL makes an
+// abrupt close survivable, so on timeout we log and quit anyway.
+const TEARDOWN_TIMEOUT_MS = 5_000;
+
 let teardownDone = false;
 app.on('before-quit', (event) => {
   if (teardownDone || !bootResult) return;
   event.preventDefault();
+
+  const finish = (): void => {
+    if (teardownDone) return; // whichever of the two paths lands first wins
+    teardownDone = true;
+    app.quit();
+  };
+
+  const timer = setTimeout(() => {
+    console.error(`[shutdown] timed out after ${TEARDOWN_TIMEOUT_MS}ms — quitting anyway`);
+    finish();
+  }, TEARDOWN_TIMEOUT_MS);
+
   void bootResult
     .shutdown()
     .catch((err: unknown) => console.error('[shutdown]', err))
     .finally(() => {
-      teardownDone = true;
-      app.quit();
+      clearTimeout(timer);
+      finish();
     });
 });

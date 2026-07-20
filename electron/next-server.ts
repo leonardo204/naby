@@ -308,17 +308,40 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      // Stop accepting first, then let Next release its own resources. Keep-
-      // alive sockets from the renderer would otherwise hold `close()` open,
-      // so the window is expected to be gone by the time this runs; the
-      // `closeAllConnections` call makes that independent of the window.
+
+      // Every step is raced against a short deadline, and this is the point
+      // rather than defensiveness: `close()` is awaited on the quit path, so any
+      // step that never settles makes the app unquittable. Cmd+Q was doing
+      // exactly that. Teardown here is best-effort by design — the SQLite handle
+      // is closed separately, and WAL makes an abrupt socket close survivable —
+      // so a stalled step is logged and stepped over, never waited on forever.
+      const step = async (name: string, work: () => Promise<void>): Promise<void> => {
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), 1_500);
+        });
+        try {
+          const result = await Promise.race([work().then(() => 'done' as const), timeout]);
+          if (result === 'timeout') log(`[server] close: ${name} did not settle — continuing`);
+        } catch (err) {
+          log(`[server] close: ${name} failed: ${String(err)} — continuing`);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
+      // Destroy sockets first. Keep-alive connections from the renderer, and
+      // upgraded WebSockets the shell's dispatcher owns, would otherwise hold
+      // `server.close()` open indefinitely — the shell exposes no way to close
+      // its WS server, so severing the sockets is the only lever we have.
       server.closeAllConnections?.();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      try {
+
+      await step('http listener', () =>
+        new Promise<void>((resolve) => server.close(() => resolve())),
+      );
+      await step('next', async () => {
         await app.close?.();
-      } catch {
-        // Next's close is best-effort; a failure here must not block quit.
-      }
+      });
     },
   };
 }
