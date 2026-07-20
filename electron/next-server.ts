@@ -23,8 +23,11 @@
 //
 // It also `process.exit()`s on its single-instance check and installs signal
 // handlers that would fight Electron's own lifecycle. So we host Next ourselves
-// with the design's own pattern, and reuse the shell only as the Next APP DIR.
-// The shell's tree is not modified in any way.
+// with the design's own pattern, and reuse the shell as the Next APP DIR plus
+// one narrow, explicit import: its WebSocket route dispatcher (see step 3
+// below). Not reusing that dispatcher is what silently killed chat — Next's own
+// upgrade handler does not know the shell's `/ws/*` routes. The shell's tree is
+// still not modified in any way.
 //
 // PACKAGING NOTE (what this needs when it ships inside an asar)
 // This module is dev-correct today and packaging-ready in every respect but one,
@@ -68,6 +71,13 @@ import { createGuard, type Guard } from './hardening.js';
 
 type NextRequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
 type NextUpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => Promise<void> | void;
+
+/**
+ * The shell's own WebSocket route dispatcher (`shell/dist/wsServer.mjs`).
+ * Returns true if it claimed the upgrade, false if the path is not one of its
+ * routes and Next should get it instead.
+ */
+type ShellUpgradeDispatcher = (req: IncomingMessage, socket: Duplex, head: Buffer) => boolean;
 
 type NextApp = {
   prepare(): Promise<void>;
@@ -152,6 +162,7 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
 
   let handle: NextRequestHandler | undefined;
   let upgrade: NextUpgradeHandler | undefined;
+  let dispatchShellUpgrade: ShellUpgradeDispatcher | undefined;
   let guard: Guard | undefined;
 
   // A 403 says nothing about WHY. The reason is logged locally for debugging;
@@ -188,10 +199,13 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
   // exact surface CVE-2025-52882 exploited: handshakes are not CORS-preflighted,
   // so if the server does not refuse them nothing else will.
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    if (!guard || !upgrade) {
+    if (!guard || !upgrade || !dispatchShellUpgrade) {
       socket.destroy();
       return;
     }
+    // THE GUARD STILL RUNS FIRST, AND UNCHANGED. Routing below only decides
+    // WHICH handler serves an upgrade that has already been authorised; it can
+    // never let one through that the guard refused.
     const verdict = guard.checkUpgrade(req);
     if (!verdict.ok) {
       log(`[hardening] 403 upgrade ${verdict.reason}`);
@@ -199,6 +213,15 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
       socket.destroy();
       return;
     }
+    // The shell's WS routes (`/ws/session-stream`, `/ws/global-state`) get first
+    // refusal, then Next. `shell/server.mjs` does exactly this, and omitting it
+    // here is what broke chat: Next's upgrade handler does not know these paths,
+    // and rather than refusing an unknown one it leaves the socket OPEN AND
+    // UNANSWERED. The client therefore saw no `open`, no `close` and no error —
+    // just silence until useChatStream's 15s watchdog gave up with
+    // "An error occurred, please retry". Nothing was logged on either side,
+    // which is precisely why this presented as a mystery rather than a 403.
+    if (dispatchShellUpgrade(req, socket, head)) return;
     void upgrade(req, socket, head);
   });
 
@@ -244,6 +267,35 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
 
   handle = app.getRequestHandler();
   upgrade = app.getUpgradeHandler();
+
+  // ---- 3. The shell's WebSocket routes ------------------------------------
+  //
+  // Loaded from the shell's BUILT server bundle, the same specifier
+  // `shell/server.mjs` uses in production. It is a real ESM file on disk, so it
+  // is imported (not `shellRequire`d) via a file URL — which also works inside
+  // an asar, and `shell/dist/**` is in electron-builder's file list.
+  //
+  // TWO MODULE REALMS ARE FINE HERE, BY DESIGN. This copy of the WS server is
+  // not the same module instance as the one inside `.next/server` that
+  // `/api/chat` runs in. Both the run registry (`sessionRunHub`) and the socket
+  // set (`globalStateClients`) are pinned to `globalThis` for exactly this
+  // reason, and their comments name this topology explicitly. So the writer
+  // (the API route) and the reader (this dispatcher) still meet in one registry.
+  //
+  // A FAILURE HERE IS FATAL, deliberately. Without this dispatcher chat is dead
+  // but every other surface — sidebar, projects, engine toggle, sign-in status —
+  // keeps working, so the app looks healthy while its main feature silently
+  // times out. That is the bug this block fixes; it must not be able to
+  // reintroduce itself quietly as a fallback.
+  const wsServerUrl = pathToFileURL(join(shellDir, 'dist', 'wsServer.mjs')).href;
+  const wsServerModule = (await import(wsServerUrl)) as { handleUpgrade?: ShellUpgradeDispatcher };
+  if (typeof wsServerModule.handleUpgrade !== 'function') {
+    throw new Error(
+      `shell WS dispatcher missing: ${wsServerUrl} exports no \`handleUpgrade\` — ` +
+        'chat cannot stream. Did `npm run build:shell` (which runs `build:server`) run?',
+    );
+  }
+  dispatchShellUpgrade = wsServerModule.handleUpgrade;
 
   log(`[server] ready on http://127.0.0.1:${port} (loopback only, token required)`);
 

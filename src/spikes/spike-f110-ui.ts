@@ -34,6 +34,8 @@
 //   (e) no `Cockpit` / `OpenCockpit` text remains in the rendered UI
 //   (f) the Claude login indicator renders beside the engine toggle and its
 //       status matches the runtime's independent answer
+//   (i) the chat stream's WebSocket channel is dispatched: a same-origin
+//       handshake from the page OPENS and is answered with a snapshot
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -150,7 +152,46 @@ function evaluate(outcome: ChildOutcome): Check[] {
   const hover = findOne(obs, 'hover');
   const home = findOne(obs, 'home');
   const login = findOne(obs, 'login');
+  const wsStream = findOne(obs, 'wsStream');
   const done = findOne(obs, 'done');
+
+  // -- (i) the chat stream's WebSocket channel is dispatched ----------------
+  //
+  // REGRESSION GUARD. `next-server.ts` used to pass every upgrade straight to
+  // Next, which does not know the shell's `/ws/*` routes and does not refuse an
+  // unknown one — it leaves the socket open and unanswered. Chat therefore died
+  // silently: no server log, no client error, just useChatStream's 15s watchdog
+  // writing "An error occurred, please retry" while every other surface of the
+  // app kept working.
+  //
+  // THE OUTCOME MUST BE `message`, NOT MERELY "NOT HUNG". The handler sends a
+  // snapshot immediately on connect, and that snapshot is the thing the chat
+  // client waits for; a socket that opened and then sat silent would reproduce
+  // the original bug exactly. `hung` is reported as its own outcome so the
+  // failure reads as the real one rather than as a timeout somewhere.
+  //
+  // This is also the POSITIVE half of the hardening story — a page-created
+  // WebSocket carries no custom header, so accepting it proves the HttpOnly
+  // token cookie authenticates a same-origin upgrade. SPIKE-04 still owns the
+  // four refusals (foreign Host, foreign Origin, no token, wrong token).
+  checks.push({
+    name: '(i) /ws/session-stream accepts a same-origin handshake from the page and answers with a snapshot',
+    pass:
+      wsStream?.outcome === 'message' &&
+      wsStream.opened === true &&
+      typeof wsStream.messageType === 'string' &&
+      (wsStream.messageType as string).length > 0,
+    evidence: wsStream
+      ? `url=${String(wsStream.url)} outcome=${String(wsStream.outcome)} opened=${String(wsStream.opened)} ` +
+        `firstMessageType=${JSON.stringify(wsStream.messageType ?? null)} bytes=${String(wsStream.bytes ?? 0)}` +
+        (wsStream.outcome === 'hung'
+          ? ' — the upgrade was never answered: the shell WS dispatcher is not wired into next-server.ts'
+          : '') +
+        (wsStream.outcome === 'closed'
+          ? ` closeCode=${String(wsStream.code)} reason=${JSON.stringify(wsStream.reason ?? '')}`
+          : '')
+      : 'no `wsStream` observation',
+  });
 
   // -- (a) a close button on every tab, including the last -----------------
   //

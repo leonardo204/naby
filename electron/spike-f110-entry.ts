@@ -10,6 +10,8 @@
 //      last one lands on the home screen
 //   2. the window title is `Naby (Alpha version)…`
 //   3. the Claude login indicator renders and agrees with reality
+//   4. the chat stream's WebSocket channel is dispatched and answers a
+//      same-origin handshake (the regression guard for the silent chat break)
 //
 // Same shape as spike-entry.ts / spike-f104-entry.ts: exercise the real path,
 // emit NDJSON observations, decide nothing. The driver
@@ -118,6 +120,57 @@ async function run(): Promise<void> {
      })()`,
   )) as Record<string, unknown>;
   emit('ready', ready);
+
+  // -------------------------------------------------------------------------
+  // (i) The chat stream's WebSocket channel is actually dispatched.
+  // -------------------------------------------------------------------------
+  //
+  // REGRESSION GUARD for a bug that broke chat while leaving every visible
+  // surface working. `next-server.ts` handed WS upgrades straight to Next's own
+  // upgrade handler and never to the SHELL's route dispatcher, so
+  // `/ws/session-stream` reached nobody. Next does not refuse an unknown
+  // upgrade path — it leaves the socket OPEN AND UNANSWERED — so the client got
+  // no `open`, no `close` and no error, the server logged nothing, and the only
+  // symptom was useChatStream's 15-second watchdog eventually writing "An error
+  // occurred, please retry" into the bubble. Sidebar, projects, engine toggle
+  // and sign-in status all still worked, which is what made it so hard to see.
+  //
+  // WHY THIS AND NOT "SEND A CHAT MESSAGE": a real turn needs a signed-in Claude
+  // and costs money and minutes, so it cannot run in `spike:nokeys`. The
+  // handshake is the exact thing that was broken and it is free and
+  // deterministic, so THAT is what is asserted. `HANGS` is a distinct outcome
+  // from `close` here on purpose — the old behaviour produced neither an open
+  // nor a close, and an assertion that only checked "did not receive data"
+  // would have passed on a socket that was refused outright.
+  //
+  // The socket is opened from the PAGE, with no cooperation from the preload
+  // bridge, so it authenticates exactly as the chat client does: the HttpOnly
+  // token cookie riding a same-origin handshake. It therefore also proves the
+  // hardened upgrade path ACCEPTS the legitimate case — the complement to
+  // SPIKE-04's four refusals, which stay unchanged.
+  const wsStream = (await win.webContents.executeJavaScript(
+    `(async () => {
+       const url = location.origin.replace('http', 'ws') + '/ws/session-stream?sessionId=spike-f110-probe';
+       return await new Promise((resolve) => {
+         let opened = false;
+         const sock = new WebSocket(url);
+         const done = (outcome, extra) => resolve({ url, outcome, opened, ...extra });
+         // Comfortably longer than a loopback handshake, and shorter than the
+         // driver's run timeout so a hang reports as a hang, not as a dead spike.
+         const timer = setTimeout(() => done('hung', {}), 20000);
+         sock.onopen = () => { opened = true; };
+         sock.onmessage = (e) => {
+           clearTimeout(timer);
+           let type = null;
+           try { type = JSON.parse(String(e.data)).type ?? null; } catch { /* non-JSON */ }
+           try { sock.close(); } catch { /* already closing */ }
+           done('message', { messageType: type, bytes: String(e.data).length });
+         };
+         sock.onclose = (e) => { clearTimeout(timer); done('closed', { code: e.code, reason: e.reason }); };
+       });
+     })()`,
+  )) as Record<string, unknown>;
+  emit('wsStream', wsStream);
 
   // -------------------------------------------------------------------------
   // Dismiss the first-run wizard.
