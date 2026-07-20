@@ -30,7 +30,7 @@
 //   (c) closing the last tab lands on the home screen, keeps the project
 //       iframes mounted, and leaves the iframe with a fresh tab (not an empty
 //       shell)
-//   (d) the window title is `Naby (Alpha version)`, with the directory after it
+//   (d) the window title is exactly `Naby (Alpha version)` — no directory suffix
 //   (e) no `Cockpit` / `OpenCockpit` text remains in the rendered UI
 //   (f) the Claude login indicator renders beside the engine toggle and its
 //       status matches the runtime's independent answer
@@ -222,27 +222,29 @@ function evaluate(outcome: ChildOutcome): Check[] {
 
   // -- (d) the window title -------------------------------------------------
   //
-  // All three surfaces, and the directory must come AFTER the product name —
-  // "anomaly-agent" alone in a title bar is exactly the bug being fixed.
+  // The title is the product name and NOTHING else. It used to append the
+  // working directory, which read as if the app were named after whichever
+  // project happened to be open. Asserting the project name is ABSENT is the
+  // point: a title that grows a suffix again fails here.
   const documentTitle = String(title?.documentTitle ?? '');
   const windowTitle = String(title?.windowTitle ?? '');
   const projectName = String(findOne(obs, 'window')?.projectName ?? ' ');
-  const startsRight = documentTitle.startsWith(EXPECTED_TITLE);
-  const dirAfterName =
-    documentTitle.includes(projectName) &&
-    documentTitle.indexOf(projectName) > documentTitle.indexOf(EXPECTED_TITLE);
+  const startsRight = documentTitle === EXPECTED_TITLE;
+  const dirAbsent = projectName.trim() !== '' && !documentTitle.includes(projectName);
+
+
   checks.push({
-    name: `(d) the window title is \`${EXPECTED_TITLE}\`, with the working directory after it`,
+    name: `(d) the window title is exactly \`${EXPECTED_TITLE}\`, with no directory appended`,
     pass:
       startsRight &&
-      dirAfterName &&
-      windowTitle.startsWith(EXPECTED_TITLE) &&
+      dirAbsent &&
+      windowTitle === EXPECTED_TITLE &&
       !/Cockpit/i.test(documentTitle) &&
       !/Cockpit/i.test(windowTitle),
     evidence: title
       ? `document.title=${JSON.stringify(documentTitle)} BrowserWindow.getTitle()=${JSON.stringify(windowTitle)} ` +
-        `iframeTitle=${JSON.stringify(title.iframeTitle)} startsWithProductName=${String(startsRight)} ` +
-        `dirAfterProductName=${String(dirAfterName)}`
+        `iframeTitle=${JSON.stringify(title.iframeTitle)} exactProductName=${String(startsRight)} ` +
+        `projectNameAbsent=${String(dirAbsent)} project=${JSON.stringify(projectName)}`
       : 'no `title` observation',
   });
 

@@ -15,6 +15,9 @@
 // backoff net, not as the readiness signal.
 
 import { app, BrowserWindow, dialog } from 'electron';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
 
 let bootResult: BootResult | undefined;
@@ -35,8 +38,40 @@ if (!app.requestSingleInstanceLock()) {
   void start();
 }
 
+/**
+ * Set the dock icon when running UNPACKAGED.
+ *
+ * In a packaged build electron-builder bakes `build/icon.png` into the bundle
+ * (`Resources/icon.icns` + `CFBundleIconFile`) and the OS reads it from there —
+ * nothing to do at runtime. Unpackaged, there is no bundle, so macOS shows
+ * Electron's own atom icon and the app looks unbranded during development.
+ *
+ * Best-effort on purpose: a missing or unreadable icon must never stop the app
+ * from launching. `app.dock` is macOS-only.
+ */
+function applyDevDockIcon(): void {
+  if (process.platform !== 'darwin' || app.isPackaged || !app.dock) return;
+  const iconPath = join(dirname(fileURLToPath(import.meta.url)), '../../build/icon.png');
+  if (!existsSync(iconPath)) {
+    console.warn(`[icon] dev dock icon not found at ${iconPath}`);
+    return;
+  }
+  try {
+    app.dock.setIcon(iconPath);
+    // Logged so this is verifiable without screenshotting someone's desktop:
+    // setIcon returns void and throws only on a hard failure, so the log is the
+    // only evidence that the branded icon was actually applied in dev.
+    console.log(`[icon] dev dock icon applied from ${iconPath}`);
+  } catch (err) {
+    // Cosmetic only — never fatal.
+    console.warn(`[icon] dev dock icon failed: ${String(err)}`);
+  }
+}
+
 async function start(): Promise<void> {
   await app.whenReady();
+
+  applyDevDockIcon();
 
   try {
     bootResult = await boot();
