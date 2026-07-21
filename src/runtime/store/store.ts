@@ -36,6 +36,40 @@ export type SessionRef = {
   createdAt: number;
   /** epoch ms */
   lastUsedAt: number;
+  /**
+   * Owning project (its `cwd`), when the session belongs to one. This is a
+   * LINK, not a key: it is consistent with the keying invariant above — nothing
+   * looks a message/memory/usage row up by `cwd`, they stay keyed by
+   * `sessionId` only. A projectless session (`cwd` absent) is fully valid.
+   */
+  cwd?: string;
+  /** Whether the session is pinned in the browsing list. */
+  pinned?: boolean;
+  /** Coarse lifecycle state, e.g. 'active' | 'ended'; absent = unknown. */
+  status?: string;
+};
+
+// ---------------------------------------------------------------------------
+// Projects (Naby-owned; keyed by cwd) — contract §6.1
+// ---------------------------------------------------------------------------
+
+/**
+ * A project is a working directory the user opens. Projects are keyed by `cwd`
+ * (the directory is the project's identity), which is a DIFFERENT key space
+ * from sessions/messages/memory/usage (keyed by `sessionId`). The session↔
+ * project relationship is a LINK on the session (`SessionRef.cwd`), never a key
+ * for session state — the keying invariant at the top of this file is intact.
+ */
+export type Project = {
+  /** The working directory: the project's identity and primary key. */
+  cwd: string;
+  /** Display name; defaults (at the call site) to the cwd basename. */
+  title?: string;
+  /** epoch ms */
+  createdAt: number;
+  /** epoch ms — drives MRU ordering of the project list. */
+  lastOpenedAt: number;
+  pinned: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -112,8 +146,10 @@ export interface Store {
   // -- sessions ------------------------------------------------------------
 
   /** Mint a new session. `providerId` records the provider expected to answer
-   * first; it is a hint and may change on any later turn. */
-  createSession(providerId: string, title?: string): SessionRef;
+   * first; it is a hint and may change on any later turn. `cwd`, when supplied,
+   * links the new session to an owning project — a LINK, not a key (§6 keying
+   * invariant); it is optional so existing callers are unaffected. */
+  createSession(providerId: string, title?: string, cwd?: string): SessionRef;
 
   getSession(sessionId: string): SessionRef | undefined;
 
@@ -176,6 +212,45 @@ export interface Store {
   /** Insert or replace by `name`. */
   upsertMcpEntry(entry: McpEntry): void;
   removeMcpEntry(name: string): void;
+
+  // -- projects (Naby-owned; keyed by cwd; contract §6.1) ------------------
+
+  /** All projects, MOST-RECENTLY-OPENED FIRST (ORDER BY last_opened_at DESC). */
+  listProjects(): Project[];
+
+  /** Insert or update by `cwd`. Creates the row if absent (sets createdAt AND
+   * lastOpenedAt = now); otherwise applies `patch` and leaves lastOpenedAt
+   * untouched unless the patch sets it. Idempotent. */
+  upsertProject(
+    cwd: string,
+    patch?: Partial<Omit<Project, 'cwd' | 'createdAt'>>,
+  ): Project;
+
+  /** Mark the project opened now (bumps lastOpenedAt → front of the MRU list).
+   * Creates it if absent, so opening a new directory needs no prior upsert. */
+  touchProject(cwd: string): Project;
+
+  /** Delete the project AND CASCADE: every session whose `cwd` = this, and each
+   * of those sessions' messages + memory + usage. Never leaves orphaned session
+   * state; sessions are NOT reparented. */
+  removeProject(cwd: string): void;
+
+  // -- session ↔ project links (§6.1) -------------------------------------
+
+  /** Sessions owned by this project, MOST-RECENTLY-USED FIRST. */
+  listSessionsByProject(cwd: string): SessionRef[];
+
+  /** Link an existing session to a project (or pass null to unlink). Touches
+   * neither messages nor memory — only the owning-project link. */
+  setSessionProject(sessionId: string, cwd: string | null): void;
+
+  // -- pinned sessions (§6.1) ---------------------------------------------
+
+  /** Pin/unpin a session in the browsing list. */
+  setSessionPinned(sessionId: string, pinned: boolean): void;
+
+  /** Pinned sessions, MOST-RECENTLY-USED FIRST. */
+  listPinnedSessions(): SessionRef[];
 
   // -- lifecycle -----------------------------------------------------------
 

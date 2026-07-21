@@ -26,6 +26,7 @@
     "spike:f104": "npm run build:runtime && npm run build:electron && tsx src/spikes/spike-f104-credentials.ts",
     "spike:f107": "tsx src/spikes/spike-f107-f108.ts",
     "spike:f110": "npm run build:app && tsx src/spikes/spike-f110-ui.ts",
+    "spike:store-projects": "tsx src/spikes/spike-store-projects.ts",
     "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build:app && node scripts/build-dist.mjs --publish never",
     "dist:mac": "npm run build:app && node scripts/build-dist.mjs --mac --publish never",

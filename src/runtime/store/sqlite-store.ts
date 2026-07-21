@@ -35,7 +35,7 @@ import { createRequire } from 'node:module';
 // actual load happens lazily inside openSilently() below.
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import type { RuntimeMessage } from '../engine.js';
-import type { McpEntry, SessionRef, Store, UsageRecord } from './store.js';
+import type { McpEntry, Project, SessionRef, Store, UsageRecord } from './store.js';
 
 // ---------------------------------------------------------------------------
 // Experimental-warning suppression — TARGETED, not blanket.
@@ -103,7 +103,16 @@ function openSilently(path: string): DatabaseSyncType {
 // additive and every statement is IF NOT EXISTS, so an existing v1 database
 // picks them up on next open with no data migration — the version is stamped to
 // record that it happened.
-const SCHEMA_VERSION = 2;
+//
+// v3 adds the `projects` table (Naby-owned, keyed by cwd) and three columns on
+// `sessions` — cwd (the owning-project LINK, not a key), pinned, status. The
+// table and its index are IF NOT EXISTS so a fresh open is a no-op, and the
+// three session columns are declared directly in the CREATE TABLE below so a
+// BRAND-NEW database (current === 0) already has them. Because SQLite's
+// `ALTER TABLE ... ADD COLUMN` cannot be IF NOT EXISTS-guarded, an EXISTING v1/
+// v2 database instead picks the columns up through the version-gated ALTERs in
+// migrate() (run only when 0 < current < 3). Additive: no backfill, no loss.
+const SCHEMA_VERSION = 3;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -111,7 +120,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_id  TEXT NOT NULL,          -- last provider used: a HINT, not a constraint
   title        TEXT,
   created_at   INTEGER NOT NULL,
-  last_used_at INTEGER NOT NULL
+  last_used_at INTEGER NOT NULL,
+  cwd          TEXT,                          -- owning project (a LINK, not a key); NULL = projectless
+  pinned       INTEGER NOT NULL DEFAULT 0,    -- 0/1
+  status       TEXT                           -- e.g. 'active' | 'ended'; NULL = unknown
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -163,6 +175,20 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- v3. Naby-owned projects, keyed by cwd (the directory IS the project's
+-- identity). A SEPARATE key space from sessions/messages/memory/usage (keyed by
+-- session id); the session↔project relationship lives as sessions.cwd, a LINK
+-- and never a key for session state, so the keying invariant is intact.
+CREATE TABLE IF NOT EXISTS projects (
+  cwd            TEXT PRIMARY KEY,
+  title          TEXT,
+  created_at     INTEGER NOT NULL,
+  last_opened_at INTEGER NOT NULL,       -- drives MRU ordering of the project list
+  pinned         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS projects_by_opened ON projects (last_opened_at DESC);
 `;
 
 // ---------------------------------------------------------------------------
@@ -175,6 +201,11 @@ type SessionRow = {
   title: string | null;
   created_at: number;
   last_used_at: number;
+  // v3 additions. Optional on the type because a row read from a db that has
+  // just migrated (or a partial SELECT) may not carry them.
+  cwd?: string | null;
+  pinned?: number | null;
+  status?: string | null;
 };
 
 function toSessionRef(row: SessionRow): SessionRef {
@@ -185,7 +216,30 @@ function toSessionRef(row: SessionRow): SessionRef {
     lastUsedAt: Number(row.last_used_at),
   };
   if (row.title !== null && row.title !== undefined) ref.title = row.title;
+  // cwd is a LINK, surfaced when present; it is never a key for session state.
+  if (row.cwd !== null && row.cwd !== undefined) ref.cwd = row.cwd;
+  if (row.pinned !== null && row.pinned !== undefined) ref.pinned = Number(row.pinned) !== 0;
+  if (row.status !== null && row.status !== undefined) ref.status = row.status;
   return ref;
+}
+
+type ProjectRow = {
+  cwd: string;
+  title: string | null;
+  created_at: number;
+  last_opened_at: number;
+  pinned: number;
+};
+
+function toProject(row: ProjectRow): Project {
+  const project: Project = {
+    cwd: row.cwd,
+    createdAt: Number(row.created_at),
+    lastOpenedAt: Number(row.last_opened_at),
+    pinned: Number(row.pinned) !== 0,
+  };
+  if (row.title !== null && row.title !== undefined) project.title = row.title;
+  return project;
 }
 
 let uuidCounter = 0;
@@ -232,8 +286,21 @@ export class SqliteStore implements Store {
 
     this.db.exec(DDL);
 
-    // v0 -> v1 is just "the schema now exists". Future migrations branch here
-    // on `current` before the version is stamped.
+    // v0 -> v1 is just "the schema now exists". v1/v2 -> v3 needs real column
+    // work: the `projects` table and its index are already handled by the DDL
+    // above (IF NOT EXISTS), and a BRAND-NEW db (current === 0) got the three
+    // new session columns directly from the CREATE TABLE. But SQLite's
+    // `ALTER TABLE ... ADD COLUMN` is NOT IF NOT EXISTS-guarded, so for an
+    // EXISTING v1/v2 db we must add those columns exactly once — gated on the
+    // version so a re-open (current === 3) never re-runs them. Additive only:
+    // every column is nullable or carries a DEFAULT, so existing session rows
+    // stay valid with no backfill and no data is touched.
+    if (current > 0 && current < 3) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN cwd TEXT');
+      this.db.exec('ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+      this.db.exec('ALTER TABLE sessions ADD COLUMN status TEXT');
+    }
+
     if (current !== SCHEMA_VERSION) {
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     }
@@ -245,7 +312,7 @@ export class SqliteStore implements Store {
 
   // -- sessions ------------------------------------------------------------
 
-  createSession(providerId: string, title?: string): SessionRef {
+  createSession(providerId: string, title?: string, cwd?: string): SessionRef {
     this.assertOpen();
     const now = Date.now();
     const ref: SessionRef = {
@@ -255,12 +322,15 @@ export class SqliteStore implements Store {
       lastUsedAt: now,
     };
     if (title !== undefined) ref.title = title;
+    // cwd is the owning-project LINK, not a key: recording it here never
+    // changes how messages/memory/usage are keyed (still session id only).
+    if (cwd !== undefined) ref.cwd = cwd;
     this.db
       .prepare(
-        `INSERT INTO sessions (session_id, provider_id, title, created_at, last_used_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (session_id, provider_id, title, created_at, last_used_at, cwd)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(ref.sessionId, providerId, title ?? null, now, now);
+      .run(ref.sessionId, providerId, title ?? null, now, now, cwd ?? null);
     return ref;
   }
 
@@ -484,6 +554,136 @@ export class SqliteStore implements Store {
   removeMcpEntry(name: string): void {
     this.assertOpen();
     this.db.prepare('DELETE FROM mcp_servers WHERE name = ?').run(name);
+  }
+
+  // -- projects (keyed by cwd; contract §6.1) ------------------------------
+
+  listProjects(): Project[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare('SELECT * FROM projects ORDER BY last_opened_at DESC')
+      .all() as ProjectRow[];
+    return rows.map(toProject);
+  }
+
+  upsertProject(
+    cwd: string,
+    patch?: Partial<Omit<Project, 'cwd' | 'createdAt'>>,
+  ): Project {
+    this.assertOpen();
+    const now = Date.now();
+    const existing = this.db
+      .prepare('SELECT * FROM projects WHERE cwd = ?')
+      .get(cwd) as ProjectRow | undefined;
+
+    if (!existing) {
+      // Insert: createdAt AND lastOpenedAt = now unless the patch overrides
+      // lastOpenedAt. title/pinned come from the patch or default.
+      const title = patch?.title ?? null;
+      const pinned = patch?.pinned ? 1 : 0;
+      const lastOpenedAt = patch?.lastOpenedAt ?? now;
+      this.db
+        .prepare(
+          `INSERT INTO projects (cwd, title, created_at, last_opened_at, pinned)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(cwd, title, now, lastOpenedAt, pinned);
+      return toProject({
+        cwd,
+        title,
+        created_at: now,
+        last_opened_at: lastOpenedAt,
+        pinned,
+      });
+    }
+
+    // Update: apply only the fields present in the patch; leave createdAt and
+    // (unless the patch sets it) lastOpenedAt untouched. Idempotent.
+    const title = patch?.title !== undefined ? patch.title : existing.title;
+    const pinned =
+      patch?.pinned !== undefined ? (patch.pinned ? 1 : 0) : existing.pinned;
+    const lastOpenedAt =
+      patch?.lastOpenedAt !== undefined
+        ? patch.lastOpenedAt
+        : existing.last_opened_at;
+    this.db
+      .prepare(
+        'UPDATE projects SET title = ?, pinned = ?, last_opened_at = ? WHERE cwd = ?',
+      )
+      .run(title ?? null, pinned, lastOpenedAt, cwd);
+    return toProject({
+      cwd,
+      title: title ?? null,
+      created_at: existing.created_at,
+      last_opened_at: lastOpenedAt,
+      pinned,
+    });
+  }
+
+  touchProject(cwd: string): Project {
+    this.assertOpen();
+    return this.upsertProject(cwd, { lastOpenedAt: Date.now() });
+  }
+
+  removeProject(cwd: string): void {
+    this.assertOpen();
+    // CASCADE, explicit and in the right order — mirrors deleteSession. FK
+    // enforcement is off (see constructor), so orphans would otherwise linger:
+    // first every session-keyed row for the project's sessions, then the
+    // sessions, then the project itself. Wrapped in a transaction so a crash
+    // mid-cascade can never leave a half-deleted project.
+    const sessionRows = this.db
+      .prepare('SELECT session_id FROM sessions WHERE cwd = ?')
+      .all(cwd) as { session_id: string }[];
+    this.db.exec('BEGIN');
+    try {
+      for (const { session_id } of sessionRows) {
+        this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(session_id);
+        this.db.prepare('DELETE FROM memory WHERE session_id = ?').run(session_id);
+        this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(session_id);
+      }
+      this.db.prepare('DELETE FROM sessions WHERE cwd = ?').run(cwd);
+      this.db.prepare('DELETE FROM projects WHERE cwd = ?').run(cwd);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  // -- session ↔ project links ---------------------------------------------
+
+  listSessionsByProject(cwd: string): SessionRef[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare('SELECT * FROM sessions WHERE cwd = ? ORDER BY last_used_at DESC')
+      .all(cwd) as SessionRow[];
+    return rows.map(toSessionRef);
+  }
+
+  setSessionProject(sessionId: string, cwd: string | null): void {
+    this.assertOpen();
+    // Only the owning-project link moves; messages and memory are untouched.
+    this.db
+      .prepare('UPDATE sessions SET cwd = ? WHERE session_id = ?')
+      .run(cwd, sessionId);
+  }
+
+  // -- pinned sessions -----------------------------------------------------
+
+  setSessionPinned(sessionId: string, pinned: boolean): void {
+    this.assertOpen();
+    this.db
+      .prepare('UPDATE sessions SET pinned = ? WHERE session_id = ?')
+      .run(pinned ? 1 : 0, sessionId);
+  }
+
+  listPinnedSessions(): SessionRef[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare('SELECT * FROM sessions WHERE pinned = 1 ORDER BY last_used_at DESC')
+      .all() as SessionRow[];
+    return rows.map(toSessionRef);
   }
 
   // -- lifecycle -----------------------------------------------------------

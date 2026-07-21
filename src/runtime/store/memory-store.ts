@@ -15,7 +15,7 @@
 // state.
 
 import type { RuntimeMessage } from '../engine.js';
-import type { McpEntry, SessionRef, Store, UsageRecord } from './store.js';
+import type { McpEntry, Project, SessionRef, Store, UsageRecord } from './store.js';
 
 type SessionState = {
   ref: SessionRef;
@@ -36,6 +36,10 @@ export class MemoryStore implements Store {
   private readonly sessions = new Map<string, SessionState>();
   private readonly mcp = new Map<string, McpEntry>();
   private readonly settings = new Map<string, string>();
+  // Projects, keyed by cwd — a SEPARATE key space from sessions. The session↔
+  // project relationship lives as SessionRef.cwd (a LINK, never a key for
+  // session state), exactly as in SqliteStore.
+  private readonly projects = new Map<string, Project>();
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -58,10 +62,13 @@ export class MemoryStore implements Store {
 
   // -- sessions ------------------------------------------------------------
 
-  createSession(providerId: string, title?: string): SessionRef {
+  createSession(providerId: string, title?: string, cwd?: string): SessionRef {
     const sessionId = mintSessionId();
     const s = this.state(sessionId, providerId);
     if (title !== undefined) s.ref.title = title;
+    // cwd is the owning-project LINK, not a key: it does not change how
+    // messages/memory/usage are stored (still under this session id only).
+    if (cwd !== undefined) s.ref.cwd = cwd;
     return { ...s.ref };
   }
 
@@ -149,6 +156,85 @@ export class MemoryStore implements Store {
 
   removeMcpEntry(name: string): void {
     this.mcp.delete(name);
+  }
+
+  // -- projects (keyed by cwd; contract §6.1) ------------------------------
+
+  listProjects(): Project[] {
+    return [...this.projects.values()]
+      .map((p) => ({ ...p }))
+      .sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
+  }
+
+  upsertProject(
+    cwd: string,
+    patch?: Partial<Omit<Project, 'cwd' | 'createdAt'>>,
+  ): Project {
+    const now = Date.now();
+    const existing = this.projects.get(cwd);
+    if (!existing) {
+      const created: Project = {
+        cwd,
+        createdAt: now,
+        lastOpenedAt: patch?.lastOpenedAt ?? now,
+        pinned: patch?.pinned ?? false,
+      };
+      if (patch?.title !== undefined) created.title = patch.title;
+      this.projects.set(cwd, created);
+      return { ...created };
+    }
+    // Apply only the patched fields; leave createdAt and (unless patched)
+    // lastOpenedAt untouched. Idempotent.
+    if (patch?.title !== undefined) existing.title = patch.title;
+    if (patch?.pinned !== undefined) existing.pinned = patch.pinned;
+    if (patch?.lastOpenedAt !== undefined) existing.lastOpenedAt = patch.lastOpenedAt;
+    return { ...existing };
+  }
+
+  touchProject(cwd: string): Project {
+    return this.upsertProject(cwd, { lastOpenedAt: Date.now() });
+  }
+
+  removeProject(cwd: string): void {
+    // CASCADE: dropping a SessionState from the map clears that session's
+    // messages/memory/usage in one move, so no orphan can remain. Sessions are
+    // NOT reparented — deleting a project deletes its sessions.
+    for (const [sessionId, s] of this.sessions) {
+      if (s.ref.cwd === cwd) this.sessions.delete(sessionId);
+    }
+    this.projects.delete(cwd);
+  }
+
+  // -- session ↔ project links ---------------------------------------------
+
+  listSessionsByProject(cwd: string): SessionRef[] {
+    return [...this.sessions.values()]
+      .filter((s) => s.ref.cwd === cwd)
+      .map((s) => ({ ...s.ref }))
+      .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+  }
+
+  setSessionProject(sessionId: string, cwd: string | null): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    // Only the link moves; messages and memory are untouched.
+    if (cwd === null) delete s.ref.cwd;
+    else s.ref.cwd = cwd;
+  }
+
+  // -- pinned sessions -----------------------------------------------------
+
+  setSessionPinned(sessionId: string, pinned: boolean): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    s.ref.pinned = pinned;
+  }
+
+  listPinnedSessions(): SessionRef[] {
+    return [...this.sessions.values()]
+      .filter((s) => s.ref.pinned === true)
+      .map((s) => ({ ...s.ref }))
+      .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
   }
 
   // -- lifecycle -----------------------------------------------------------
