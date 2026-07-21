@@ -62,7 +62,7 @@ export {
 // it constructs is its own choice. SqliteStore is the durable one — note that
 // `node:sqlite` is experimental and its availability inside Electron is still
 // to be verified in F1-02/SPIKE-04 (see sqlite-store.ts).
-export type { McpEntry, SessionRef, Store, UsageRecord } from './runtime/store/store.js';
+export type { McpEntry, Project, SessionRef, Store, UsageRecord } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
