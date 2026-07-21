@@ -6,16 +6,36 @@
 // THE VERIFIED CONFIG — the load-bearing details, each mapped to a contract
 // invariant (§3):
 //
-//   * options.tools: []                    -> strip ALL built-in executors.
-//   * our tools via createSdkMcpServer      -> the only tools the model can call
-//     are ours, each dispatched to our runtime Executor.
+//   * built-ins are ENABLED (we do NOT pass `tools`).
+//     This is the deliberate reversal of the old `tools: []`. The point of the
+//     harness-visibility work (3b) is to SHOW skill / subagent activity, and for
+//     that the model must actually be able to call the built-in Task / Skill
+//     tools — which `tools: []` stripped along with everything else. So the tool
+//     list is no longer the safety mechanism. What keeps built-ins safe is the
+//     GATE, run with the Phase-1 floor (runtime/gate.ts `phase1HarnessFloor`):
+//     a deny-by-default allowlist that permits read-only inspection + delegation
+//     + skills + our own runtime tools, and DENIES Bash/Write/Edit/… — from the
+//     main loop AND from inside any spawned subagent. The PreToolUse hook fires
+//     for every one of those calls, so a subagent's internal `rm -rf` is denied
+//     before it runs (proven in spike-harness-visibility / spike-subagent-gate).
+//   * our tools via createSdkMcpServer      -> our runtime tools stay registered
+//     and callable ALONGSIDE the built-ins, each dispatched to our runtime
+//     Executor, and each still passing through the gate.
 //   * gate as a PreToolUse hook             -> deny is authoritative even under
-//     bypassPermissions; the tool never runs until the gate returns allow.
+//     bypassPermissions, and it reaches subagents; a tool never runs until the
+//     gate returns allow. This is now the ONLY thing standing between "observe
+//     the harness" and "auto-approve a subagent's mutation", so it is not
+//     optional decoration — it is the control.
 //   * NEVER list a tool in allowedTools     -> that auto-approves it and
-//     silently shadows the gate. We verify the SDK does not emit
+//     silently shadows the gate. This invariant is UNCHANGED and matters MORE
+//     now that built-ins are live: listing anything there would let a built-in
+//     bypass the floor. We verify the SDK does not emit
 //     CLAUDE_SDK_CAN_USE_TOOL_SHADOWED (captured off stderr).
 //   * normalize mcp__<server>__<tool>       -> bare tool names, and the SDK's
-//     events -> our EngineEvent.
+//     events -> our EngineEvent. Built-in tool RESULTS arrive on `user`-role
+//     messages (the SDK, not our MCP wrapper, runs them); the driver maps those
+//     tool_result blocks to `tool_result` EngineEvents so a Task/Skill call
+//     surfaces its result, not just its request.
 //
 // The SDK owns its model loop; that is expected. This engine drives query() to
 // completion and surfaces the gate + executor callbacks.
@@ -124,7 +144,15 @@ export function buildQueryOptions(args: {
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
   return {
-    tools: [], // strip ALL built-ins
+    // NOTE: `tools` is deliberately NOT set. Setting `tools: []` stripped ALL
+    // built-in executors, which also killed Task / Skill / delegation — so the
+    // harness could never run and its activity could never be shown. Omitting
+    // the option leaves the SDK's built-ins ENABLED (verified in
+    // spike-harness-visibility, where built-ins were live precisely because
+    // `tools` was not passed). Safety no longer comes from an empty tool list;
+    // it comes from the GATE below (with the Phase-1 floor), which sees every
+    // built-in call — including calls issued INSIDE a spawned subagent — and can
+    // authoritatively deny mutation/exec before it runs. See the header block.
     mcpServers: { [MCP_SERVER_NAME]: mcpServer },
     hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
     // deny is authoritative even here:
@@ -507,6 +535,50 @@ export function describeHarnessMessage(
 }
 
 // ---------------------------------------------------------------------------
+// BUILT-IN TOOL RESULTS — the other half of harness visibility.
+// ---------------------------------------------------------------------------
+//
+// Once built-ins are enabled, the SDK runs Task / Skill / Read / … ITSELF and
+// reports their outcome as `tool_result` blocks on a `user`-role message (our
+// own MCP tools, by contrast, run in our wrapper which pushes the result event
+// directly). Those blocks are a genuine tool result — the same shape the client
+// already renders for our tools — so forwarding them is in-bounds. This extracts
+// them into a normalized shape; the driver decides which to emit (skipping ids
+// our wrapper already surfaced, so a result is never emitted twice).
+//
+// Exported so the extraction is assertable without a live model call.
+
+export function extractToolResultBlocks(
+  msg: unknown,
+): { toolUseId: string; isError: boolean; content: string }[] {
+  if (!msg || typeof msg !== 'object') return [];
+  const m = msg as { type?: unknown; message?: { content?: unknown } };
+  if (m.type !== 'user') return [];
+  const content = m.message?.content;
+  if (!Array.isArray(content)) return [];
+  const out: { toolUseId: string; isError: boolean; content: string }[] = [];
+  for (const b of content) {
+    if (!b || typeof b !== 'object') continue;
+    const block = b as {
+      type?: unknown;
+      tool_use_id?: unknown;
+      is_error?: unknown;
+      content?: unknown;
+    };
+    if (block.type !== 'tool_result') continue;
+    if (typeof block.tool_use_id !== 'string') continue;
+    const text =
+      typeof block.content === 'string' ? block.content : extractText(block.content);
+    out.push({
+      toolUseId: block.tool_use_id,
+      isError: block.is_error === true,
+      content: text,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostics surfaced to the spike (stderr + shadow-warning detection).
 // ---------------------------------------------------------------------------
 
@@ -561,6 +633,20 @@ export class ClaudeAgentSdkEngine implements Engine {
     };
     const dequeue = (name: string) => pending.get(name)?.shift();
 
+    // Built-in tool bookkeeping, now that built-ins are enabled.
+    //   toolNameById   — bare name per tool_use_id, captured in the PreToolUse
+    //                    hook so a built-in tool_result (which carries only the
+    //                    id) can be surfaced with its tool name.
+    //   ownToolResultIds — the ids our OWN MCP executor already emitted a
+    //                    tool_result for. The SDK ALSO echoes those results back
+    //                    on a `user` message; without this set the driver would
+    //                    emit a SECOND tool_result for the same call. Built-in
+    //                    tools (Task/Skill/Read/…) are run by the SDK itself, not
+    //                    our wrapper, so their ids are absent here and the driver
+    //                    is the only place their result surfaces.
+    const toolNameById = new Map<string, string>();
+    const ownToolResultIds = new Set<string>();
+
     // Build our tools as an in-process MCP server. Each handler runs the
     // runtime executor on the GATE-APPROVED input, and refuses to run if no
     // gate decision is queued (which would mean the gate was bypassed).
@@ -605,6 +691,10 @@ export class ClaudeAgentSdkEngine implements Engine {
             },
             signal: input.signal,
           });
+          // Record that WE surfaced this result, so the driver's built-in
+          // tool_result mapping does not emit a duplicate when the SDK echoes
+          // the same result back on a `user` message.
+          ownToolResultIds.add(approved.toolCallId);
           channel.push({
             kind: 'tool_result',
             toolCallId: approved.toolCallId,
@@ -631,6 +721,10 @@ export class ClaudeAgentSdkEngine implements Engine {
       if (hookInput.hook_event_name !== 'PreToolUse') return {};
       const h = hookInput as PreToolUseHookInput;
       const name = bareName(h.tool_name);
+      // Remember the bare name for this call id so a built-in tool_result
+      // (which arrives on a later `user` message carrying only the id) can be
+      // surfaced with its tool name.
+      toolNameById.set(h.tool_use_id, name);
       const call: ToolCall = {
         toolCallId: h.tool_use_id,
         toolName: name,
@@ -742,6 +836,36 @@ export class ClaudeAgentSdkEngine implements Engine {
               usage,
               costUsd: msg.total_cost_usd,
             });
+          } else if (msg.type === 'user') {
+            // A `user` message carries the SDK's built-in tool RESULTS (Task /
+            // Skill / Read / …) — and separately the injected hook output /
+            // system-reminders. Surface the built-in tool results as first-class
+            // `tool_result` EngineEvents so a Task or Skill call shows its
+            // outcome, not just its request. Skip ids our own MCP wrapper
+            // already emitted (the SDK echoes those back here too), so no result
+            // is emitted twice.
+            for (const r of extractToolResultBlocks(msg)) {
+              if (ownToolResultIds.has(r.toolUseId)) continue;
+              channel.push({
+                kind: 'tool_result',
+                toolCallId: r.toolUseId,
+                toolName: toolNameById.get(r.toolUseId) ?? 'tool',
+                isError: r.isError,
+                output: { content: r.content, isError: r.isError },
+              });
+            }
+            // The injected-content case (hook output / system-reminders) still
+            // surfaces as an OBSERVATIONAL harness label — never its raw body.
+            // describeHarnessMessage returns null for a tool_result-only user
+            // message, so this does not double up on the results above.
+            const described = describeHarnessMessage(msg);
+            if (described) {
+              channel.push({
+                kind: 'harness',
+                subtype: described.subtype,
+                ...(described.detail ? { detail: described.detail } : {}),
+              });
+            }
           } else {
             // Everything else the SDK emits. Previously dropped silently; now
             // surfaced as an OBSERVATIONAL harness event (a short safe label,

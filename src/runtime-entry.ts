@@ -38,7 +38,10 @@ export type {
 
 export {
   makeGate,
+  phase1HarnessFloor,
   scriptedPolicy,
+  OBSERVATION_BUILTINS,
+  DANGEROUS_BUILTINS,
   type DecisionPolicy,
   type GateLogEntry,
   type MakeGateResult,
