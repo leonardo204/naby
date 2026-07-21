@@ -2,11 +2,11 @@
 id: phase-1-desktop-shell
 title: Phase 1 — Chat-first Desktop Shell (incl. Phase 0 spike)
 type: impl
-version: 0.3.1
+version: 0.4.0
 status: review
-scope: Phase 0 feasibility spike and Phase 1 execution — Electron packaging of the OpenCockpit fork, chat-first trimming, the engine abstraction (AI SDK v7 prod + Agent SDK dev/test), per-provider API-key auth, provider-independent runtime scaffold, local SQLite sessions
+scope: Phase 0 feasibility spike and Phase 1 execution — Electron packaging of the OpenCockpit fork, chat-first trimming, the engine abstraction (AI SDK v7 prod + Agent SDK dev/test), per-provider API-key auth, provider-independent runtime scaffold, local SQLite sessions, and the Naby-store realignment (projects/sessions ownership + browsing-UI re-backing)
 related: [personalized-agent-desktop-app, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-2-personalization-hitl]
-updated: 2026-07-20
+updated: 2026-07-21
 ---
 
 # Phase 1 — Chat-first Desktop Shell
@@ -131,6 +131,22 @@ Chat-only requires removing six of seven feature packages, and the seam is not c
 - Which of the five providers must pass F1-04's "≥2 providers" bar first (likely Anthropic + OpenAI).
 
 Product-level open questions live in [`personalized-agent-desktop-app`](../design/personalized-agent-desktop-app.md) §6.
+
+---
+
+## 9. Naby-store realignment — the store the UI reads (Phase A→E)
+
+The Naby Layer owns projects, sessions, memory, and context (design §3.6). This realignment makes that real: today Naby's store is *written* every turn but is **invisible to the UI** (no API exposes `listSessions`/`getSession`/`deleteSession`), and every browsing screen reads the wrong layer — project list ← `~/.cockpit/projects.json`; per-project state ← `~/.cockpit/projects/<enc>/session.json`; SessionBrowser + ProjectSessionsModal ← provider-native `~/.claude/projects/*.jsonl`; Recent ← `~/.cockpit/state.json`; Pinned ← `~/.cockpit/pinned-sessions.json`. There is no Project entity in the store and no session↔project link. Phases B–E close this; **full A→E realignment is in scope for Phase 1.** Design §3.6, architecture §8, contracts §6.1/§8.
+
+| Phase | Item | Description | Acceptance criterion |
+|---|---|---|---|
+| **A** | Baseline (done) | The Naby store exists and is written each turn (`sessions`/`messages`/`memory`/`usage`/`settings`/`mcp`), driver `node:sqlite`, `SCHEMA_VERSION = 2`. `SessionRef` has no `cwd`; there is no `projects` table. | Established — this is the starting point the realignment builds on. |
+| **B** | Store schema + one-time import | Bump `SCHEMA_VERSION` 2 → 3. Add the `projects` table and `sessions.cwd`/`pinned`/`status` columns via an **additive, version-gated** migration (arch §8.1: `ADD COLUMN` runs only when `current < 3`, `IF NOT EXISTS` for the table, then stamp `user_version = 3`; no backfill). Implement the new `Store` ops (contracts §6.1): `listProjects`, `upsertProject`, `removeProject` (CASCADE), `touchProject`, `listSessionsByProject`, `setSessionProject`, `setSessionPinned`, `listPinnedSessions`. Import `~/.cockpit/projects.json` **once** into `projects` (idempotent, `settings`-flag guarded). | Opening an existing v2 DB upgrades to v3 with **no data loss**; the migration is idempotent across repeated opens. `removeProject(cwd)` deletes the project's sessions + their messages/memory/usage (a store test asserts zero orphans). The cockpit import runs once and re-running it changes nothing. `listProjects`/`listSessionsByProject`/`listPinnedSessions` return MRU order. |
+| **C** | API re-backing per route | Re-implement `/api/projects`, `/api/project-state`, `/api/sessions/projects[/…]`, `/api/global-state` (recent), `/api/pinned-sessions`, and the session **transcript** route over the Naby store (contracts §8). Keep the **client** API surface (`fetchProjects`, `loadSessionsByProject`, …) unchanged — only the server handler's source moves. | Each route returns the same JSON shape the client already consumes, now sourced from `app.db`. The transcript view renders from `getMessages(sessionId)`. A test hitting each route asserts the response no longer depends on any `~/.cockpit/*` or `~/.claude/*` file (e.g. passes with those files absent). |
+| **D** | Record cwd/project on session lifecycle | In `naby.ts`, on session **create** and **touch**, record the owning project: `touchProject(cwd)` and link the session (`setSessionProject`/`cwd` on create). Projectless sessions remain valid (`cwd` absent). | Creating/using a session in a working directory produces a `projects` row (or bumps its `last_opened_at`) and a session whose `cwd` points to it. Switching provider mid-session leaves `cwd`, messages, and memory unchanged (extends the existing provider-independence check). |
+| **E** | Remove provider/cockpit direct reads from browsing UIs | Delete the direct-file reads from the browsing UIs: project list, per-project session state, SessionBrowser, ProjectSessionsModal, Recent, Pinned. They consume only the re-backed routes (Phase C). Provider dirs and `~/.cockpit/*` files remain on disk (engine-only per design §3.6) but are **no longer read by any session/project UI**. | A grep of the browsing UI code shows **no** reads of `~/.claude/projects`, `~/.cockpit/projects.json`, `~/.cockpit/state.json`, `~/.cockpit/pinned-sessions.json`, or `~/.cockpit/projects/<enc>/session.json`. With those files deleted, the session/project/recent/pinned screens still render from `app.db`. |
+
+**Sequencing**: B before C (routes need the store ops), C before E (UIs need the routes before their direct reads are removed), D alongside C (so newly created sessions carry a `cwd` the routes can group by). Verification of B–E belongs in [`phase-1-test-plan`](../test/phase-1-test-plan.md).
 
 ---
 

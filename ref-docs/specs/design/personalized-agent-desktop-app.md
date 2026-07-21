@@ -2,20 +2,21 @@
 id: personalized-agent-desktop-app
 title: Personalized Persona Agent Desktop App — Design Overview
 type: design
-version: 0.6.0
+version: 0.7.0
 status: review
 scope: Product concept, locked decisions, layer architecture, engine and provider model, cross-phase risks and roadmap — the shared context both phase plans build on
 related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-2-personalization-hitl]
 supersedes: personalized-agent-desktop-app-build-plan
-updated: 2026-07-19
+updated: 2026-07-21
 ---
 
 # Personalized Persona Agent Desktop App — Design Overview
 
 > What we are building and why: fork OpenCockpit as the shell, then layer our core capabilities (personalization quality, HITL) on top.
 
-**Document info** · Written 2026-07-19 · Version v0.6 (Draft) · Audience: the team executing this plan, and the project owner · Status: Review
+**Document info** · Written 2026-07-19 · Version v0.7 (Draft) · Audience: the team executing this plan, and the project owner · Status: Review
 
+> v0.7 changes — **the Naby Layer is declared the single owner of projects, sessions, memory, and context.** Naby keeps its own canonical records in its runtime store (`app.db`) and serves every session/project/recent/pinned browsing UI *from that store* (§3.6). Provider-native stores (`~/.claude/projects`, …) stay strictly **below** the Naby Layer, read **only by the engine**, never by Naby's session/project UI. **Project** becomes a first-class Naby-owned entity (the store gains a `projects` table; sessions link to a project + provider). This resolves the open `[needs confirmation]` on how much of OpenCockpit's feature-agent survives (§2.3): the browsing UIs survive, but their **data source moves to the Naby store**. Existing `~/.cockpit/projects.json` is imported once into the Naby store on first run (no data loss). Full A→E realignment is in scope → [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md).
 > v0.6 changes — **the engine becomes a swappable backend, and the runtime layer becomes provider-independent.** Three refinements: (1) an **API key is per provider, with no personal/organization role** — the app just takes a provider's key. (2) **Memory, context, MCP, tools, the gate, and sessions are provider- and key-independent** — switching provider changes only which model answers; everything else carries over (§3.2, §3.3). (3) The **engine is an abstraction with two backends** behind one seam ("engine owns the loop; gate + executors + tools are injected"): **`AiSdkEngine`** (production, five providers) and **`ClaudeAgentSdkEngine`** (dev/test only, Claude via local OAuth, no API key, no metered cost) — both verified to attach our provider-independent gate and executors identically (§3.4).
 > v0.5 changes — **the engine pivot.** Five providers became mandatory (Anthropic, Bedrock Claude, Azure OpenAI, Gemini, OpenAI). Investigation showed that serving GPT/Gemini/Azure-OpenAI to the Claude Code engine over a translating gateway is unreliable and unsupported (§3.5), so the **execution engine changes from the Claude Agent SDK to Vercel AI SDK v7** — the only surveyed TS framework with first-party adapters for all five providers plus an ownable pre-execution approval gate (§3.3, §3.4). The approval gate moves from a Claude Code `PreToolUse` hook to **our own code inside the tool executor we own**. Tool executors are now **built in-house** (Phase 2). The OpenCockpit fork is kept for the UI shell and packaging; its engine layer is replaced. A side effect: AI SDK v7 does not persist sessions, so the local SQLite store (F1-05) becomes genuinely necessary rather than redundant — resolving a v0.4 contradiction.
 > v0.4 changes: auth reduced to organization API key only (personal-subscription path withdrawn) and multi-provider support added, tiered by wire-protocol compatibility. Superseded by v0.5, which drops the tiering in favor of first-party multi-provider.
@@ -72,6 +73,9 @@ updated: 2026-07-19
 | Desktop framework | **Electron** | Bundled Node → hosts the Next.js server + our engine as-is (minimum friction) |
 | Execution engine | **Abstraction with two backends** — `AiSdkEngine` (prod, Vercel AI SDK v7) + `ClaudeAgentSdkEngine` (dev/test, local OAuth) | Engine owns the loop; runtime injects gate + executors. Seam verified against both backends (§3.4) |
 | Runtime layer | **Provider- and key-independent** | Memory, context, MCP, tools, gate, sessions never see a provider or key; switching provider changes only which model answers (§3.4) |
+| **Layer ownership** | **The Naby Layer owns projects, sessions, memory, and context** | Naby holds its own canonical records in `app.db` and serves the UI from them. Provider-native stores stay BELOW, read only by the engine, never by Naby's session/project UI (§3.6) |
+| **Project entity** | **First-class, Naby-owned** | The runtime store gains a `projects` table; every session links to a project + provider. No session/project browsing UI reads a provider-native store (§3.6) |
+| **Browsing-UI data source** | **Re-backed onto the Naby store** | Session/project/recent/pinned lists and the transcript view all read the Naby store; the client API surface is unchanged, only the server implementation moves (§3.6) |
 | Tool executors | **Built in-house** (Phase 2) | The engine orchestrates; we supply and run the tools, which is what makes the gate ours |
 | Phase 2 composition | **2a deterministic gate + 2b asynchronous evaluation agent** | Control and measurement in our code; judgment by LLM, off the hot path |
 | Auth | **One API key per provider — no personal/org role** | The app just takes a provider's key; a key is read only by the engine to select the model |
@@ -83,7 +87,7 @@ updated: 2026-07-19
 - Desktop framework is **locked to Electron** (see 2.2). Tauri was excluded because it requires Node sidecar plumbing. Native-binding build issues (e.g. any node-pty we use for a shell tool) need checking in Phase 0.
 - OS priority is assumed to be **Windows + macOS first, Linux later** (most internal non-developers are on Windows). > [needs confirmation]
 - OpenCockpit's license is MIT per the repository's own declaration — the **LICENSE file and dependency tree must be verified before forking** [1]. Note the redistribution concern is now smaller: without the Claude Agent SDK we no longer bundle Anthropic's ~247 MB non-OSS engine binaries. > [needs confirmation]
-- The five AI SDK provider adapters plus our own tool executors replace the bulk of what the fork's engine layer did. How much of OpenCockpit's `feature-agent` survives that replacement is a Phase 0 question. > [needs confirmation]
+- The five AI SDK provider adapters plus our own tool executors replace the bulk of what the fork's engine layer did. How much of OpenCockpit's `feature-agent` survives that replacement is now **decided** (v0.7): the **browsing UIs survive** — session list, project list, recent, pinned, and the transcript view — but their **data source moves to the Naby store** (§3.6). The fork's direct reads of provider-native and cockpit files (`~/.claude/projects/*.jsonl`, `~/.cockpit/projects.json`, `~/.cockpit/…`) are removed; the same client API surface is re-backed over `app.db`. What does *not* survive is the engine layer and any UI code that read a provider-native store directly.
 
 ---
 
@@ -108,7 +112,7 @@ flowchart TD
     MCP["MCP registry"]
     H["Guardrails — block secrets · destructive commands"]
     J["Event logger — approval rate · edit distance · override rate"]
-    K["Local store — SQLite (we own)<br>sessions · memory · eval events · policy"]
+    K["Naby store — SQLite app.db (we own)<br>projects · sessions · memory · context · eval events · policy<br>the UI reads sessions/projects THROUGH this store"]
   end
   subgraph ENG["Engine — swappable backend (owns the model loop)"]
     E1["AiSdkEngine — prod<br>5 first-party providers"]
@@ -130,6 +134,7 @@ flowchart TD
 * The **engine owns the model loop and calls back into the injected gate + executors** — the gate is defined once, in the runtime, and each engine attaches it at its own pre-execution point (AI SDK: our execute-less loop; Agent SDK: PreToolUse hook). Same gate logic, different attachment.
 * Switching provider (or switching to the dev engine) changes **only which model answers**. Memory, MCP, tools, gate, and sessions are unaffected — they never see a provider or a key.
 * Only `AiSdkEngine` reads the credential vault, and only to select the model.
+* **K is the Naby store — the single owner of projects, sessions, memory, and context (§3.6).** The session/project browsing UI reads projects and sessions *through K*, never from a provider-native store. Only the engine reads a provider's native store, and only to run a turn.
 * Runtime + `AiSdkEngine` + K are Phase 1; executors, guardrails, logger, and L are Phase 2.
 * Source: original work (2026)
 
@@ -173,6 +178,41 @@ The five providers are served by **native first-party adapters**, not by routing
 - **OpenRouter, the largest multi-provider Anthropic-skin operator, publicly declined this use case.**
 
 For a product whose core feature is a reliable approval gate, a path where `tool_use` can arrive empty (approval card for a blank command) or never arrive (gate never fires) is disqualifying. Native adapters put us on each provider's stable first-party API instead of a moving three-way version matrix.
+
+### 3.6 The Naby Layer owns projects, sessions, memory, and context
+
+**The Naby Layer is the single owner of projects, sessions, memory, and context, and it serves them to the UI from its own runtime store (`app.db`).** Provider backends (Claude / Gemini / OpenAI / …) keep their own native session lists, agent lists, context, and memory *below* the Naby Layer — but those native stores are read **only by the engine**, to run a turn on that provider. Naby's session/project browsing UI never reads a provider-native store; it reads Naby's canonical records.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                            NABY LAYER  (we own)                        │
+│   canonical records in app.db — served straight to the UI             │
+│   ┌────────────┬────────────┬────────────┬────────────┬────────────┐  │
+│   │  Projects  │  Sessions  │   Agents   │  Context   │   Memory   │  │
+│   └────────────┴────────────┴────────────┴────────────┴────────────┘  │
+│   session list · project list · recent · pinned · transcript view     │
+│   ── all fed from app.db, never from a provider-native store ──        │
+└───────────────────────────────▲──────────────────────────────────────┘
+                                 │  engine reads native stores ONLY to run a turn
+        ┌────────────────────────┼────────────────────────┐
+        ▼                        ▼                        ▼
+┌────────────────┐      ┌────────────────┐      ┌────────────────┐
+│     Claude     │      │     Gemini     │      │  GPT / OpenAI  │   …
+│ native sessions│      │ native sessions│      │ native sessions│
+│ · agents       │      │ · agents       │      │ · agents       │
+│ · context      │      │ · context      │      │ · context      │
+│ · memory       │      │ · memory       │      │ · memory       │
+│ (~/.claude/…)  │      │  (provider dir)│      │  (provider dir)│
+└────────────────┘      └────────────────┘      └────────────────┘
+   provider-native stores — BELOW the Naby Layer, read only by the engine
+```
+
+- **Naby keeps its own canonical records.** It does not read a provider's native store to render its UI. A provider dir (`~/.claude/projects`, …) is the engine's private input for running a turn on that provider; it is never the source of truth for what projects/sessions the user sees.
+- **Project is a first-class Naby entity.** The runtime store gains a `projects` table; every session links to a project (its owning `cwd`) and to a provider (a hint — the last one that answered, §3.4). There was no Project entity and no session↔project link before v0.7 — this closes that gap.
+- **Every browsing UI is re-backed onto the Naby store.** Session list, project list, recent, pinned, and the session **transcript** are served from `app.db` (`messages` for the transcript, not a provider `.jsonl`). The **client** API surface (fetchProjects, loadSessionsByProject, …) is unchanged; only the server implementation moves to the Naby store. See [`phase-1-shell-architecture`](phase-1-shell-architecture.md) §8 and [`phase-1-contracts`](../interface/phase-1-contracts.md) §6–§8.
+- **One-time import.** Any existing `~/.cockpit/projects.json` is imported once into the Naby `projects` table on first open (idempotent — no data loss). After that, `app.db` is authoritative.
+
+Why this matters: the audit found Naby's store is *written* during every turn (transcripts, memory, usage) but was **invisible to the UI** — no API exposed `listSessions`/`getSession`/`deleteSession`, and every session/project/recent/pinned screen read the *wrong* layer (provider-native `.jsonl` or `~/.cockpit/*` files). v0.7 makes the layer we own the layer the user sees.
 
 ---
 

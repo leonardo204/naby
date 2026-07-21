@@ -2,11 +2,11 @@
 id: phase-1-shell-architecture
 title: Phase 1 — Desktop Shell Technical Design
 type: design
-version: 0.2.0
+version: 0.3.0
 status: draft
-scope: Technical design for the Phase 1 shell — Electron process model, embedded Next server, engine abstraction (AI SDK v7 prod / Agent SDK dev), provider adapters, secret storage, localhost hardening, packaging and update pipeline
+scope: Technical design for the Phase 1 shell — Electron process model, embedded Next server, engine abstraction (AI SDK v7 prod / Agent SDK dev), provider adapters, secret storage, the Naby store as owner of projects/sessions, browsing-UI API re-backing, localhost hardening, packaging and update pipeline
 related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-contracts, phase-1-test-plan]
-updated: 2026-07-19
+updated: 2026-07-21
 ---
 
 # Phase 1 — Desktop Shell Technical Design
@@ -204,6 +204,65 @@ Operational notes: the `zip` target must be enabled even when only shipping `.dm
 - **utilityProcess for node-pty** — would isolate a known teardown crash, but no public evidence either way `[?]`. Revisit if the crash appears.
 - **Universal macOS binaries** — only a concern if a native module (node-pty) ships; without the old engine binary the asar-merge conflict is much smaller. Ship per-arch until there is a reason not to.
 - **Asar integrity as a security control** — enable the fuses, but the native payloads are uncovered (§5), so it is defense in depth, not a boundary.
+
+---
+
+## 8. Naby store — projects, sessions, and browsing-UI re-backing
+
+The Naby Layer is the single owner of projects, sessions, memory, and context (design §3.6). This section specifies the store changes and the API re-backing that make that ownership real. The contracts are in [`phase-1-contracts`](../interface/phase-1-contracts.md) §6–§8; the execution items are Phase B–E in [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md).
+
+**The gap being closed** `[E]`. The audit found Naby's store is *written* during every turn (transcripts, memory, usage) but was **invisible to the UI**: no IPC/HTTP route exposed `listSessions`/`getSession`/`deleteSession`, and every browsing screen read the wrong layer — the project list from `~/.cockpit/projects.json`, per-project session state from `~/.cockpit/projects/<enc>/session.json`, the SessionBrowser + ProjectSessionsModal from provider-native `~/.claude/projects/*.jsonl`, Recent from `~/.cockpit/state.json`, Pinned from `~/.cockpit/pinned-sessions.json`. There was no Project entity in the Naby store and no session↔project link. v0.7 re-backs all of it onto `app.db`.
+
+### 8.1 Schema additions
+
+The store is the one described in [`phase-1-contracts`](../interface/phase-1-contracts.md) §6 (driver `node:sqlite`, `SCHEMA_VERSION` in the `user_version` pragma, every statement `IF NOT EXISTS` so an existing DB upgrades additively on next open). v0.7 bumps **`SCHEMA_VERSION` 2 → 3** and adds one table plus three columns, all additive:
+
+```sql
+-- NEW: projects. A project is a working directory (cwd) the user opens.
+CREATE TABLE IF NOT EXISTS projects (
+  cwd            TEXT PRIMARY KEY,     -- the working directory: the project's identity
+  title          TEXT,                 -- display name (defaults to the cwd basename)
+  created_at     INTEGER NOT NULL,
+  last_opened_at INTEGER NOT NULL,     -- drives MRU ordering of the project list
+  pinned         INTEGER NOT NULL DEFAULT 0,   -- 0/1
+  archived       INTEGER NOT NULL DEFAULT 0    -- 0/1; room for hide-without-delete
+);
+
+CREATE INDEX IF NOT EXISTS projects_by_opened ON projects (last_opened_at DESC);
+
+-- sessions gains its link to a project + browsing state. Nullable cwd keeps the
+-- keying invariant intact: a projectless session is still valid and is keyed by
+-- session id only. cwd is a FOREIGN-KEY-SHAPED reference to projects.cwd but is
+-- enforced by the store, not a DB constraint (FK enforcement stays off, §sqlite).
+ALTER TABLE sessions ADD COLUMN cwd    TEXT;                     -- owning project; NULL = projectless
+ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN status TEXT;                     -- e.g. 'active' | 'ended'; NULL = unknown
+```
+
+`ALTER TABLE … ADD COLUMN` is **not** `IF NOT EXISTS`-guarded in SQLite, so the migration must be version-gated in `migrate()`: run the three `ADD COLUMN`s and the `CREATE TABLE projects` only when `current < 3`, then stamp `user_version = 3`. This matches the existing additive, version-branched migration style described in §6 of the store's own header (the v1→v2 usage/settings tables were added the same way). New columns are nullable or carry a `DEFAULT`, so existing session rows remain valid with no backfill. The keying invariant is preserved: `cwd` is an owning-project *link*, not a new key for messages/memory/usage — those stay keyed by session id only.
+
+### 8.2 One-time import of `~/.cockpit/projects.json`
+
+On first open **after** the v3 migration, if `~/.cockpit/projects.json` exists, import each entry into `projects` (`cwd` → PK, `title`/`created_at`/`last_opened_at`/`pinned` mapped from the file, absent fields defaulted). The import is **idempotent** — keyed by `cwd` with `INSERT … ON CONFLICT(cwd) DO NOTHING`, and guarded by a `settings` flag (e.g. `cockpit_import_done = '1'`) so it runs once and never clobbers records the user has since changed in `app.db`. No data is lost; after import, `app.db` is authoritative and the JSON file is no longer read.
+
+### 8.3 API re-backing — same client surface, Naby store underneath
+
+The existing HTTP routes are **re-implemented over the Naby store**; the browsing UIs and their client helpers (`fetchProjects`, `loadSessionsByProject`, …) are **unchanged** — only the server handler's data source moves. Per-route contracts (inputs/outputs) are in [`phase-1-contracts`](../interface/phase-1-contracts.md) §8.
+
+| Route | Was reading (wrong layer) | Now reads (Naby store) |
+|---|---|---|
+| `/api/projects` | `~/.cockpit/projects.json` | `projects` table (MRU by `last_opened_at`) |
+| `/api/project-state` | `~/.cockpit/projects/<enc>/session.json` | `sessions WHERE cwd = ?` (+ project row) |
+| `/api/sessions/projects[/…]` | `~/.claude/projects/*.jsonl` (provider-native) | `sessions` joined to `projects` |
+| `/api/global-state` (recent) | `~/.cockpit/state.json` | `sessions ORDER BY last_used_at DESC` |
+| `/api/pinned-sessions` | `~/.cockpit/pinned-sessions.json` | `sessions WHERE pinned = 1` |
+| session **transcript** display | `~/.claude/projects/*.jsonl` | `messages` table (`getMessages(sessionId)`) |
+
+The transcript view is the sharpest change: the conversation the user reads is the one Naby persisted (`messages`), which is also the one replayed to the engine each turn — so what is shown and what is re-sent can never diverge, and a provider switch mid-session does not change the displayed history (design §3.4). New store operations backing these routes (`listProjects`, `upsertProject`, `removeProject` with CASCADE, `touchProject`, `listSessionsByProject`, `setSessionProject`, pinned-session ops, MRU ordering) are specified in [`phase-1-contracts`](../interface/phase-1-contracts.md) §6.
+
+### 8.4 Provider dirs remain — engine-only
+
+`~/.claude/projects` and the equivalent per-provider directories are **not deleted**. They remain the engine's private input for running a turn on that provider (design §3.6). What changes is the *reader*: after v0.7, **no session/project browsing UI reads a provider-native store** — those reads are removed (Phase E). Only the engine touches a provider dir, and only to run a turn.
 
 ---
 

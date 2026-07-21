@@ -2,11 +2,11 @@
 id: phase-1-test-plan
 title: Phase 1 — Verification Plan (spikes, acceptance, 3-OS matrix)
 type: test
-version: 0.2.1
+version: 0.3.0
 status: draft
-scope: How Phase 0 spikes and Phase 1 acceptance criteria are verified — spikes, per-feature acceptance, security tests, the 3-OS matrix, and irreversible release checkpoints
+scope: How Phase 0 spikes and Phase 1 acceptance criteria are verified — spikes, per-feature acceptance, the Naby-store realignment (Phases B–E), security tests, the 3-OS matrix, and irreversible release checkpoints
 related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, personalized-agent-desktop-app]
-updated: 2026-07-20
+updated: 2026-07-21
 ---
 
 # Phase 1 — Verification Plan
@@ -61,6 +61,21 @@ Not release gates, but each is an unverified assumption.
 | F1-08 | Add two providers and one MCP server | Both providers complete a turn; the MCP tool is callable **through the gate** (`gate_request` observed); loaded via `listTools()`, not auto-executed |
 | F1-09 | Publish n+1; check from n | Applies on Windows and Linux; unsigned macOS reports `unsupported` and offers a download |
 | F1-10 | Tag a release | NSIS `.exe`, `.dmg`, `.AppImage`, `.deb` all produced |
+
+---
+
+## 2a. Naby-store realignment (impl §9, Phases B–E)
+
+Verifies that the Naby Layer is the single owner of projects/sessions/memory/context and that the UI reads THROUGH the store — closing the gap where the store was written every turn but invisible to the UI (design §3.6, architecture §8, contracts §6.1/§8). One row per realignment phase; each maps to that phase's acceptance criterion in [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md) §9.
+
+| Phase | Test | Pass |
+|---|---|---|
+| **B** — schema + import | Open an existing `SCHEMA_VERSION = 2` `app.db`; open it again | Upgrades to v3 with **no data loss**; migration is idempotent (second open changes nothing). `projects` table + `sessions.cwd`/`pinned`/`status` present. `removeProject(cwd)` leaves **zero orphan** rows in messages/memory/usage for that project's sessions. `listProjects`/`listSessionsByProject`/`listPinnedSessions` return **MRU order**. The one-time `~/.cockpit/projects.json` import runs once and re-running changes nothing (settings-flag guarded) |
+| **C** — API re-backing | Hit `/api/projects`, `/api/project-state`, `/api/sessions/projects[/…]`, `/api/global-state`, `/api/pinned-sessions`, and the transcript route **with every `~/.cockpit/*` and `~/.claude/*` file absent** | Each returns the same JSON shape the client already consumes, sourced from `app.db`; the transcript renders from `getMessages(sessionId)`. Response does **not** depend on any cockpit/provider file |
+| **D** — session↔project link | Create/use a session in a working directory; then switch provider mid-session | A `projects` row appears (or `last_opened_at` bumps) and the session's `cwd` points to it. Switching provider leaves `cwd`, messages, and memory unchanged (extends F1-05's provider-independence check) |
+| **E** — no direct reads | `grep -a` the browsing UI code (project list, per-project state, SessionBrowser, ProjectSessionsModal, Recent, Pinned) | **Zero** reads of `~/.claude/projects`, `~/.cockpit/projects.json`, `~/.cockpit/state.json`, `~/.cockpit/pinned-sessions.json`, or `~/.cockpit/projects/<enc>/session.json`. With those files deleted, every session/project/recent/pinned screen still renders from `app.db` |
+
+**Ordering**: B → C → E, with D alongside C (impl §9 sequencing). A regression like SPIKE-07 (provider-independence) is extended by phase D rather than duplicated.
 
 ---
 

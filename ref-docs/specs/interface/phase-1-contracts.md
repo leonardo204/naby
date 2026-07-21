@@ -2,11 +2,11 @@
 id: phase-1-contracts
 title: Phase 1 — Interface Contracts (IPC, engine interface, provider config, storage)
 type: interface
-version: 0.2.1
+version: 0.3.0
 status: draft
-scope: Contracts between renderer and main, the engine abstraction seam and its two backends, the gate contract, the provider configuration schema, and the on-disk storage layout for Phase 1
+scope: Contracts between renderer and main, the engine abstraction seam and its two backends, the gate contract, the provider configuration schema, the Store interface (incl. projects and session↔project links), the re-backed browsing HTTP routes, and the on-disk storage layout for Phase 1
 related: [phase-1-shell-architecture, phase-1-desktop-shell, phase-1-test-plan, personalized-agent-desktop-app]
-updated: 2026-07-20
+updated: 2026-07-21
 ---
 
 # Phase 1 — Interface Contracts
@@ -199,19 +199,33 @@ The runtime depends on a narrow `Store` interface, not on a driver. The F1-05 dr
 |---|---|---|---|
 | Provider keys | OS keychain via `safeStorage` | main | One per provider; verify backend ≠ `basic_text` on Linux before writing |
 | Provider profiles | `userData/providers.json` | main | No secrets — only `credentialRef` |
-| **Conversation transcripts** | `userData/app.db` (SQLite) | **the runtime** | We store and replay history; provider-independent |
+| **Conversation transcripts** | `userData/app.db` (SQLite) | **the runtime** | We store and replay history; provider-independent. **Also the source for the UI's transcript view** (§8) — never a provider `.jsonl` |
 | **Memory / context** | `userData/app.db` (SQLite) | **the runtime** | Keyed to user/session, **not** to provider or key |
-| Session index | `userData/app.db` (SQLite) | the runtime | `SessionRef` |
+| Session index | `userData/app.db` (SQLite) | the runtime | `SessionRef` — now carries `cwd`/`pinned`/`status` |
+| **Projects** | `userData/app.db` (SQLite) | **the runtime** | `Project` (§6.1). Naby-owned; the session/project UI reads these, never `~/.cockpit/projects.json` |
 | MCP registry | `userData/app.db` (SQLite) | the runtime | `McpEntry[]`, provider-independent |
+| Provider-native stores | `~/.claude/projects`, … | the **engine** | Read **only** by the engine to run a turn; never by Naby's session/project UI (design §3.6) |
 | Next runtime caches | `userData/next-cache/` | Next | Install dir is read-only |
 
 ```ts
 type SessionRef = {
-  sessionId: string;      // UUID we mint
+  sessionId: string;      // UUID we mint — the ONLY key for messages/memory/usage
   providerId: string;     // last provider used — a hint, not a constraint; switchable any turn
+  cwd?: string;           // owning project (Project.cwd). Absent = projectless session
+  pinned?: boolean;       // browsing state: pinned in the session list
+  status?: string;        // e.g. 'active' | 'ended'; absent = unknown
   title?: string;
   createdAt: number;
   lastUsedAt: number;
+};
+
+type Project = {          // Naby-owned; the working directory IS the identity
+  cwd: string;            // primary key
+  title?: string;         // display name; defaults to the cwd basename
+  pinned?: boolean;
+  archived?: boolean;
+  createdAt: number;
+  lastOpenedAt: number;   // MRU ordering of the project list
 };
 
 type RuntimeMessage =    // provider-independent internal message shape
@@ -228,8 +242,80 @@ Two shapes above are deliberate and load-bearing for replay:
 
 Whether `app.db` is encrypted at rest is an open question (design §6), sharpened in Phase 2 when it also holds draft/final eval content.
 
+### 6.1 `Store` interface — projects and session↔project links
+
+The runtime depends on the narrow `Store` interface (it already carries `createSession`/`getSession`/`listSessions`/`touchSession`/`deleteSession`, message, memory, usage, settings, and MCP ops). v0.7 extends it for Naby-owned projects and the session↔project link. Wording matches the existing contract: **keyed by `cwd` for projects and `sessionId` for sessions; nothing is keyed by provider or engine.**
+
+```ts
+interface Store {
+  // … existing session/message/memory/usage/settings/mcp ops unchanged …
+
+  // -- projects (Naby-owned; keyed by cwd) --------------------------------
+  /** All projects, MOST-RECENTLY-OPENED FIRST (ORDER BY last_opened_at DESC). */
+  listProjects(): Project[];
+  /** Insert or update by cwd. Creates the row if absent (sets created_at/
+   *  last_opened_at = now); otherwise applies `patch`. Idempotent. */
+  upsertProject(cwd: string, patch?: Partial<Omit<Project, 'cwd' | 'createdAt'>>): Project;
+  /** Delete the project AND CASCADE: every session with this cwd, and each of
+   *  those sessions' messages + memory + usage. A project delete never leaves
+   *  orphaned session state. Sessions are NOT reparented — deleting a project
+   *  deletes its sessions. */
+  removeProject(cwd: string): void;
+  /** Mark the project opened now (bumps last_opened_at → front of the MRU list).
+   *  Creates it if absent, so opening a new directory needs no prior upsert. */
+  touchProject(cwd: string): Project;
+
+  // -- session ↔ project --------------------------------------------------
+  /** Sessions owned by this project, MOST-RECENTLY-USED FIRST
+   *  (ORDER BY last_used_at DESC). */
+  listSessionsByProject(cwd: string): SessionRef[];
+  /** Link an existing session to a project (or pass null to unlink). Touches
+   *  neither messages nor memory — only the owning-project link. */
+  setSessionProject(sessionId: string, cwd: string | null): void;
+
+  // -- pinned sessions ----------------------------------------------------
+  /** Pin/unpin a session in the browsing list. */
+  setSessionPinned(sessionId: string, pinned: boolean): void;
+  /** Pinned sessions, MOST-RECENTLY-USED FIRST. */
+  listPinnedSessions(): SessionRef[];
+}
+```
+
+**Guarantees.**
+
+- **MRU ordering is a contract, not an incidental sort.** `listProjects()` is `last_opened_at DESC`; `listSessions()`, `listSessionsByProject()`, and `listPinnedSessions()` are `last_used_at DESC`. `touchProject`/`touchSession` move an item to the front. The re-backed `/api/global-state` (recent) and `/api/projects` rely on this (§8).
+- **CASCADE is total and explicit.** `removeProject(cwd)` deletes the project's sessions and each session's messages, memory, and usage — mirroring `deleteSession`'s existing explicit cascade (FK enforcement stays off; the store cascades in code).
+- **`cwd` is a link, not a new key.** Messages, memory, and usage remain keyed by `sessionId` only (§6 keying invariant). `setSessionProject` changes the owning-project link and nothing else; a projectless session (`cwd` absent) is fully valid.
+- **`providerId` stays a hint.** A session still records the last provider that answered; linking it to a project does not constrain which provider may answer next (design §3.4).
+
 ---
 
 ## 7. Version pinning
 
 Pin the `ai` (AI SDK) **minor** and keep both engines behind the `Engine` interface (§2). A future AI SDK major — or an Agent SDK bump for the dev engine — is then a change in one adapter, not across the app. Regenerate the engine-facing types from the installed SDK on any bump, and re-run the gate regression suite (which runs against **both** engines) before the bump lands.
+
+---
+
+## 8. Re-backed browsing HTTP routes
+
+The session/project/recent/pinned browsing UIs keep their existing **client** API surface (`fetchProjects`, `loadSessionsByProject`, …); only the server handler's data source moves from a provider-native/cockpit file to the Naby store (§6.1). Inputs and outputs are held as close to today's shapes as possible so the renderer is untouched — the only difference is the **source**. Each route below is served from `app.db`; none reads `~/.claude/projects` or `~/.cockpit/*` any longer.
+
+| Route | Method | Request | Response (shape unchanged; source now `app.db`) | Backed by |
+|---|---|---|---|---|
+| `/api/projects` | GET | — | `Project[]`, MRU by `lastOpenedAt` | `listProjects()` |
+| `/api/projects` | POST | `{ cwd, patch? }` | `Project` | `upsertProject()` / `touchProject()` |
+| `/api/projects` | DELETE | `{ cwd }` | `{ ok: true }` (CASCADE) | `removeProject()` |
+| `/api/project-state` | GET | `{ cwd }` | `{ project: Project; sessions: SessionRef[] }` | `listSessionsByProject()` |
+| `/api/sessions/projects` | GET | — | projects joined to their sessions | `listProjects()` + `listSessionsByProject()` |
+| `/api/sessions/projects/:cwd` | GET | path `cwd` | `SessionRef[]` for the project | `listSessionsByProject()` |
+| `/api/global-state` (recent) | GET | — | `SessionRef[]`, MRU by `lastUsedAt` | `listSessions()` |
+| `/api/pinned-sessions` | GET | — | `SessionRef[]` where pinned | `listPinnedSessions()` |
+| `/api/pinned-sessions` | POST | `{ sessionId, pinned }` | `{ ok: true }` | `setSessionPinned()` |
+| session transcript | GET | `{ sessionId }` | `RuntimeMessage[]` in append order | `getMessages()` |
+
+**Contract notes.**
+
+- **Same shapes, new source.** Where today's route returns a project/session list, the re-backed route returns the same JSON keys the client already consumes (adapt field names in the handler if the store's `Project`/`SessionRef` differ from the legacy file shape — the mapping lives server-side, never in the client).
+- **Transcript is Naby's.** The session transcript view is served from the `messages` table (`getMessages(sessionId)`), never from a provider `.jsonl`. This is the same array replayed to the engine each turn, so display and replay cannot diverge (§6).
+- **Errors** follow the same `Result<T>` envelope discipline as the IPC channels (§1.2) where the route is proxied through main; a missing session/project returns `SESSION_NOT_FOUND` rather than throwing.
+- **No provider-native reads.** These routes MUST NOT open `~/.claude/projects/*.jsonl`, `~/.cockpit/projects.json`, `~/.cockpit/state.json`, or `~/.cockpit/pinned-sessions.json`. Provider dirs remain for the engine only (design §3.6; architecture §8.4).
