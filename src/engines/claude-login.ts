@@ -50,13 +50,32 @@
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // The answer
 // ---------------------------------------------------------------------------
 
 export type ClaudeLoginStatus = 'signed-in' | 'signed-out' | 'unknown';
+
+/**
+ * WHICH account is signed in — as much as the credential file honestly tells us.
+ *
+ * IMPORTANT: the Claude Code OAuth credential file carries NO email and NO
+ * account id. Its only human-facing identity fields are the SUBSCRIPTION tier
+ * (`subscriptionType`, e.g. "max"/"pro") and a rate-limit tier. We surface those
+ * and nothing else — inventing an email from what is not there would be worse
+ * than saying "signed in" plainly. Both fields are labels, not secrets: no token
+ * material reaches this type.
+ */
+export type ClaudeLoginAccount = {
+  /** The plan label from the credential (e.g. 'max', 'pro'), or `null` when the
+   *  file does not carry one. Never an email — the file has none. */
+  subscriptionType: string | null;
+  /** The rate-limit tier label, when present (e.g. 'default_claude_max_5x').
+   *  Purely informational; `null` when absent. */
+  rateLimitTier: string | null;
+};
 
 export type ClaudeLoginState = {
   status: ClaudeLoginStatus;
@@ -72,6 +91,10 @@ export type ClaudeLoginState = {
   /** When this answer was computed (epoch ms). The UI shows staleness rather
    *  than pretending a cached answer is live. */
   checkedAt: number;
+  /** Who is signed in, to the extent the credential file says so. `null` when
+   *  signed out, unknown, or when the file carries no identity fields. NEVER an
+   *  email (the file has none) — see `ClaudeLoginAccount`. */
+  account: ClaudeLoginAccount | null;
 };
 
 /** The command a signed-out user runs. Named so the string exists once. */
@@ -156,7 +179,16 @@ function agentSdkResolvable(): boolean {
  */
 function readExpiries(
   path: string,
-): { present: false } | { present: true; expiresAt?: number; refreshExpiresAt?: number } {
+): { present: false } | {
+  present: true;
+  expiresAt?: number;
+  refreshExpiresAt?: number;
+  /** Non-secret identity labels — see `ClaudeLoginAccount`. Read here because
+   *  this is the ONE function allowed to touch the file's bytes; only these
+   *  small strings escape, never a token. */
+  subscriptionType?: string;
+  rateLimitTier?: string;
+} {
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
@@ -177,11 +209,37 @@ function readExpiries(
     const expiresAt = typeof oauth.expiresAt === 'number' ? oauth.expiresAt : undefined;
     const refreshExpiresAt =
       typeof oauth.refreshTokenExpiresAt === 'number' ? oauth.refreshTokenExpiresAt : undefined;
+    // Identity labels: strings only, and only when non-empty. These are the
+    // ONLY human-facing account fields the file carries — there is no email.
+    const subscriptionType =
+      typeof oauth.subscriptionType === 'string' && oauth.subscriptionType
+        ? oauth.subscriptionType
+        : undefined;
+    const rateLimitTier =
+      typeof oauth.rateLimitTier === 'string' && oauth.rateLimitTier
+        ? oauth.rateLimitTier
+        : undefined;
     return { present: true, ...(expiresAt !== undefined ? { expiresAt } : {}),
-             ...(refreshExpiresAt !== undefined ? { refreshExpiresAt } : {}) };
+             ...(refreshExpiresAt !== undefined ? { refreshExpiresAt } : {}),
+             ...(subscriptionType !== undefined ? { subscriptionType } : {}),
+             ...(rateLimitTier !== undefined ? { rateLimitTier } : {}) };
   } catch {
     return { present: true };
   }
+}
+
+/** Build the account label object from whatever identity fields were present.
+ *  Returns `null` when nothing usable was found, so the UI shows a plain
+ *  "signed in" rather than an empty identity chip. */
+function toAccount(creds: {
+  subscriptionType?: string;
+  rateLimitTier?: string;
+}): ClaudeLoginAccount | null {
+  if (creds.subscriptionType === undefined && creds.rateLimitTier === undefined) return null;
+  return {
+    subscriptionType: creds.subscriptionType ?? null,
+    rateLimitTier: creds.rateLimitTier ?? null,
+  };
 }
 
 export type CheckClaudeLoginOptions = {
@@ -214,6 +272,8 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
       remedy: null,
       cliFound,
       checkedAt,
+      // An env token carries no subscription/identity fields we can read.
+      account: null,
     };
   }
 
@@ -230,6 +290,7 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
         : `Install the Claude Code CLI, then run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal.`,
       cliFound,
       checkedAt,
+      account: null,
     };
   }
 
@@ -245,6 +306,9 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
       remedy: null,
       cliFound,
       checkedAt,
+      // Present but unmodelled shape — surface whatever identity we did manage
+      // to read (may be null).
+      account: toAccount(creds),
     };
   }
 
@@ -263,6 +327,8 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
       remedy: null,
       cliFound,
       checkedAt,
+      // The one place identity is genuinely meaningful: a live sign-in.
+      account: toAccount(creds),
     };
   }
 
@@ -272,6 +338,7 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
     remedy: `Run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal to sign in again, then re-check.`,
     cliFound,
     checkedAt,
+    account: null,
   };
 }
 
@@ -311,6 +378,61 @@ export function getClaudeLoginState(
  *  underneath the check and must not read a pre-change answer. */
 export function resetClaudeLoginCache(): void {
   cached = undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Sign out
+// ---------------------------------------------------------------------------
+
+export type ClaudeLogoutResult =
+  /** `removed` distinguishes "we deleted a live sign-in" from "there was nothing
+   *  to delete" (already signed out) — both are success, but the UI can say so. */
+  | { ok: true; removed: boolean }
+  | { ok: false; error: string };
+
+/**
+ * Sign out by deleting the OAuth credential file — the same effect `claude
+ * logout` has, and the only sign-out this app can perform without an
+ * interactive CLI.
+ *
+ * SAFETY:
+ *   * It only ever touches `claudeCredentialsPath(env)` — the one file whose
+ *     path this module computes. It never takes a caller-supplied path, so it
+ *     cannot be pointed at arbitrary files.
+ *   * A missing file is SUCCESS, not an error: "sign me out" when already signed
+ *     out is satisfied, and reporting a failure there would be a lie.
+ *   * It resets the login cache so the very next `checkClaudeLogin` reflects the
+ *     new (signed-out) reality rather than a 10s-stale "signed in".
+ *   * It does NOT clear `CLAUDE_CODE_OAUTH_TOKEN` — that is an environment
+ *     variable owned by the process/shell, not a file we may delete. When such a
+ *     token is set, the caller is told (see the guard below) so the UI does not
+ *     promise a sign-out it cannot deliver.
+ */
+export function claudeLogout(env: NodeJS.ProcessEnv = process.env): ClaudeLogoutResult {
+  // An env-token sign-in cannot be revoked by deleting a file. Say so plainly
+  // rather than delete the file and still report "signed in" on the next check.
+  if (env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) {
+    return {
+      ok: false,
+      error:
+        'Signed in via CLAUDE_CODE_OAUTH_TOKEN in this environment. Unset that variable to sign out — there is no credential file to remove.',
+    };
+  }
+  const path = claudeCredentialsPath(env);
+  try {
+    if (!existsSync(path)) {
+      resetClaudeLoginCache();
+      return { ok: true, removed: false };
+    }
+    unlinkSync(path);
+    resetClaudeLoginCache();
+    return { ok: true, removed: true };
+  } catch (e) {
+    // EACCES / EPERM / EISDIR: we found something but could not remove it. The
+    // error message is safe to surface — it names the operation, never the
+    // file's contents.
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**

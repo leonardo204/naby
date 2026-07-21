@@ -107,12 +107,15 @@ export {
   checkClaudeLogin,
   CLAUDE_LOGIN_COMMAND,
   claudeCredentialsPath,
+  claudeLogout,
   describeClaudeLogin,
   getClaudeLoginState,
   resetClaudeLoginCache,
   type CheckClaudeLoginOptions,
+  type ClaudeLoginAccount,
   type ClaudeLoginState,
   type ClaudeLoginStatus,
+  type ClaudeLogoutResult,
 } from './engines/claude-login.js';
 
 // Which engine answers a turn, and the sentence that explains it to a user.
