@@ -255,7 +255,24 @@ export function missingConfigFields(profile: ProviderProfile): string[] {
   const description = describeProviders().find((d) => d.kind === profile.kind);
   if (!description) return [];
   const config = profile.config as Record<string, unknown>;
-  const missing = description.configFields.filter((field) => !config[field]);
+
+  // Azure has TWO valid endpoint shapes, so its configFields are not ALL
+  // required at once (matching the settings form and the adapter): supply EITHER
+  // `baseURL` (the newer AI-Services /openai/v1 endpoint) OR `resource` +
+  // `apiVersion` (classic), always plus `deployment`. Requiring all four here is
+  // what made a baseURL-only Azure profile read as "not ready / no key saved"
+  // even though its key was stored and the adapter can run it.
+  const has = (f: string) => Boolean(config[f] && String(config[f]).trim());
+  let missing: string[];
+  if (profile.kind === 'azure-openai') {
+    missing = [];
+    if (!has('deployment')) missing.push('deployment');
+    if (!has('baseURL') && !(has('resource') && has('apiVersion'))) {
+      missing.push('baseURL-or-resource');
+    }
+  } else {
+    missing = description.configFields.filter((field) => !has(field));
+  }
   if (!profile.model) missing.push('model');
   return missing;
 }
