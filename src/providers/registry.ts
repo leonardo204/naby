@@ -44,9 +44,26 @@ export type ProviderConfig =
   | { kind: 'bedrock'; region: string } // Claude models on Bedrock
   | {
       kind: 'azure-openai';
-      resource: string;
       deployment: string;
-      apiVersion: string;
+      /**
+       * TWO Azure endpoint shapes, normalized here.
+       *
+       * CLASSIC: a `resource` sub-domain (→ `https://{resource}.openai.azure.com`)
+       *   with an `apiVersion`. The `@ai-sdk/azure` deployment-URL form addresses
+       *   `{base}/deployments/{deployment}{path}?api-version=…`.
+       *
+       * V1 / AI-SERVICES: a full `baseURL` ending in `/openai/v1`
+       *   (`https://{resource}.services.ai.azure.com/openai/v1`). This surface is
+       *   OpenAI-COMPATIBLE — Bearer auth, no `api-version`, no `/deployments/`
+       *   segment — so it is driven through the OpenAI adapter with that baseURL,
+       *   NOT through `createAzure`'s deployment-URL builder (which would emit a
+       *   `/deployments/…?api-version=` URL the v1 endpoint rejects with 404).
+       *
+       * Exactly one of `resource` / `baseURL` is used; `baseURL` wins when set.
+       */
+      resource?: string;
+      baseURL?: string;
+      apiVersion?: string;
     }
   | { kind: 'google' } // Gemini
   | { kind: 'openai' };
@@ -171,9 +188,23 @@ export function createModel(
             '(for azure-openai the model id IS the deployment name)',
         );
       }
+      const apiKey = requireApiKey(credential, 'azure-openai');
+      // V1 / AI-Services endpoint: OpenAI-compatible. Drive it through the
+      // OpenAI adapter pointed at the `/openai/v1` base — Bearer auth, the
+      // deployment as the model id, no api-version, no `/deployments/` segment.
+      if (config.baseURL) {
+        const compat = createOpenAI({ apiKey, baseURL: config.baseURL.replace(/\/$/, '') });
+        return compat(config.deployment);
+      }
+      // Classic endpoint: the `@ai-sdk/azure` deployment-URL builder.
+      if (!config.resource) {
+        throw new ProviderConfigError(
+          `profile "${profile.id}": azure-openai needs either a baseURL (v1 endpoint) or a resource (classic)`,
+        );
+      }
       const azure = createAzure({
         resourceName: config.resource,
-        apiKey: requireApiKey(credential, 'azure-openai'),
+        apiKey,
         apiVersion: config.apiVersion,
         // apiVersion is only honored on the deployment-based URL shape
         // (`{base}/deployments/{id}{path}?api-version=…`), which is the shape a
