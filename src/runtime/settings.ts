@@ -18,11 +18,15 @@
 //
 //     explicit call argument  >  stored setting  >  environment  >  automatic
 //
-// The environment sits BELOW the stored setting deliberately... with one
-// exception, `NABY_ENGINE`, which sits above it: forcing the engine is a
-// developer/debugging affordance ("make this run on the dev engine right now"),
-// and a stored UI preference silently overriding an explicitly exported
-// variable would make that affordance unreliable exactly when it is needed.
+// The environment sits BELOW the stored setting, with NO exception. An earlier
+// version put `NABY_ENGINE` ABOVE the stored setting as a developer override,
+// but that broke the product invariant "dev vs prod differs ONLY by agent-sdk
+// vs api-key": a developer who launches with `NABY_ENGINE=dev-claude` and then
+// EXPLICITLY picks a provider in Settings must get that provider — otherwise the
+// UI choice is silently dead and the app reads as broken. So an explicit UI
+// choice always wins; `NABY_ENGINE` only supplies the DEFAULT when the user has
+// not chosen (preference is unset/auto), which is exactly the CI / first-run
+// developer path it exists for.
 
 import type { Store } from './store/store.js';
 
@@ -68,19 +72,19 @@ export function writeSettings(store: Store, next: NabySettings): void {
 /**
  * Turn stored settings into the options `selectEngine` takes.
  *
- * `forced` is left UNDEFINED when the user chose automatic, so that
- * `selectEngine` falls through to `process.env.NABY_ENGINE` — which is how the
- * environment keeps its precedence over an unset preference without this module
- * having to read the environment itself.
+ * Precedence (see the header): a stored UI preference wins over `NABY_ENGINE`;
+ * the environment is only the DEFAULT for an unset/auto preference. So an
+ * explicit provider pick in Settings takes effect even when the app was launched
+ * with `NABY_ENGINE=dev-claude`. `forced` is left undefined for automatic so
+ * `selectEngine` runs its "a configured provider wins, else dev" auto logic.
  */
 export function toSelectOptions(settings: NabySettings): {
   forced?: string;
   providerId?: string;
 } {
   const out: { forced?: string; providerId?: string } = {};
-  // NABY_ENGINE wins over a stored preference — see the header.
-  const envEngine = process.env.NABY_ENGINE?.trim();
-  const engine = envEngine || settings.enginePreference;
+  // Stored preference first; env is only the fallback when the user hasn't chosen.
+  const engine = settings.enginePreference || process.env.NABY_ENGINE?.trim();
   if (engine && engine !== 'auto') out.forced = engine;
   if (settings.selectedProvider) out.providerId = settings.selectedProvider;
   return out;
