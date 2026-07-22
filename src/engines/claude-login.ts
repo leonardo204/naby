@@ -1,56 +1,56 @@
 // src/engines/claude-login.ts
 //
-// IS THE LOCAL CLAUDE SIGN-IN PRESENT AND USABLE?
+// WHO IS SIGNED IN TO CLAUDE ON THIS COMPUTER — AND THE ACTIONS TO CHANGE IT.
 //
 // The dev engine (`ClaudeAgentSdkEngine`) answers on the Claude sign-in that
 // already exists on this computer — no API key, no metered bill. That is a
 // lovely property right up to the moment the sign-in is absent or stale, at
 // which point the app looked fine, accepted a message, and only then failed
-// with whatever the Agent SDK chose to throw. The user had no way to know
-// beforehand and no idea what to do afterwards.
+// with whatever the Agent SDK chose to throw.
 //
-// This module answers the question BEFORE a turn, cheaply, so the UI can show
-// it next to the engine choice and say `claude login` when the answer is no.
+// This module answers "who is signed in" BEFORE a turn, and drives login/logout
+// FROM INSIDE THE APP, by running the real `claude auth` CLI. The Next server
+// runs inside the Electron main process, so this parent runtime can spawn child
+// processes (the same way electron/updater.ts spawns `codesign`).
+//
+// THE SOURCE OF TRUTH IS `claude auth status`
+// -------------------------------------------
+// `claude auth status` prints JSON:
+//   { loggedIn, authMethod, apiProvider, email, orgId, orgName, subscriptionType }
+// This carries the REAL EMAIL — the OAuth credential FILE does not. An earlier
+// implementation read only the file, which is why the account chip showed no
+// email and why a fresh re-login was not detected. So when the CLI is runnable,
+// its answer WINS, and `account.email` is populated from it.
+//
+// RESOLVING THE `claude` BINARY (the one caveat worth spending care on)
+// --------------------------------------------------------------------
+// We must NOT run whatever `claude` is first on PATH: in dev a cmux shim shadows
+// the real binary and hangs; in a packaged app PATH may be minimal. So we
+// resolve a REAL binary explicitly (see `resolveClaudeBinary`): an override env
+// var, then a known location (`~/.local/bin/claude`), then a PATH search that
+// SKIPS any directory belonging to a cmux shim. If none is found we surface a
+// clear "claude CLI not found" state rather than hang.
 //
 // WHAT IT DELIBERATELY DOES NOT DO
 // --------------------------------
 //   * It never makes a model call. "Are you signed in" answered by spending
-//     money (or by consuming rate limit) is not an answer worth having, and a
-//     status indicator that bills the user on a poll is a bug, not a feature.
-//   * It never runs the `claude` CLI interactively, and never runs it at all on
-//     the hot path — `claude --version` is a subprocess spawn (~100ms+), which
-//     is far too expensive for something polled and re-run on window focus.
-//     The CLI is looked for on PATH by FILE RESOLUTION only (see `findClaudeCli`).
-//   * It never returns, logs, includes in an error message, or retains any
-//     credential material. The file is parsed in order to read exactly two
-//     numbers — the two expiry timestamps — and every other field is dropped on
-//     the floor by destructuring before the parsed value goes out of scope. The
-//     RESULT type has no field that could carry a token even by accident.
+//     money is not an answer worth having.
+//   * Every CLI invocation is TIMEOUT-GUARDED (a hung exec must not wedge a
+//     request), CACHED (10s), and non-fatal (a failure falls back to the old
+//     credential-file check so nothing regresses where claude is not runnable).
+//   * It never returns, logs, or retains credential material. `auth status`
+//     reports identity LABELS (email, org name, plan) — not tokens — and the
+//     credential-file fallback reads only the two expiry timestamps.
 //
-// WHY PARSE AT ALL RATHER THAN JUST `existsSync`
-// ----------------------------------------------
-// Existence is not usability. `~/.claude/.credentials.json` survives a token
-// expiring, so an existence-only check reports "signed in" on exactly the
-// machine this feature exists to warn — the one where the next send will fail.
-// The two expiry fields distinguish the three real cases:
-//
-//   accessToken live                    -> signed in
-//   accessToken stale, refreshToken live -> signed in (the CLI refreshes
-//                                           silently on first use; warning here
-//                                           would be a false alarm)
-//   both stale                           -> signed out, and `claude login` is
-//                                           genuinely the fix
-//
-// UNKNOWN IS A REAL ANSWER. A malformed file, an unreadable one, or a Claude
-// install that keeps its credentials somewhere we do not model (a future
-// keychain-backed layout, an enterprise SSO variant) must not be reported as
-// "signed out" — that would tell the user to run a command that fixes nothing.
-// `unknown` renders as a muted dot and blocks nothing.
+// UNKNOWN IS A REAL ANSWER. A machine whose sign-in we cannot model must not be
+// reported "signed out" — that would tell the user to run a command that fixes
+// nothing. `unknown` renders as a muted dot and blocks nothing.
 
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
 
 // ---------------------------------------------------------------------------
 // The answer
@@ -59,21 +59,25 @@ import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 export type ClaudeLoginStatus = 'signed-in' | 'signed-out' | 'unknown';
 
 /**
- * WHICH account is signed in — as much as the credential file honestly tells us.
+ * WHICH account is signed in.
  *
- * IMPORTANT: the Claude Code OAuth credential file carries NO email and NO
- * account id. Its only human-facing identity fields are the SUBSCRIPTION tier
- * (`subscriptionType`, e.g. "max"/"pro") and a rate-limit tier. We surface those
- * and nothing else — inventing an email from what is not there would be worse
- * than saying "signed in" plainly. Both fields are labels, not secrets: no token
- * material reaches this type.
+ * When the answer comes from `claude auth status` (the normal case), `email` and
+ * `orgName` are the REAL identity the CLI reports. When it comes from the
+ * credential-file fallback (CLI not runnable), those are `null` — the file
+ * carries no email — and only `subscriptionType`/`rateLimitTier` may be present.
+ * Every field here is a LABEL, not a secret: no token material reaches this type.
  */
 export type ClaudeLoginAccount = {
-  /** The plan label from the credential (e.g. 'max', 'pro'), or `null` when the
-   *  file does not carry one. Never an email — the file has none. */
+  /** The signed-in account's email, from `claude auth status`. `null` when the
+   *  identity came from the credential file (which has no email) or is absent. */
+  email: string | null;
+  /** The organisation name from `claude auth status`, when present. `null`
+   *  otherwise. Informational. */
+  orgName: string | null;
+  /** The plan label (e.g. 'max', 'pro'), or `null` when not reported. */
   subscriptionType: string | null;
-  /** The rate-limit tier label, when present (e.g. 'default_claude_max_5x').
-   *  Purely informational; `null` when absent. */
+  /** The rate-limit tier label from the credential file, when the fallback path
+   *  read one (e.g. 'default_claude_max_5x'). `null` otherwise. */
   rateLimitTier: string | null;
 };
 
@@ -85,31 +89,150 @@ export type ClaudeLoginState = {
   /** The command that fixes it, when there is one. `null` when nothing is
    *  wrong or when we cannot tell what is wrong. */
   remedy: string | null;
-  /** Whether a `claude` executable is resolvable on PATH. Reported separately
-   *  because "signed out" and "not installed" need different advice. */
+  /** Whether a real `claude` executable was resolved (shim-skipping). Reported
+   *  separately because "signed out" and "not installed" need different advice. */
   cliFound: boolean;
   /** When this answer was computed (epoch ms). The UI shows staleness rather
    *  than pretending a cached answer is live. */
   checkedAt: number;
-  /** Who is signed in, to the extent the credential file says so. `null` when
-   *  signed out, unknown, or when the file carries no identity fields. NEVER an
-   *  email (the file has none) — see `ClaudeLoginAccount`. */
+  /** Who is signed in. `null` when signed out or unknown. See
+   *  `ClaudeLoginAccount` — carries the real email from `claude auth status`. */
   account: ClaudeLoginAccount | null;
 };
 
-/** The command a signed-out user runs. Named so the string exists once. */
-export const CLAUDE_LOGIN_COMMAND = 'claude login';
+/** The command a signed-out user runs. Named so the string exists once. It is
+ *  the interactive browser OAuth flow the app kicks off via `claudeLogin`; the
+ *  same string is the copy-paste fallback for a headless machine. */
+export const CLAUDE_LOGIN_COMMAND = 'claude auth login';
 
 // ---------------------------------------------------------------------------
-// Where the sign-in lives
+// Resolving a REAL `claude` binary (never the cmux shim)
+// ---------------------------------------------------------------------------
+
+/** PATH directories belonging to a cmux shim. A `claude` found in one of these
+ *  is the shim that deadlocks a nested `claude`, so those dirs are skipped. */
+const CMUX_SHIM_MARKERS = ['cmux-cli-shims', 'cmux.app'];
+
+function pathDirIsShim(dir: string): boolean {
+  return CMUX_SHIM_MARKERS.some((marker) => dir.includes(marker));
+}
+
+/** A path is usable as the CLI if it resolves to a file (symlinks followed —
+ *  every npm-global / versioned install of the CLI is a symlink to a script). */
+function isClaudeExecutable(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The absolute path of a REAL `claude` binary, or `null` when none is found.
+ *
+ * Order, most-authoritative first:
+ *   1. `NABY_CLAUDE_BIN` — an explicit override. Used by the spikes (to point at
+ *      a fake `claude`) and by a power user whose install we do not model.
+ *   2. `~/.local/bin/claude` — the known location the CLI installs to. Preferred
+ *      over PATH because PATH is exactly where the cmux shim shadows it.
+ *   3. A PATH search that SKIPS shim directories. First non-shim hit wins.
+ *
+ * Never spawns anything — resolution is a handful of `stat` calls, cheap enough
+ * to run on the resolve path of every status check.
+ */
+export function resolveClaudeBinary(env: NodeJS.ProcessEnv = process.env): string | null {
+  const override = env.NABY_CLAUDE_BIN?.trim();
+  if (override) return isClaudeExecutable(override) ? override : null;
+
+  // `env.HOME` is honoured (not just `homedir()`) so a test can redirect the
+  // known-location probe at a temp home and force the PATH search.
+  const home = env.HOME?.trim() || homedir();
+  const explicit = join(home, '.local', 'bin', 'claude');
+  if (isClaudeExecutable(explicit)) return explicit;
+
+  const pathVar = env.PATH || '';
+  if (!pathVar) return null;
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const names =
+    process.platform === 'win32'
+      ? (env.PATHEXT || '.EXE;.CMD;.BAT').split(';').map((ext) => `claude${ext.toLowerCase()}`)
+      : ['claude'];
+  for (const dir of pathVar.split(sep)) {
+    if (!dir || pathDirIsShim(dir)) continue;
+    for (const name of names) {
+      const candidate = join(dir, name);
+      if (isClaudeExecutable(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Running the CLI
+// ---------------------------------------------------------------------------
+
+/** How long any `claude auth …` invocation may take before it is killed. A hung
+ *  exec must never wedge the request that triggered it. */
+const EXEC_TIMEOUT_MS = 8_000;
+
+type ClaudeAuthStatusJson = {
+  loggedIn?: boolean;
+  authMethod?: string;
+  apiProvider?: string;
+  email?: string;
+  orgId?: string;
+  orgName?: string;
+  subscriptionType?: string;
+};
+
+type CliResult = { ok: true; stdout: string } | { ok: false; error: string };
+
+/** Run `claude <args>` at an absolute, de-shimmed path, timeout-guarded. Never
+ *  rejects — a non-zero exit or a timeout is returned as `{ ok:false }`. */
+function runClaudeCli(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<CliResult> {
+  return new Promise((resolve) => {
+    execFile(
+      bin,
+      args,
+      { timeout: EXEC_TIMEOUT_MS, env, windowsHide: true, maxBuffer: 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          const tail = String(stderr ?? '').trim().slice(0, 200);
+          resolve({ ok: false, error: (err.message || String(err)) + (tail ? ` — ${tail}` : '') });
+          return;
+        }
+        resolve({ ok: true, stdout: String(stdout) });
+      },
+    );
+  });
+}
+
+/** Extract the JSON object from `claude auth status` output. The CLI prints a
+ *  bare object today, but we slice `{`…`}` so a stray warning line cannot break
+ *  parsing. Returns `null` on anything unparseable. */
+function parseAuthStatus(stdout: string): ClaudeAuthStatusJson | null {
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) return null;
+  try {
+    return JSON.parse(stdout.slice(start, end + 1)) as ClaudeAuthStatusJson;
+  } catch {
+    return null;
+  }
+}
+
+/** A non-empty trimmed string, or `null`. Keeps empty CLI fields out of the UI. */
+function nonEmpty(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+// ---------------------------------------------------------------------------
+// Where the sign-in lives (credential-file fallback)
 // ---------------------------------------------------------------------------
 
 /**
- * The credential file Claude Code writes on `claude login`.
- *
- * `CLAUDE_CONFIG_DIR` is honoured because Claude Code honours it; a developer
- * who has relocated their config would otherwise get a permanent, unfixable
- * "signed out" from us while the CLI works perfectly.
+ * The credential file Claude Code writes on login. Used ONLY as a fallback when
+ * the CLI is not runnable; `CLAUDE_CONFIG_DIR` is honoured because the CLI does.
  */
 export function claudeCredentialsPath(env: NodeJS.ProcessEnv = process.env): string {
   const dir = env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude');
@@ -117,43 +240,17 @@ export function claudeCredentialsPath(env: NodeJS.ProcessEnv = process.env): str
 }
 
 /**
- * Whether a `claude` executable exists, WITHOUT spawning one.
- *
- * `claude --version` would be the obvious check and is the wrong one: this
- * function runs on every poll and every window focus, and a subprocess spawn per
- * focus event is exactly the kind of chatty background work the feature was
- * asked not to introduce. Resolution is a handful of `stat` calls.
+ * Whether a `claude` executable exists WITHOUT spawning one — used only by the
+ * synchronous file-fallback check. Skips shim directories for parity with
+ * `resolveClaudeBinary`.
  */
 function findClaudeCli(env: NodeJS.ProcessEnv = process.env): boolean {
-  const pathVar = env.PATH || '';
-  if (!pathVar) return false;
-  const sep = process.platform === 'win32' ? ';' : ':';
-  // On Windows the executable carries an extension; PATHEXT is the authority on
-  // which. Elsewhere the bare name is the whole story.
-  const candidates =
-    process.platform === 'win32'
-      ? (env.PATHEXT || '.EXE;.CMD;.BAT').split(';').map((ext) => `claude${ext.toLowerCase()}`)
-      : ['claude'];
-  for (const dir of pathVar.split(sep)) {
-    if (!dir) continue;
-    for (const name of candidates) {
-      try {
-        // `statSync` follows symlinks, which is what we want: every npm-global
-        // and shim install of the CLI is a symlink to the real script.
-        if (statSync(join(dir, name)).isFile()) return true;
-      } catch {
-        // Not here. Next candidate — a missing directory on PATH is normal.
-      }
-    }
-  }
-  return false;
+  return resolveClaudeBinary(env) !== null;
 }
 
 /**
  * Whether the Agent SDK itself is present. Reused rather than reimplemented so
- * "the dev engine can run" has one definition. Imported lazily through
- * `createRequire` for the same reason the engine does — see the header of
- * `claude-agent-sdk-engine.ts`.
+ * "the dev engine can run" has one definition.
  */
 function agentSdkResolvable(): boolean {
   try {
@@ -164,18 +261,11 @@ function agentSdkResolvable(): boolean {
   }
 }
 
-// ---------------------------------------------------------------------------
-// The check
-// ---------------------------------------------------------------------------
-
 /**
- * Read ONLY the two expiry timestamps out of the credential file.
- *
- * This is the single function in the codebase that touches the file's bytes,
- * and it is written so that nothing else can leak: the parsed object is local,
- * only two numbers escape, and the catch swallows the error rather than
- * propagating it — a JSON parse error message can quote the offending input,
- * which for this file would mean a token in a stack trace.
+ * Read ONLY the two expiry timestamps (plus non-secret plan labels) out of the
+ * credential file. The single function that touches the file's bytes; only small
+ * strings and numbers escape, never a token, and the catch swallows parse errors
+ * (which could otherwise quote the file's contents).
  */
 function readExpiries(
   path: string,
@@ -183,9 +273,6 @@ function readExpiries(
   present: true;
   expiresAt?: number;
   refreshExpiresAt?: number;
-  /** Non-secret identity labels — see `ClaudeLoginAccount`. Read here because
-   *  this is the ONE function allowed to touch the file's bytes; only these
-   *  small strings escape, never a token. */
   subscriptionType?: string;
   rateLimitTier?: string;
 } {
@@ -193,24 +280,17 @@ function readExpiries(
   try {
     raw = readFileSync(path, 'utf8');
   } catch {
-    // ENOENT (never logged in), EACCES (someone else's file), EISDIR — all of
-    // which mean "no usable sign-in here" and none of which we can act on
-    // differently.
     return { present: false };
   }
   try {
     const parsed = JSON.parse(raw) as { claudeAiOauth?: Record<string, unknown> };
     const oauth = parsed.claudeAiOauth;
     if (!oauth || typeof oauth !== 'object') {
-      // The file exists but is not the shape we model. Present, no expiries →
-      // the caller reports `unknown`, not `signed-out`.
       return { present: true };
     }
     const expiresAt = typeof oauth.expiresAt === 'number' ? oauth.expiresAt : undefined;
     const refreshExpiresAt =
       typeof oauth.refreshTokenExpiresAt === 'number' ? oauth.refreshTokenExpiresAt : undefined;
-    // Identity labels: strings only, and only when non-empty. These are the
-    // ONLY human-facing account fields the file carries — there is no email.
     const subscriptionType =
       typeof oauth.subscriptionType === 'string' && oauth.subscriptionType
         ? oauth.subscriptionType
@@ -228,33 +308,33 @@ function readExpiries(
   }
 }
 
-/** Build the account label object from whatever identity fields were present.
- *  Returns `null` when nothing usable was found, so the UI shows a plain
- *  "signed in" rather than an empty identity chip. */
-function toAccount(creds: {
+/** Build the account label object from the credential-file fields. `email` and
+ *  `orgName` are always `null` here — the file has neither. */
+function toFileAccount(creds: {
   subscriptionType?: string;
   rateLimitTier?: string;
 }): ClaudeLoginAccount | null {
   if (creds.subscriptionType === undefined && creds.rateLimitTier === undefined) return null;
   return {
+    email: null,
+    orgName: null,
     subscriptionType: creds.subscriptionType ?? null,
     rateLimitTier: creds.rateLimitTier ?? null,
   };
 }
 
 export type CheckClaudeLoginOptions = {
-  /** Override the environment. Used by the spikes so the signed-out branch is
-   *  testable without touching the developer's real sign-in. */
+  /** Override the environment. Used by the spikes so login state is testable
+   *  without touching the developer's real sign-in. */
   env?: NodeJS.ProcessEnv;
-  /** Override "now" (epoch ms), so expiry handling is testable without waiting
-   *  for a token to expire. */
+  /** Override "now" (epoch ms), so expiry handling is testable. */
   now?: number;
 };
 
 /**
- * The whole answer, computed from the filesystem. Synchronous and cheap
- * (a few `stat`s plus one small file read), so it is safe on a poll — but see
- * `getClaudeLoginState` for the cached, rate-limited entry point the UI uses.
+ * The FALLBACK answer, computed from the filesystem alone (no CLI). Synchronous
+ * and cheap. Kept for the case where a real `claude` binary is not resolvable,
+ * and used verbatim by the older spikes/electron harness.
  */
 export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLoginState {
   const env = opts.env ?? process.env;
@@ -262,9 +342,6 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
   const checkedAt = now;
   const cliFound = findClaudeCli(env);
 
-  // An explicit OAuth token in the environment is how CI and some containerised
-  // setups sign in; it bypasses the credential file entirely, so checking the
-  // file first would report "signed out" on a machine that works.
   if (env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) {
     return {
       status: 'signed-in',
@@ -272,7 +349,6 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
       remedy: null,
       cliFound,
       checkedAt,
-      // An env token carries no subscription/identity fields we can read.
       account: null,
     };
   }
@@ -286,17 +362,14 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
         ? 'Not signed in to Claude on this computer, so the development model cannot answer.'
         : 'Not signed in to Claude, and no `claude` command was found on this computer.',
       remedy: cliFound
-        ? `Run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal, then re-check.`
-        : `Install the Claude Code CLI, then run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal.`,
+        ? `Run \`${CLAUDE_LOGIN_COMMAND}\`, then re-check.`
+        : `Install the Claude Code CLI, then run \`${CLAUDE_LOGIN_COMMAND}\`.`,
       cliFound,
       checkedAt,
       account: null,
     };
   }
 
-  // Present but unmodelled shape → we genuinely do not know. Telling the user
-  // to log in when they may already be logged in (via a layout we do not
-  // recognise) is worse than admitting ignorance.
   if (creds.expiresAt === undefined && creds.refreshExpiresAt === undefined) {
     return {
       status: 'unknown',
@@ -306,16 +379,11 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
       remedy: null,
       cliFound,
       checkedAt,
-      // Present but unmodelled shape — surface whatever identity we did manage
-      // to read (may be null).
-      account: toAccount(creds),
+      account: toFileAccount(creds),
     };
   }
 
   const accessLive = creds.expiresAt !== undefined && creds.expiresAt > now;
-  // A live refresh token is as good as a live access token from the user's
-  // point of view: the CLI/SDK exchanges it silently on first use. Warning here
-  // would be a false alarm on any machine idle for more than a few hours.
   const refreshLive = creds.refreshExpiresAt !== undefined && creds.refreshExpiresAt > now;
 
   if (accessLive || refreshLive) {
@@ -327,15 +395,14 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
       remedy: null,
       cliFound,
       checkedAt,
-      // The one place identity is genuinely meaningful: a live sign-in.
-      account: toAccount(creds),
+      account: toFileAccount(creds),
     };
   }
 
   return {
     status: 'signed-out',
     summary: 'The Claude sign-in on this computer has expired, so the development model cannot answer.',
-    remedy: `Run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal to sign in again, then re-check.`,
+    remedy: `Run \`${CLAUDE_LOGIN_COMMAND}\` to sign in again, then re-check.`,
     cliFound,
     checkedAt,
     account: null,
@@ -343,27 +410,90 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
 }
 
 // ---------------------------------------------------------------------------
-// The cached entry point
+// The authoritative check — `claude auth status`
 // ---------------------------------------------------------------------------
 
 /**
- * How long an answer is reused. The underlying state changes when a human runs
- * `claude login` in another window, so a short TTL is right — but the UI polls
- * and also re-checks on every window focus, and focus events arrive in bursts
- * (alt-tab, notification, cmd-tab back). Without this, a user flicking between
- * windows would trigger a filesystem read per flick.
+ * The real answer: run `claude auth status`, parse its JSON, and map it —
+ * including the REAL EMAIL. Non-fatal and timeout-guarded at every step:
+ *   * no resolvable binary        → fall back to the credential-file check;
+ *   * exec fails / times out       → fall back to the credential-file check;
+ *   * output does not parse        → fall back to the credential-file check;
+ *   * loggedIn:true                → signed-in, with email/orgName/plan;
+ *   * loggedIn:false               → signed-out.
+ * The fallback guarantees nothing regresses where `claude` is not runnable, but
+ * when the CLI answers, ITS result (with the email) wins.
  */
+export async function checkClaudeAuthStatus(
+  opts: CheckClaudeLoginOptions = {},
+): Promise<ClaudeLoginState> {
+  const env = opts.env ?? process.env;
+  const now = opts.now ?? Date.now();
+  const checkedAt = now;
+
+  const bin = resolveClaudeBinary(env);
+  if (!bin) {
+    // No real CLI to ask. The file fallback still reports a useful answer, and
+    // its `cliFound` will be false too, so the UI can say "not installed".
+    return checkClaudeLogin(opts);
+  }
+
+  const res = await runClaudeCli(bin, ['auth', 'status'], env);
+  if (!res.ok) {
+    // A hung/failed status probe must not block the request or lie; fall back to
+    // the cheap file check, which is a good approximation.
+    return checkClaudeLogin(opts);
+  }
+
+  const parsed = parseAuthStatus(res.stdout);
+  if (!parsed || typeof parsed.loggedIn !== 'boolean') {
+    return checkClaudeLogin(opts);
+  }
+
+  if (parsed.loggedIn) {
+    const email = nonEmpty(parsed.email);
+    const account: ClaudeLoginAccount = {
+      email,
+      orgName: nonEmpty(parsed.orgName),
+      subscriptionType: nonEmpty(parsed.subscriptionType),
+      rateLimitTier: null,
+    };
+    return {
+      status: 'signed-in',
+      summary: email
+        ? `Signed in to Claude as ${email}. The development model can answer with no API key.`
+        : 'Signed in to Claude on this computer. The development model can answer with no API key.',
+      remedy: null,
+      cliFound: true,
+      checkedAt,
+      account,
+    };
+  }
+
+  return {
+    status: 'signed-out',
+    summary: 'Not signed in to Claude on this computer, so the development model cannot answer.',
+    remedy: `Sign in with \`${CLAUDE_LOGIN_COMMAND}\`, then re-check.`,
+    cliFound: true,
+    checkedAt,
+    account: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The cached entry points
+// ---------------------------------------------------------------------------
+
+/** How long an answer is reused — short, because a human may log in/out in
+ *  another window, but long enough that a burst of focus events does not spawn a
+ *  `claude auth status` per flick. */
 const CACHE_MS = 10_000;
 
 let cached: ClaudeLoginState | undefined;
 
 /**
- * The entry point the shell calls. Same answer as `checkClaudeLogin`, but at
- * most one filesystem check per `CACHE_MS`.
- *
- * `force` exists for the "Re-check" the UI offers after telling the user to run
- * `claude login`: having just followed the instruction, the user must not be
- * shown a stale "signed out" for another ten seconds.
+ * The synchronous, file-only cached entry point. Retained for the electron spike
+ * harness and any caller that must not await. Prefer `getClaudeAuthState`.
  */
 export function getClaudeLoginState(
   opts: CheckClaudeLoginOptions & { force?: boolean } = {},
@@ -374,43 +504,109 @@ export function getClaudeLoginState(
   return cached;
 }
 
-/** Drop the cache. Exported for the spikes, which change the environment
- *  underneath the check and must not read a pre-change answer. */
+/**
+ * The authoritative cached entry point the UI path uses. Same answer as
+ * `checkClaudeAuthStatus`, but at most one CLI invocation per `CACHE_MS`.
+ * `force` exists for the UI's "Re-check" and for polling after a login/logout,
+ * where a stale answer would be wrong for up to ten seconds.
+ */
+export async function getClaudeAuthState(
+  opts: CheckClaudeLoginOptions & { force?: boolean } = {},
+): Promise<ClaudeLoginState> {
+  const now = opts.now ?? Date.now();
+  if (!opts.force && cached && now - cached.checkedAt < CACHE_MS) return cached;
+  cached = await checkClaudeAuthStatus(opts);
+  return cached;
+}
+
+/** Drop the cache. Exported for the spikes, and called after login/logout so the
+ *  next check reflects the new reality rather than a 10s-stale answer. */
 export function resetClaudeLoginCache(): void {
   cached = undefined;
 }
 
 // ---------------------------------------------------------------------------
-// Sign out
+// Log in — kick off the interactive browser OAuth
+// ---------------------------------------------------------------------------
+
+export type ClaudeLoginOptions = {
+  /** Pre-fill the email for the OAuth flow (`--email`). Optional. */
+  email?: string;
+  /** Use the Console (API) flow (`--console`) instead of the default claude.ai
+   *  browser flow (`--claudeai`). */
+  console?: boolean;
+  /** Override the environment (tests / binary resolution). */
+  env?: NodeJS.ProcessEnv;
+};
+
+export type ClaudeLoginResult =
+  /** The browser flow was launched. The UI must now POLL `getClaudeAuthState`
+   *  (force) until `loggedIn` flips — this call does NOT wait for the user. */
+  | { ok: true; started: true; command: string }
+  /** Could not launch (no CLI, or spawn failed). `command` is the copy-paste
+   *  fallback the UI shows for a headless machine. */
+  | { ok: false; error: string; command: string };
+
+/**
+ * Start `claude auth login` so a browser opens for the user to authorise.
+ *
+ * HOW THE BROWSER OPENS AND WHY THIS DOES NOT BLOCK. `claude auth login` runs an
+ * OAuth flow: it opens the system browser, waits on a localhost callback, writes
+ * the credential, and exits. That is INTERACTIVE and can take as long as the user
+ * takes, so we do NOT await it. We spawn it DETACHED with stdio ignored and
+ * `unref()` it, returning `{ started:true }` immediately. The CLI itself owns
+ * opening the browser (it prints/opens the auth URL); the app's job is only to
+ * launch it and then poll `claude auth status` until the login lands.
+ *
+ * WHAT THE UI DOES AFTER THIS. It shows a "waiting for browser sign-in…" state
+ * and polls `getClaudeAuthState({ force:true })` (~every 2s for ~60s) until the
+ * status flips to signed-in, then stops. On a headless box where no browser can
+ * open, the UI offers `command` as copy-paste so the user can run it themselves.
+ */
+export function claudeLogin(opts: ClaudeLoginOptions = {}): ClaudeLoginResult {
+  const env = opts.env ?? process.env;
+  const args = ['auth', 'login'];
+  // Default to the claude.ai browser flow; only switch to Console on request.
+  args.push(opts.console ? '--console' : '--claudeai');
+  if (opts.email?.trim()) args.push('--email', opts.email.trim());
+  const command = `claude ${args.join(' ')}`;
+
+  const bin = resolveClaudeBinary(env);
+  if (!bin) {
+    return {
+      ok: false,
+      error: 'The `claude` CLI was not found on this computer. Install it, then run the command below.',
+      command,
+    };
+  }
+
+  try {
+    const child = spawn(bin, args, { detached: true, stdio: 'ignore', env });
+    // A spawn error (e.g. EACCES) arrives asynchronously; swallow it so it never
+    // becomes an unhandled 'error' event. The UI learns the outcome by polling.
+    child.on('error', () => {});
+    child.unref();
+    resetClaudeLoginCache();
+    return { ok: true, started: true, command };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e), command };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Log out
 // ---------------------------------------------------------------------------
 
 export type ClaudeLogoutResult =
-  /** `removed` distinguishes "we deleted a live sign-in" from "there was nothing
-   *  to delete" (already signed out) — both are success, but the UI can say so. */
+  /** `removed` distinguishes "we cleared a live sign-in" from "there was nothing
+   *  to clear". Both are success; the UI can phrase it either way. */
   | { ok: true; removed: boolean }
   | { ok: false; error: string };
 
-/**
- * Sign out by deleting the OAuth credential file — the same effect `claude
- * logout` has, and the only sign-out this app can perform without an
- * interactive CLI.
- *
- * SAFETY:
- *   * It only ever touches `claudeCredentialsPath(env)` — the one file whose
- *     path this module computes. It never takes a caller-supplied path, so it
- *     cannot be pointed at arbitrary files.
- *   * A missing file is SUCCESS, not an error: "sign me out" when already signed
- *     out is satisfied, and reporting a failure there would be a lie.
- *   * It resets the login cache so the very next `checkClaudeLogin` reflects the
- *     new (signed-out) reality rather than a 10s-stale "signed in".
- *   * It does NOT clear `CLAUDE_CODE_OAUTH_TOKEN` — that is an environment
- *     variable owned by the process/shell, not a file we may delete. When such a
- *     token is set, the caller is told (see the guard below) so the UI does not
- *     promise a sign-out it cannot deliver.
- */
-export function claudeLogout(env: NodeJS.ProcessEnv = process.env): ClaudeLogoutResult {
-  // An env-token sign-in cannot be revoked by deleting a file. Say so plainly
-  // rather than delete the file and still report "signed in" on the next check.
+/** The credential-file logout, kept as the fallback for when the CLI is not
+ *  resolvable. Deletes ONLY the path this module computes; a missing file is
+ *  success (idempotent); never reads the file's contents. */
+function claudeLogoutViaFile(env: NodeJS.ProcessEnv): ClaudeLogoutResult {
   if (env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) {
     return {
       ok: false,
@@ -428,18 +624,55 @@ export function claudeLogout(env: NodeJS.ProcessEnv = process.env): ClaudeLogout
     resetClaudeLoginCache();
     return { ok: true, removed: true };
   } catch (e) {
-    // EACCES / EPERM / EISDIR: we found something but could not remove it. The
-    // error message is safe to surface — it names the operation, never the
-    // file's contents.
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
 /**
- * The shape the UI needs: the sign-in status PLUS whether the dev engine is
- * even part of this build. A packaged app has no Agent SDK, so a sign-in
- * indicator there would describe a capability the app does not have — the UI
- * uses `relevant` to hide itself rather than mislead.
+ * Sign out by running `claude auth logout` — a clean logout that revokes the
+ * session the way the CLI intends, rather than leaving a half-state by deleting
+ * a file behind the CLI's back.
+ *
+ * Idempotent and non-fatal: `claude auth logout` when already signed out still
+ * succeeds. The login cache is reset either way so the next check is fresh. When
+ * no real `claude` binary is resolvable (or the CLI errors), it falls back to
+ * deleting the credential file, so logout still works where the CLI cannot run.
+ */
+export async function claudeLogout(env: NodeJS.ProcessEnv = process.env): Promise<ClaudeLogoutResult> {
+  const bin = resolveClaudeBinary(env);
+  if (bin) {
+    const res = await runClaudeCli(bin, ['auth', 'logout'], env);
+    resetClaudeLoginCache();
+    if (res.ok) return { ok: true, removed: true };
+    // CLI present but the logout failed — try the file fallback before giving up.
+    const fallback = claudeLogoutViaFile(env);
+    if (fallback.ok) return fallback;
+    return { ok: false, error: res.error };
+  }
+  return claudeLogoutViaFile(env);
+}
+
+// ---------------------------------------------------------------------------
+// The shape the UI needs
+// ---------------------------------------------------------------------------
+
+/**
+ * The authoritative status PLUS whether the dev engine is part of this build. A
+ * packaged app has no Agent SDK, so a sign-in indicator there would describe a
+ * capability the app does not have — the UI uses `relevant` to hide itself.
+ *
+ * Async because it runs `claude auth status` (cached). Prefer this over the
+ * synchronous `describeClaudeLogin`, which reads only the credential file.
+ */
+export async function describeClaudeLoginAsync(
+  opts: CheckClaudeLoginOptions & { force?: boolean } = {},
+): Promise<ClaudeLoginState & { relevant: boolean }> {
+  return { ...(await getClaudeAuthState(opts)), relevant: agentSdkResolvable() };
+}
+
+/**
+ * The synchronous, file-only variant. Retained for callers that must not await
+ * (and for backward compatibility). Prefer `describeClaudeLoginAsync`.
  */
 export function describeClaudeLogin(
   opts: CheckClaudeLoginOptions & { force?: boolean } = {},

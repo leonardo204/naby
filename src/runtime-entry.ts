@@ -104,15 +104,22 @@ export {
 // either one independently. Reads no credential material — see the module
 // header for what it refuses to do.
 export {
+  checkClaudeAuthStatus,
   checkClaudeLogin,
   CLAUDE_LOGIN_COMMAND,
   claudeCredentialsPath,
+  claudeLogin,
   claudeLogout,
   describeClaudeLogin,
+  describeClaudeLoginAsync,
+  getClaudeAuthState,
   getClaudeLoginState,
   resetClaudeLoginCache,
+  resolveClaudeBinary,
   type CheckClaudeLoginOptions,
   type ClaudeLoginAccount,
+  type ClaudeLoginOptions,
+  type ClaudeLoginResult,
   type ClaudeLoginState,
   type ClaudeLoginStatus,
   type ClaudeLogoutResult,
