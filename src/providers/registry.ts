@@ -301,13 +301,19 @@ export function describeProviders(): ProviderDescription[] {
     },
     {
       kind: 'azure-openai',
+      // baseURL is the newer AI-Services endpoint (…/openai/v1); resource +
+      // apiVersion are the classic shape. Supply EITHER baseURL OR resource —
+      // baseURL wins when both are set (see the ProviderConfig doc).
       label: 'Azure OpenAI',
-      configFields: ['resource', 'deployment', 'apiVersion'],
+      configFields: ['baseURL', 'resource', 'deployment', 'apiVersion'],
       credentialKinds: ['api-key'],
       modelMeaning: 'the DEPLOYMENT name (must equal config.deployment)',
       defaultModel: '',
       envVar: 'NABY_AZURE_OPENAI_API_KEY',
-      keyHelp: 'Azure portal → your Azure OpenAI resource → Keys and Endpoint',
+      keyHelp:
+        'Azure portal → your resource → Keys and Endpoint. Newer resources give a ' +
+        '“…services.ai.azure.com/openai/v1” endpoint → paste it as baseURL; older ' +
+        '“…openai.azure.com” resources → use resource + apiVersion instead.',
     },
     {
       kind: 'google',
