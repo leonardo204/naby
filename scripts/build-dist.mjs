@@ -25,12 +25,49 @@
 // `node scripts/build-dist.mjs --mac --publish never` works as expected.
 
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './load-env.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+// ---------------------------------------------------------------------------
+// NABY_BUNDLE_AGENT_SDK — bundle the Claude Agent SDK into a packaged build.
+// ---------------------------------------------------------------------------
+//
+// The Agent SDK ("Claude (subscription)", the local-sign-in engine) is normally
+// EXCLUDED from packaged builds by two `!shell/node_modules/@anthropic-ai/
+// claude-agent-sdk*` lines in electron-builder.yml — design §3.3 keeps its
+// non-OSS binary out of a shipped app, and §143/§167 keep claude.ai login out of
+// what END USERS get (Anthropic's third-party-login ToS).
+//
+// Setting NABY_BUNDLE_AGENT_SDK=1 produces a packaged build that INCLUDES it, so
+// the end-user Claude-subscription flow can be TESTED in a real packaged app.
+//
+//   ⚠️  OFFICIAL / PUBLIC DISTRIBUTION MUST NOT SET THIS FLAG.  ⚠️
+//   Shipping the Agent SDK to end users crosses the ToS line the spec drew.
+//   Tracked as a release task — see ref-docs/specs (backlog) / the task marker.
+//
+// Implemented by writing a temp config with the two exclusion lines removed and
+// pointing electron-builder at it, so the checked-in yml is never mutated.
+function configArgsForAgentSdkBundle() {
+  if (process.env.NABY_BUNDLE_AGENT_SDK !== '1') return null;
+  const src = join(root, 'electron-builder.yml');
+  const yml = readFileSync(src, 'utf8');
+  const kept = yml
+    .split('\n')
+    .filter((line) => !/^\s*-\s*'!shell\/node_modules\/@anthropic-ai\/claude-agent-sdk/.test(line))
+    .join('\n');
+  const tmp = join(root, '.electron-builder.bundle-agent-sdk.yml');
+  writeFileSync(tmp, kept);
+  console.warn(
+    '[build] ⚠️  NABY_BUNDLE_AGENT_SDK=1 — bundling the Claude Agent SDK into this ' +
+      'build FOR TESTING. Do NOT use this build for official/public distribution ' +
+      '(claude.ai login must not ship to end users; see the release task).',
+  );
+  return { tmp, args: ['--config', tmp] };
+}
 
 /**
  * Resolve electron-builder from node_modules/.bin rather than trusting PATH.
@@ -76,7 +113,14 @@ if (args.includes('--dir')) {
   process.env.SKIP_NOTARIZE ??= '1';
 }
 
-const child = spawn(electronBuilderBin(), args, {
+// Opt-in Agent-SDK bundling (test builds only — see the note above).
+const bundle = configArgsForAgentSdkBundle();
+const finalArgs = bundle ? [...bundle.args, ...args] : args;
+const cleanup = () => {
+  if (bundle) rmSync(bundle.tmp, { force: true });
+};
+
+const child = spawn(electronBuilderBin(), finalArgs, {
   cwd: root,
   env: process.env,
   stdio: 'inherit',
@@ -84,11 +128,13 @@ const child = spawn(electronBuilderBin(), args, {
 });
 
 child.on('error', (err) => {
+  cleanup();
   console.error(`[build] failed to start electron-builder: ${err.message}`);
   process.exit(1);
 });
 
 child.on('exit', (code, signal) => {
+  cleanup();
   if (signal) {
     console.error(`[build] electron-builder terminated by ${signal}`);
     process.exit(1);

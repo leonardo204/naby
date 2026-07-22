@@ -2,11 +2,11 @@
 id: phase-1-test-plan
 title: Phase 1 — Verification Plan (spikes, acceptance, 3-OS matrix)
 type: test
-version: 0.3.0
+version: 0.3.1
 status: draft
 scope: How Phase 0 spikes and Phase 1 acceptance criteria are verified — spikes, per-feature acceptance, the Naby-store realignment (Phases B–E), security tests, the 3-OS matrix, and irreversible release checkpoints
 related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, personalized-agent-desktop-app]
-updated: 2026-07-21
+updated: 2026-07-22
 ---
 
 # Phase 1 — Verification Plan
@@ -128,6 +128,7 @@ Not tests. Decisions that cannot be undone after shipping, so they get a recorde
 | **macOS signing identity** | First macOS release | Developer ID Application certificate obtained; the exact identity recorded in the repo | Squirrel validates every update against the **running app's** designated requirement. A later cert rotation strands every installed user — and unlike Windows `publisherName`, there is no array to list old and new identities in |
 | **Windows publisher identity** | First signed Windows release | If moving unsigned→signed or changing cert, list **both** old and new `publisherName` values | Omitting the previous name breaks updates for users on the older build. Recoverable, unlike macOS — but only if planned before the switch |
 | **AI SDK version pin** | Each SDK bump | Gate soundness regression (§3) green on both engines; five-provider smoke test green | An adapter change can silently alter tool-call surfacing or a provider's behavior |
+| **Agent SDK NOT bundled** | Every OFFICIAL / public release | `NABY_BUNDLE_AGENT_SDK` MUST be unset — the packaged build must NOT contain `@anthropic-ai/claude-agent-sdk`. Verify: the exclusion lines are present in the config used and `claude-agent-sdk` is absent from `app.asar` | §143/§167: shipping the local claude.ai-sign-in engine to end users crosses Anthropic's third-party-login ToS. The flag exists ONLY so the end-user Claude-subscription flow can be tested in an internal packaged build; an official build with it set is a ToS violation |
 
 ---
 

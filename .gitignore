@@ -19,3 +19,4 @@ dist/
 
 # electron-builder output
 release/
+.electron-builder.bundle-agent-sdk.yml

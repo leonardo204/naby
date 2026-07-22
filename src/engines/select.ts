@@ -59,8 +59,10 @@ export type EngineId = 'dev-claude' | 'ai-sdk';
  */
 export type CostBasis = 'metered' | 'subscription';
 
-/** How the dev engine is described wherever a person can see it. */
-export const DEV_ENGINE_LABEL = 'Development model (local Claude sign-in)';
+/** How the Claude-subscription engine (Agent SDK, local sign-in) is described
+ *  wherever a person can see it. It is a first-class default provider, not a
+ *  "development-only" mode. */
+export const DEV_ENGINE_LABEL = 'Claude (subscription, local sign-in)';
 
 /** The env var that forces the choice. */
 export const ENGINE_ENV_VAR = 'NABY_ENGINE';
