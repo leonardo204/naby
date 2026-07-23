@@ -2,7 +2,7 @@
 id: phase-1_5-memory-contracts
 title: Phase 1.5 — Memory Contracts (scoped schema, write gate, injection, Store extension)
 type: interface
-version: 0.1.0
+version: 0.1.1
 status: draft
 scope: The on-disk and in-process contracts for Phase 1.5 scoped memory — the memory record shape (scope/type/provenance/confidence/status), the keying model and how it extends (not violates) the Phase-1 sessionId-only invariant, the cascade-exemption rules, the deterministic memory write-gate contract, the turn-time retrieval + token-budget injection contract, and the Store interface additions.
 related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl]
@@ -154,10 +154,16 @@ interface Store {
    *  a 'deny' throws, a 'hold' persists with status:'proposed'. Returns the row. */
   putMemory(req: MemoryWriteRequest): MemoryItem;
 
-  /** Read memory for injection/review. `status` filters proposed vs confirmed;
-   *  omit for all. Ordering is relevance-agnostic here — ranking happens in the
-   *  injection step (§5), not the store. */
-  getMemory(scope: MemoryScope, scopeKey: string, opts?: { status?: MemoryStatus }): MemoryItem[];
+  /** Read scoped memory for injection/review. `status` filters proposed vs
+   *  confirmed; omit for all. Ordering is relevance-agnostic here — ranking
+   *  happens in the injection step (§5), not the store.
+   *
+   *  NAMED `getScopedMemory`, not `getMemory`: the Phase-1 store already exposes
+   *  `getMemory(sessionId, key): string` (the legacy session-memory reader that
+   *  §3's migration preserves). Both take `(string, string)` with different
+   *  return types, so a TS overload would resolve ambiguously — the scoped
+   *  reader gets its own name to keep the legacy path intact. */
+  getScopedMemory(scope: MemoryScope, scopeKey: string, opts?: { status?: MemoryStatus }): MemoryItem[];
 
   /** Confirm a proposed item (the only path external-origin memory becomes
    *  confirmed — §4 invariant 1). */
