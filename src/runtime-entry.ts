@@ -80,6 +80,10 @@ export type {
   MemoryWriteDecision,
   MemoryWriteRequest,
   TrustTier,
+  // Golden set (Phase 1.5 P15-04) — phase-1_5-personalization-data-layer §5.
+  GoldenConsent,
+  GoldenItem,
+  GoldenItemInput,
 } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';

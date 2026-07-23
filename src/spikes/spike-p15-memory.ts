@@ -198,8 +198,8 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(c) LOSSLESS MIGRATION v2->v4: legacy memory rows back-fill into memory_items; both read paths return them; version stamped 4',
-    started === 2 && after === 4 && legacyIntact && scopedIntact,
+    '(c) LOSSLESS MIGRATION v2->v5: legacy memory rows back-fill into memory_items; both read paths return them; version stamped 5',
+    started === 2 && after === 5 && legacyIntact && scopedIntact,
     `user_version ${started}->${after}; legacy getAllMemory=${JSON.stringify(legacy)} intact=${legacyIntact}; scoped rows=${scoped.length} mapped-correctly=${scopedIntact} (${JSON.stringify(scoped.map((m) => ({ k: m.key, scope: m.scope, type: m.type, src: m.provenance.source, status: m.status, conf: m.confidence })))})`,
   );
 }

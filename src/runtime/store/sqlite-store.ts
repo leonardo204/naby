@@ -37,6 +37,9 @@ import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import { decideMemoryWrite } from '../memory-gate.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
+  GoldenConsent,
+  GoldenItem,
+  GoldenItemInput,
   MemoryDeleteSelector,
   MemoryItem,
   MemoryProvenance,
@@ -136,7 +139,16 @@ function openSilently(path: string): DatabaseSyncType {
 // 'user', status:'confirmed', confidence:1} and the old table is dropped, so the
 // legacy setMemory/getMemory/getAllMemory path keeps behaving exactly as before
 // (it now reads/writes the scope='session' view of memory_items).
-const SCHEMA_VERSION = 4;
+//
+// v5 (Phase 1.5 P15-04) adds the `golden_items` table — a per-user HOLDOUT of
+// real artifacts, held OUT of learning and reserved as a fixed evaluation set
+// (phase-1_5-personalization-data-layer §5). It is purely ADDITIVE: the table
+// and its index are IF NOT EXISTS in the DDL, so a brand-new database gets it on
+// first open and an existing v4 database picks it up on next open with NO data
+// migration and NO loss (memory_items, sessions, everything else untouched). The
+// version is bumped only to record that it happened. The excluded-from-learning
+// invariant is structural: no injection or extraction path reads this table.
+const SCHEMA_VERSION = 5;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -234,6 +246,29 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 CREATE INDEX IF NOT EXISTS projects_by_opened ON projects (last_opened_at DESC);
+
+-- v5 (Phase 1.5 P15-04). Per-user golden-set HOLDOUT: N of the user's real past
+-- artifacts (input -> expected output), held OUT of learning and reserved as a
+-- fixed evaluation yardstick (phase-1_5-personalization-data-layer §5). A
+-- DELIBERATELY SEPARATE table from memory_items: no injection/extraction path
+-- reads it, which is what makes the excluded-from-learning invariant structural
+-- rather than a flag someone must remember to check. excluded_from_learning is
+-- stored (DEFAULT 1, always 1) as an auditable record of the invariant; id is
+-- the addressable handle Phase 2b re-scoring (F2-07) selects on; last_scored_at
+-- is NULL until that re-scoring runs (reserved so it needs no later migration).
+CREATE TABLE IF NOT EXISTS golden_items (
+  id                     TEXT PRIMARY KEY,
+  scope_key              TEXT NOT NULL,   -- the user (userId); single-user machine: a constant
+  task_type              TEXT NOT NULL,   -- aligns with eval_events.task_type (P15-03)
+  input                  TEXT NOT NULL,   -- the original prompt/input
+  expected               TEXT NOT NULL,   -- the held-out real output, scored against later
+  excluded_from_learning INTEGER NOT NULL DEFAULT 1,  -- ALWAYS 1 (the invariant, recorded)
+  consent                TEXT NOT NULL,   -- granted | revoked | pending
+  created_at             INTEGER NOT NULL,
+  last_scored_at         INTEGER          -- NULL until Phase 2b re-scoring (F2-07)
+);
+
+CREATE INDEX IF NOT EXISTS golden_items_by_scope ON golden_items (scope_key);
 `;
 
 // ---------------------------------------------------------------------------
@@ -332,6 +367,48 @@ let memoryIdCounter = 0;
 function mintMemoryId(): string {
   memoryIdCounter += 1;
   return `m-${Date.now().toString(36)}-${memoryIdCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+// Row shape for golden_items as it comes back from node:sqlite.
+type GoldenRow = {
+  id: string;
+  scope_key: string;
+  task_type: string;
+  input: string;
+  expected: string;
+  excluded_from_learning: number;
+  consent: string;
+  created_at: number;
+  last_scored_at: number | null;
+};
+
+function toGoldenItem(row: GoldenRow): GoldenItem {
+  return {
+    id: row.id,
+    scopeKey: row.scope_key,
+    taskType: row.task_type,
+    input: row.input,
+    expected: row.expected,
+    // The excluded-from-learning invariant: always true, regardless of the
+    // stored int. The column records the invariant for audit; the read never
+    // surfaces it as false (nothing should ever write a 0, but a defensive read
+    // makes tampering unobservable to the learning pipeline).
+    excludedFromLearning: true,
+    consent: row.consent as GoldenConsent,
+    createdAt: Number(row.created_at),
+    lastScoredAt:
+      row.last_scored_at === null || row.last_scored_at === undefined
+        ? null
+        : Number(row.last_scored_at),
+  };
+}
+
+let goldenIdCounter = 0;
+function mintGoldenId(): string {
+  goldenIdCounter += 1;
+  return `g-${Date.now().toString(36)}-${goldenIdCounter.toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
 }
@@ -767,6 +844,76 @@ export class SqliteStore implements Store {
         .prepare('DELETE FROM memory_items WHERE prov_source = ?')
         .run(source);
     }
+  }
+
+  // -- golden set (Phase 1.5 P15-04) ---------------------------------------
+
+  addGoldenItem(item: GoldenItemInput): GoldenItem {
+    this.assertOpen();
+    const now = Date.now();
+    const id = mintGoldenId();
+    const consent: GoldenConsent = item.consent ?? 'pending';
+    // excluded_from_learning is ALWAYS 1 — the invariant. The caller cannot set
+    // it (GoldenItemInput has no such field); it is stamped here and read back
+    // as the literal `true`. last_scored_at is NULL (Phase 2b reserves it).
+    this.db
+      .prepare(
+        `INSERT INTO golden_items
+           (id, scope_key, task_type, input, expected,
+            excluded_from_learning, consent, created_at, last_scored_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, NULL)`,
+      )
+      .run(id, item.scopeKey, item.taskType, item.input, item.expected, consent, now);
+    return {
+      id,
+      scopeKey: item.scopeKey,
+      taskType: item.taskType,
+      input: item.input,
+      expected: item.expected,
+      excludedFromLearning: true,
+      consent,
+      createdAt: now,
+      lastScoredAt: null,
+    };
+  }
+
+  listGoldenSet(scopeKey: string, opts?: { consent?: GoldenConsent }): GoldenItem[] {
+    this.assertOpen();
+    const rows = (
+      opts?.consent
+        ? this.db
+            .prepare(
+              'SELECT * FROM golden_items WHERE scope_key = ? AND consent = ? ORDER BY created_at ASC',
+            )
+            .all(scopeKey, opts.consent)
+        : this.db
+            .prepare(
+              'SELECT * FROM golden_items WHERE scope_key = ? ORDER BY created_at ASC',
+            )
+            .all(scopeKey)
+    ) as GoldenRow[];
+    return rows.map(toGoldenItem);
+  }
+
+  getGoldenItem(id: string): GoldenItem | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT * FROM golden_items WHERE id = ?')
+      .get(id) as GoldenRow | undefined;
+    return row ? toGoldenItem(row) : undefined;
+  }
+
+  setGoldenConsent(id: string, consent: GoldenConsent): void {
+    this.assertOpen();
+    // No-op if absent (UPDATE simply matches no row).
+    this.db
+      .prepare('UPDATE golden_items SET consent = ? WHERE id = ?')
+      .run(consent, id);
+  }
+
+  removeGoldenItem(id: string): void {
+    this.assertOpen();
+    this.db.prepare('DELETE FROM golden_items WHERE id = ?').run(id);
   }
 
   // -- usage (F1-07) -------------------------------------------------------

@@ -17,6 +17,9 @@
 import { decideMemoryWrite } from '../memory-gate.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
+  GoldenConsent,
+  GoldenItem,
+  GoldenItemInput,
   MemoryDeleteSelector,
   MemoryItem,
   MemoryScope,
@@ -52,8 +55,20 @@ function mintMemoryId(): string {
     .slice(2, 10)}`;
 }
 
+let goldenCounter = 0;
+function mintGoldenId(): string {
+  goldenCounter += 1;
+  return `g-${Date.now().toString(36)}-${goldenCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
 function cloneMemory(item: MemoryItem): MemoryItem {
   return { ...item, provenance: { ...item.provenance } };
+}
+
+function cloneGolden(item: GoldenItem): GoldenItem {
+  return { ...item };
 }
 
 export class MemoryStore implements Store {
@@ -71,6 +86,11 @@ export class MemoryStore implements Store {
   // EXEMPTION expressible: dropping a SessionState no longer drops its memory,
   // deleteSession/removeProject delete only the session/project-scoped rows.
   private readonly memoryItems = new Map<string, MemoryItem>();
+  // Golden set (Phase 1.5 P15-04), keyed by its own id — a STORE-LEVEL
+  // collection, DELIBERATELY separate from memoryItems: no injection/extraction
+  // path reads it, which is what makes the excluded-from-learning invariant
+  // structural, exactly as the golden_items table is separate in SqliteStore.
+  private readonly goldenItems = new Map<string, GoldenItem>();
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -277,6 +297,55 @@ export class MemoryStore implements Store {
         continue;
       this.memoryItems.delete(id);
     }
+  }
+
+  // -- golden set (Phase 1.5 P15-04) ---------------------------------------
+  //
+  // Same semantics as SqliteStore's golden_items ops, so the two drivers stay
+  // observationally identical (the property spike:f105 / spike:golden lean on).
+
+  addGoldenItem(item: GoldenItemInput): GoldenItem {
+    const now = Date.now();
+    const stored: GoldenItem = {
+      id: mintGoldenId(),
+      scopeKey: item.scopeKey,
+      taskType: item.taskType,
+      input: item.input,
+      expected: item.expected,
+      // ALWAYS true — the invariant. GoldenItemInput has no such field, so the
+      // caller cannot express false; it is stamped here.
+      excludedFromLearning: true,
+      consent: item.consent ?? 'pending',
+      createdAt: now,
+      lastScoredAt: null, // Phase 2b reserves it
+    };
+    this.goldenItems.set(stored.id, stored);
+    return cloneGolden(stored);
+  }
+
+  listGoldenSet(scopeKey: string, opts?: { consent?: GoldenConsent }): GoldenItem[] {
+    const out: GoldenItem[] = [];
+    for (const item of this.goldenItems.values()) {
+      if (item.scopeKey !== scopeKey) continue;
+      if (opts?.consent && item.consent !== opts.consent) continue;
+      out.push(cloneGolden(item));
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  getGoldenItem(id: string): GoldenItem | undefined {
+    const item = this.goldenItems.get(id);
+    return item ? cloneGolden(item) : undefined;
+  }
+
+  setGoldenConsent(id: string, consent: GoldenConsent): void {
+    const item = this.goldenItems.get(id);
+    if (!item) return; // no-op if absent
+    item.consent = consent;
+  }
+
+  removeGoldenItem(id: string): void {
+    this.goldenItems.delete(id);
   }
 
   // -- usage (F1-07) -------------------------------------------------------

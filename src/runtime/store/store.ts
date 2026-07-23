@@ -248,6 +248,74 @@ export type MemoryDeleteSelector =
   | { source: TrustTier; sessionId?: string };
 
 // ---------------------------------------------------------------------------
+// Golden set (Phase 1.5 P15-04) — phase-1_5-personalization-data-layer §3/§5/§6
+// ---------------------------------------------------------------------------
+//
+// The golden set is a per-user HOLDOUT: N of the user's own real past artifacts
+// (input → expected output) reserved as a FIXED evaluation yardstick and held
+// OUT of learning. As memory accumulates (Phase 2b), the same inputs are
+// regenerated and the distance to the held-out `expected` truth is scored,
+// isolating personalization progress from task-difficulty drift (impl §5).
+//
+// THE LOAD-BEARING INVARIANT (impl §5 "held out from learning", DoD §6): a
+// golden item is ALWAYS excluded-from-learning. The extraction/injection
+// pipeline (memory-inject, Phase 2b extraction) reads `memory_items` ONLY and
+// never this table, so golden artifacts are STRUCTURALLY disjoint from anything
+// that can shape a turn. `excludedFromLearning` is typed as the literal `true`
+// so the invariant is not even expressible as false — the store never accepts a
+// caller-supplied value for it and always stamps it true.
+//
+// SCOPE: Phase 1.5 builds storage + consent + CRUD + addressability ONLY. The
+// scoring logic and the re-measure dashboard are Phase 2b (F2-07); `lastScoredAt`
+// is reserved here (NULL now) so re-scoring is addressable without a later
+// migration.
+
+/** A user's consent for holding an artifact in the golden set. Recorded per
+ * item so consent is auditable and revocable at the artifact granularity
+ * (revoking consent does not silently drop the row — it flips this state, and a
+ * caller decides whether a revoked item is still scored). */
+export type GoldenConsent = 'granted' | 'revoked' | 'pending';
+
+/** One held-out evaluation artifact (impl §5). `(scopeKey)` groups a user's
+ * holdout; `id` is the addressable handle for later re-scoring (Phase 2b F2-07). */
+export type GoldenItem = {
+  /** UUID — the row's own key and the addressable re-scoring handle. */
+  id: string;
+  /** The user (single-user machine: a constant) whose holdout this belongs to.
+   * Same key space as scope='user' scoped memory (userId). */
+  scopeKey: string;
+  /** Task type of the artifact (aligns with eval_events.task_type / P15-03) so
+   * scoring can be aggregated per task type. */
+  taskType: string;
+  /** The original input/prompt the artifact answered. */
+  input: string;
+  /** The user's real past output — the HELD-OUT truth scored against later. */
+  expected: string;
+  /** ALWAYS true — the excluded-from-learning invariant (impl §5). The literal
+   * type makes `false` inexpressible; the store never accepts it from a caller. */
+  excludedFromLearning: true;
+  /** Consent state for holding this artifact. */
+  consent: GoldenConsent;
+  /** epoch ms */
+  createdAt: number;
+  /** epoch ms of the last Phase-2b re-score, or null if never scored (always
+   * null in Phase 1.5 — reserved so re-scoring needs no later migration). */
+  lastScoredAt: number | null;
+};
+
+/** What a caller supplies to capture a holdout artifact. `excludedFromLearning`,
+ * `id`, `createdAt`, and `lastScoredAt` are store-owned and NOT accepted here —
+ * excludedFromLearning is always stamped true. `consent` defaults to 'pending'. */
+export type GoldenItemInput = {
+  scopeKey: string;
+  taskType: string;
+  input: string;
+  expected: string;
+  /** Consent at capture time; defaults to 'pending' when omitted. */
+  consent?: GoldenConsent;
+};
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -327,6 +395,35 @@ export interface Store {
   /** Delete one item by id, or every item matching a provenance source
    * (poisoning rollback / delete-by-source). Exactly one selector. */
   deleteMemory(sel: MemoryDeleteSelector): void;
+
+  // -- golden set (Phase 1.5 P15-04) ---------------------------------------
+  //
+  // A per-user HOLDOUT of real artifacts, held OUT of learning and reserved as
+  // a fixed evaluation set (impl §5). These are STRUCTURALLY separate from the
+  // scoped-memory ops above — they live in their own store (a distinct table /
+  // map) that no injection or extraction path reads — which is what enforces the
+  // excluded-from-learning invariant. Phase 1.5 is storage + consent + CRUD +
+  // addressability; scoring is Phase 2b (F2-07).
+
+  /** Capture a held-out artifact into the user's golden set. `excludedFromLearning`
+   * is always stamped true (never accepted from the caller); `consent` defaults
+   * to 'pending'; `lastScoredAt` is null. Returns the stored row (with its id —
+   * the addressable re-scoring handle). */
+  addGoldenItem(item: GoldenItemInput): GoldenItem;
+
+  /** The user's holdout, oldest first. `consent` filters by consent state; omit
+   * for all. */
+  listGoldenSet(scopeKey: string, opts?: { consent?: GoldenConsent }): GoldenItem[];
+
+  /** Fetch one held-out artifact by id — the addressability the re-scoring in
+   * Phase 2b F2-07 selects on. Undefined if absent. */
+  getGoldenItem(id: string): GoldenItem | undefined;
+
+  /** Record/change consent for one held-out artifact. No-op if absent. */
+  setGoldenConsent(id: string, consent: GoldenConsent): void;
+
+  /** Remove one held-out artifact by id. */
+  removeGoldenItem(id: string): void;
 
   // -- usage (F1-07) -------------------------------------------------------
 

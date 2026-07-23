@@ -174,8 +174,8 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(1a) MIGRATION v2->v4: existing sessions/messages/memory survive; new columns become usable',
-    startedAt === 2 && versionAfter1 === 4 && noLoss && afterPin?.pinned === true,
+    '(1a) MIGRATION v2->v5: existing sessions/messages/memory survive; new columns become usable',
+    startedAt === 2 && versionAfter1 === 5 && noLoss && afterPin?.pinned === true,
     `user_version ${startedAt}->${versionAfter1}; session=${JSON.stringify(sess)}; messages=${msgs.length} ("${
       (msgs[0] as { content?: string } | undefined)?.content
     }"); memory=${JSON.stringify(mem)}; new column write pinned=${afterPin?.pinned}`,
@@ -194,7 +194,7 @@ function checkMigration(checks: Check[], dbPath: string): void {
   record(
     checks,
     '(1b) MIGRATION is idempotent: a second reopen is a no-op, data + version unchanged',
-    versionAfter2 === 4 &&
+    versionAfter2 === 5 &&
       !!sess2 &&
       sess2.pinned === true &&
       sess2.cwd === undefined &&
