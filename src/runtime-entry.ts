@@ -62,11 +62,45 @@ export {
 // it constructs is its own choice. SqliteStore is the durable one — note that
 // `node:sqlite` is experimental and its availability inside Electron is still
 // to be verified in F1-02/SPIKE-04 (see sqlite-store.ts).
-export type { McpEntry, Project, SessionRef, Store, UsageRecord } from './runtime/store/store.js';
+export type {
+  McpEntry,
+  Project,
+  SessionRef,
+  Store,
+  UsageRecord,
+  // Scoped memory (Phase 1.5) — phase-1_5-memory-contracts §3–§6.
+  InjectedMemory,
+  MemoryDeleteSelector,
+  MemoryInjectionQuery,
+  MemoryItem,
+  MemoryProvenance,
+  MemoryScope,
+  MemoryStatus,
+  MemoryType,
+  MemoryWriteDecision,
+  MemoryWriteRequest,
+  TrustTier,
+} from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
 export { runTurn, type RunTurnOptions } from './runtime/session.js';
+
+// Phase 1.5 — the deterministic memory write gate (P15-05) and the turn-time
+// retrieval/injection helpers (P15-02). The gate is pure; the store's putMemory
+// runs it before a write lands. The injection helpers are what runTurn uses to
+// assemble memory into a turn (and are exported so the shell can pre/post-inspect).
+export { decideMemoryWrite } from './runtime/memory-gate.js';
+export {
+  composeSystemWithMemory,
+  DEFAULT_USER_ID,
+  estimateTokens,
+  gatherCandidates,
+  renderInjectedMemory,
+  renderMemoryLine,
+  retrieveForInjection,
+  selectMemoryForInjection,
+} from './runtime/memory-inject.js';
 
 // F1-08 — the user's stored "which provider answers" choice, and the mapping
 // from it to selectEngine's options (including where the env vars rank).

@@ -18,7 +18,8 @@ import type {
   ToolOutput,
   ToolSchema,
 } from './engine.js';
-import type { Store } from './store/store.js';
+import { composeSystemWithMemory, retrieveForInjection } from './memory-inject.js';
+import type { InjectedMemory, MemoryInjectionQuery, Store } from './store/store.js';
 
 export type RunTurnOptions = {
   engine: Engine;
@@ -66,6 +67,33 @@ export type RunTurnOptions = {
    * be presented as a charge (see runtime/usage.ts).
    */
   costBasis?: 'metered' | 'subscription';
+
+  // -- memory injection (Phase 1.5, P15-02) ---------------------------------
+  //
+  // OPT-IN. When absent, runTurn does ZERO memory work and the turn is
+  // byte-for-byte what Phase 1 would have sent (the no-op invariant, contract
+  // §5) — which is why the existing spikes, which pass no config here, are
+  // unchanged. When present, runTurn retrieves confirmed, scope-appropriate
+  // memory within `tokenBudget`, assembles it into the turn's SYSTEM field
+  // (above the engine seam — never a stored transcript message), and reports the
+  // selection so the injected item ids can be logged.
+
+  /** Retrieve + inject confirmed memory into this turn's system prompt, under a
+   * hard token budget. Omit to disable injection entirely (a pure no-op). */
+  memoryInjection?: {
+    /** HARD cap on injected memory tokens for this turn. */
+    tokenBudget: number;
+    /** Task-type hint (aligns with eval_events.task_type). */
+    taskType?: string;
+    /** user-scope key — a single-user-machine constant by default. */
+    userId?: string;
+    /** org-scope key — omit unless in-house org memory is in play. */
+    orgId?: string;
+  };
+  /** Called once with what was injected (items, tokensUsed, droppedForBudget) so
+   * the caller can record the per-turn memory log (contract §5). Fires only when
+   * `memoryInjection` is set; the items array is empty on a no-op turn. */
+  onMemoryInjection?: (injected: InjectedMemory) => void;
 };
 
 /** Run one turn on the given engine, folding its events into the store. Returns
@@ -79,6 +107,37 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   store.touchSession(sessionId, model.providerId);
 
   store.appendMessage(sessionId, { role: 'user', content: userText });
+
+  // -- MEMORY INJECTION (Phase 1.5, P15-02) ---------------------------------
+  // Retrieve confirmed, scope-appropriate memory within a hard token budget and
+  // assemble it into THIS turn's system prompt — provider/engine-independent,
+  // above the engine seam. `effectiveSystem` is what the engine receives; when
+  // injection is off, or when nothing relevant is confirmed, it is IDENTICAL to
+  // `opts.system` (including undefined), so the turn is byte-for-byte what it
+  // would have been without Phase 1.5 — the no-op invariant (contract §5). The
+  // injected block rides on the system field only; it is never appended to the
+  // transcript we store (contract §3 "no role:'system' leakage").
+  let effectiveSystem = opts.system;
+  if (opts.memoryInjection) {
+    const query: MemoryInjectionQuery = {
+      sessionId,
+      tokenBudget: opts.memoryInjection.tokenBudget,
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts.memoryInjection.taskType !== undefined
+        ? { taskType: opts.memoryInjection.taskType }
+        : {}),
+    };
+    const injectOpts: { userId?: string; orgId?: string } = {};
+    if (opts.memoryInjection.userId !== undefined)
+      injectOpts.userId = opts.memoryInjection.userId;
+    if (opts.memoryInjection.orgId !== undefined)
+      injectOpts.orgId = opts.memoryInjection.orgId;
+    const injected = retrieveForInjection(store, query, injectOpts);
+    effectiveSystem = composeSystemWithMemory(opts.system, injected);
+    // Record what was injected (item ids, tokensUsed, droppedForBudget) so a
+    // bad injection is auditable and memory hit rate is computable.
+    opts.onMemoryInjection?.(injected);
+  }
 
   const controller = new AbortController();
   const signal = opts.signal ?? controller.signal;
@@ -133,7 +192,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     // Read the transcript back from the store: after F1-05 this may have come
     // from disk, written by a previous process and possibly a different engine.
     messages: store.getMessages(sessionId),
-    ...(opts.system !== undefined ? { system: opts.system } : {}),
+    ...(effectiveSystem !== undefined ? { system: effectiveSystem } : {}),
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     toolSchemas,
     gate,

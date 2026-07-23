@@ -139,6 +139,115 @@ export type UsageRecord = {
 };
 
 // ---------------------------------------------------------------------------
+// Scoped memory (Phase 1.5) — phase-1_5-memory-contracts §2–§6
+// ---------------------------------------------------------------------------
+//
+// Phase 1 stored memory as `memory(session_id, key, value)` — session-scoped,
+// keyed by sessionId only. Phase 1.5 KEEPS that behaviour working (the legacy
+// setMemory/getMemory/getAllMemory below still read/write session-scoped rows)
+// and ADDS user-, project-, and org-scoped memory with provenance so that a
+// learned preference can outlive the session it was learned in.
+//
+// THE LOAD-BEARING NEW RULE (contract §2/§6): deleting a session deletes only
+// scope='session' memory for that id; deleting a project cascades scope='project'
+// memory (for that cwd) plus its sessions' scope='session' memory — but NEVER
+// user/org memory. user/org memory survives session AND project deletes; it is
+// removed only by an explicit deleteMemory. This is the cascade EXEMPTION.
+
+/** The four memory scopes (contract §2). `scopeKey` is sessionId | cwd | userId
+ * | orgId respectively. */
+export type MemoryScope = 'session' | 'project' | 'user' | 'org';
+
+/** Memory taxonomy (contract §3). Drives per-type retention/injection priority
+ * (the priority itself is a §7-open tunable, not a contract). */
+export type MemoryType = 'working' | 'episodic' | 'semantic' | 'procedural';
+
+/** Trust tier of a memory's ORIGIN (contract §3/§4). Fixed ordering
+ * user > artifact > external; it is what the write gate keys on. */
+export type TrustTier = 'user' | 'artifact' | 'external';
+
+/** proposed = auto-extracted below threshold OR external-origin awaiting
+ * confirm; confirmed = user-verified or above threshold from a trusted tier.
+ * Only `confirmed` memory is injected by default (contract §5). */
+export type MemoryStatus = 'proposed' | 'confirmed';
+
+/** Where a memory came from — the rollback/provenance handle (contract §3). */
+export type MemoryProvenance = {
+  /** WHICH trust tier this came from — drives the write gate (§4). */
+  source: TrustTier;
+  /** The session it was learned in — for delete-by-source rollback. */
+  sessionId?: string;
+  /** Short human-readable "why this was written" (e.g. an edit-diff id). */
+  basis?: string;
+  /** eval_event id or message id it was extracted from, if any. */
+  createdFrom?: string;
+};
+
+/** One scoped memory row (contract §3). `(scope, scopeKey, key)` is the upsert
+ * identity; `id` is the provenance/rollback handle. */
+export type MemoryItem = {
+  /** UUID — the row's own key and the delete-by-id / provenance handle. */
+  id: string;
+  scope: MemoryScope;
+  /** sessionId | cwd | userId | orgId, per scope (§2). */
+  scopeKey: string;
+  type: MemoryType;
+  /** Stable slug within (scope, scopeKey) — the upsert target. */
+  key: string;
+  value: string;
+  provenance: MemoryProvenance;
+  /** 0–1 auto-extraction confidence (1 for user-confirmed). */
+  confidence: number;
+  status: MemoryStatus;
+  /** epoch ms */
+  createdAt: number;
+  /** epoch ms — enables latest-wins / supersede policy (§7-open). */
+  updatedAt: number;
+};
+
+/** A write request to the gate (contract §4). Everything a MemoryItem carries
+ * except the store-assigned id/createdAt/updatedAt and the gate-decided status;
+ * `requestedStatus` is what the caller ASKED for and the gate may downgrade. */
+export type MemoryWriteRequest = Omit<
+  MemoryItem,
+  'id' | 'createdAt' | 'updatedAt' | 'status'
+> & {
+  requestedStatus: MemoryStatus;
+};
+
+/** The deterministic write-gate decision (contract §4). */
+export type MemoryWriteDecision =
+  | { behavior: 'allow'; status: MemoryStatus } // may downgrade requestedStatus
+  | { behavior: 'hold'; status: 'proposed'; reason: string } // must be user-confirmed
+  | { behavior: 'deny'; reason: string };
+
+/** The turn-time retrieval query (contract §5). */
+export type MemoryInjectionQuery = {
+  sessionId: string;
+  /** project scope, if the session is projected. */
+  cwd?: string;
+  /** hint from the turn (aligns with eval_events.task_type). */
+  taskType?: string;
+  /** HARD cap on injected memory tokens for this turn. */
+  tokenBudget: number;
+};
+
+/** The selected, ranked, within-budget memory for one turn (contract §5). */
+export type InjectedMemory = {
+  /** selected, ranked, within budget. */
+  items: MemoryItem[];
+  /** ≤ tokenBudget, always. */
+  tokensUsed: number;
+  /** count omitted PURELY due to the cap (logged, never silent). */
+  droppedForBudget: number;
+};
+
+/** Exactly-one-selector for deleteMemory (contract §6). */
+export type MemoryDeleteSelector =
+  | { id: string }
+  | { source: TrustTier; sessionId?: string };
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -161,7 +270,10 @@ export interface Store {
    * session by a well-known id without minting one first. */
   touchSession(sessionId: string, providerId?: string): SessionRef;
 
-  /** Remove the session and everything keyed to it (messages + memory). */
+  /** Remove the session and everything keyed to it (messages + usage +
+   * scope='session' memory). Phase 1.5 CASCADE EXEMPTION: user/project/org
+   * memory is NOT touched — a session delete removes only that session's
+   * session-scoped memory (phase-1_5-memory-contracts §2/§6). */
   deleteSession(sessionId: string): void;
 
   // -- messages ------------------------------------------------------------
@@ -178,6 +290,43 @@ export interface Store {
   setMemory(sessionId: string, key: string, value: string): void;
   getMemory(sessionId: string, key: string): string | undefined;
   getAllMemory(sessionId: string): Record<string, string>;
+
+  // -- scoped memory (Phase 1.5) -------------------------------------------
+  //
+  // These extend the session-scoped legacy ops above with user/project/org
+  // scope, provenance, type, confidence and status. The legacy three keep
+  // working as the scope='session' view (they read/write the same rows). See
+  // phase-1_5-memory-contracts §6.
+  //
+  // NOTE ON NAMING: the contract §6 names the scoped reader `getMemory(scope,
+  // scopeKey)`. That exact name is already taken by the legacy
+  // `getMemory(sessionId, key): string | undefined` above, and the two
+  // signatures are ambiguous (both `(string, string)`) with incompatible return
+  // types — a TS overload would silently pick the wrong one. To PRESERVE the
+  // legacy read path (contract requirement, spikes depend on it) the scoped
+  // reader is named `getScopedMemory`; it is the contract's §6 getMemory.
+
+  /** Upsert by (scope, scopeKey, key). Passes through the write gate (§4): a
+   * 'deny' THROWS, a 'hold' persists with status:'proposed', an 'allow' persists
+   * with the gate-decided status. Returns the resulting row. */
+  putMemory(req: MemoryWriteRequest): MemoryItem;
+
+  /** Read memory for injection/review. `status` filters proposed vs confirmed;
+   * omit for all. Ordering here is relevance-agnostic (createdAt asc) — ranking
+   * happens in the injection step (§5), not the store. (Contract §6 getMemory.) */
+  getScopedMemory(
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: { status?: MemoryStatus },
+  ): MemoryItem[];
+
+  /** Confirm a proposed item — the ONLY path external-origin memory becomes
+   * confirmed (§4 invariant 1). No-op if already confirmed or absent. */
+  confirmMemory(id: string): void;
+
+  /** Delete one item by id, or every item matching a provenance source
+   * (poisoning rollback / delete-by-source). Exactly one selector. */
+  deleteMemory(sel: MemoryDeleteSelector): void;
 
   // -- usage (F1-07) -------------------------------------------------------
 
@@ -230,9 +379,12 @@ export interface Store {
    * Creates it if absent, so opening a new directory needs no prior upsert. */
   touchProject(cwd: string): Project;
 
-  /** Delete the project AND CASCADE: every session whose `cwd` = this, and each
-   * of those sessions' messages + memory + usage. Never leaves orphaned session
-   * state; sessions are NOT reparented. */
+  /** Delete the project AND CASCADE: every session whose `cwd` = this, each of
+   * those sessions' messages + usage + scope='session' memory, AND the
+   * project's own scope='project' memory (scopeKey = cwd). Never leaves orphaned
+   * session state; sessions are NOT reparented. Phase 1.5 CASCADE EXEMPTION:
+   * user/org memory is NOT cascaded and MUST survive
+   * (phase-1_5-memory-contracts §2/§6). */
   removeProject(cwd: string): void;
 
   // -- session ↔ project links (§6.1) -------------------------------------

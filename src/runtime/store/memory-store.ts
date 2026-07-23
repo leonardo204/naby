@@ -14,13 +14,25 @@
 // why two different engines operating on one session id read and write the same
 // state.
 
+import { decideMemoryWrite } from '../memory-gate.js';
 import type { RuntimeMessage } from '../engine.js';
-import type { McpEntry, Project, SessionRef, Store, UsageRecord } from './store.js';
+import type {
+  MemoryDeleteSelector,
+  MemoryItem,
+  MemoryScope,
+  MemoryStatus,
+  MemoryWriteRequest,
+  McpEntry,
+  Project,
+  SessionRef,
+  Store,
+  TrustTier,
+  UsageRecord,
+} from './store.js';
 
 type SessionState = {
   ref: SessionRef;
   messages: RuntimeMessage[];
-  memory: Record<string, string>;
   usage: UsageRecord[];
 };
 
@@ -32,6 +44,18 @@ function mintSessionId(): string {
     .slice(2, 10)}`;
 }
 
+let memCounter = 0;
+function mintMemoryId(): string {
+  memCounter += 1;
+  return `m-${Date.now().toString(36)}-${memCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+function cloneMemory(item: MemoryItem): MemoryItem {
+  return { ...item, provenance: { ...item.provenance } };
+}
+
 export class MemoryStore implements Store {
   private readonly sessions = new Map<string, SessionState>();
   private readonly mcp = new Map<string, McpEntry>();
@@ -40,6 +64,13 @@ export class MemoryStore implements Store {
   // project relationship lives as SessionRef.cwd (a LINK, never a key for
   // session state), exactly as in SqliteStore.
   private readonly projects = new Map<string, Project>();
+  // Scoped memory (Phase 1.5), keyed by its own id — a STORE-LEVEL collection,
+  // NOT per-session: user/project/org memory outlives any one session, so it
+  // cannot live inside a SessionState. The session-scoped subset is addressed
+  // by (scope='session', scopeKey=sessionId). This is what makes the cascade
+  // EXEMPTION expressible: dropping a SessionState no longer drops its memory,
+  // deleteSession/removeProject delete only the session/project-scoped rows.
+  private readonly memoryItems = new Map<string, MemoryItem>();
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -52,7 +83,6 @@ export class MemoryStore implements Store {
       s = {
         ref: { sessionId, providerId, createdAt: now, lastUsedAt: now },
         messages: [],
-        memory: {},
         usage: [],
       };
       this.sessions.set(sessionId, s);
@@ -94,6 +124,14 @@ export class MemoryStore implements Store {
 
   deleteSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    // CASCADE EXEMPTION (phase-1_5-memory-contracts §2/§6): remove ONLY this
+    // session's scope='session' memory. user/project/org rows have no session
+    // owner and MUST survive a session delete.
+    for (const [id, item] of this.memoryItems) {
+      if (item.scope === 'session' && item.scopeKey === sessionId) {
+        this.memoryItems.delete(id);
+      }
+    }
   }
 
   // -- messages ------------------------------------------------------------
@@ -108,16 +146,137 @@ export class MemoryStore implements Store {
 
   // -- memory --------------------------------------------------------------
 
+  // Legacy session-scoped API — now the scope='session' view of memoryItems,
+  // exactly as in SqliteStore (a working/user/confirmed row, confidence 1). The
+  // two drivers must stay observationally identical (spike:f105 / SPIKE-07).
+
   setMemory(sessionId: string, key: string, value: string): void {
-    this.state(sessionId).memory[key] = value;
+    this.state(sessionId); // ensure the session exists, as before
+    this.writeMemoryItem({
+      scope: 'session',
+      scopeKey: sessionId,
+      type: 'working',
+      key,
+      value,
+      provenance: { source: 'user', sessionId },
+      confidence: 1,
+      status: 'confirmed',
+    });
   }
 
   getMemory(sessionId: string, key: string): string | undefined {
-    return this.state(sessionId).memory[key];
+    return this.findMemoryRow('session', sessionId, key)?.value;
   }
 
   getAllMemory(sessionId: string): Record<string, string> {
-    return { ...this.state(sessionId).memory };
+    const out: Record<string, string> = {};
+    for (const item of this.memoryItems.values()) {
+      if (item.scope === 'session' && item.scopeKey === sessionId) {
+        out[item.key] = item.value;
+      }
+    }
+    return out;
+  }
+
+  // -- scoped memory (Phase 1.5) -------------------------------------------
+
+  private findMemoryRow(
+    scope: MemoryScope,
+    scopeKey: string,
+    key: string,
+  ): MemoryItem | undefined {
+    for (const item of this.memoryItems.values()) {
+      if (item.scope === scope && item.scopeKey === scopeKey && item.key === key) {
+        return item;
+      }
+    }
+    return undefined;
+  }
+
+  /** Shared upsert by (scope, scopeKey, key). Preserves id/createdAt on update,
+   * bumps updatedAt. Stores a defensively-cloned item and returns a clone. */
+  private writeMemoryItem(fields: {
+    scope: MemoryScope;
+    scopeKey: string;
+    type: MemoryItem['type'];
+    key: string;
+    value: string;
+    provenance: MemoryItem['provenance'];
+    confidence: number;
+    status: MemoryStatus;
+  }): MemoryItem {
+    const now = Date.now();
+    const existing = this.findMemoryRow(fields.scope, fields.scopeKey, fields.key);
+    const item: MemoryItem = {
+      id: existing ? existing.id : mintMemoryId(),
+      scope: fields.scope,
+      scopeKey: fields.scopeKey,
+      type: fields.type,
+      key: fields.key,
+      value: fields.value,
+      provenance: { ...fields.provenance },
+      confidence: fields.confidence,
+      status: fields.status,
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now,
+    };
+    this.memoryItems.set(item.id, item);
+    return cloneMemory(item);
+  }
+
+  putMemory(req: MemoryWriteRequest): MemoryItem {
+    const existing = this.findMemoryRow(req.scope, req.scopeKey, req.key);
+    const decision = decideMemoryWrite(req, existing);
+    if (decision.behavior === 'deny') {
+      throw new Error(`memory write denied: ${decision.reason}`);
+    }
+    return this.writeMemoryItem({
+      scope: req.scope,
+      scopeKey: req.scopeKey,
+      type: req.type,
+      key: req.key,
+      value: req.value,
+      provenance: req.provenance,
+      confidence: req.confidence,
+      status: decision.status,
+    });
+  }
+
+  getScopedMemory(
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: { status?: MemoryStatus },
+  ): MemoryItem[] {
+    const out: MemoryItem[] = [];
+    for (const item of this.memoryItems.values()) {
+      if (item.scope !== scope || item.scopeKey !== scopeKey) continue;
+      if (opts?.status && item.status !== opts.status) continue;
+      out.push(cloneMemory(item));
+    }
+    // Relevance-agnostic (createdAt asc), as SqliteStore; ranking is the
+    // injection step's job, not the store's.
+    return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  confirmMemory(id: string): void {
+    const item = this.memoryItems.get(id);
+    if (!item || item.status === 'confirmed') return;
+    item.status = 'confirmed';
+    item.updatedAt = Date.now();
+  }
+
+  deleteMemory(sel: MemoryDeleteSelector): void {
+    if ('id' in sel) {
+      this.memoryItems.delete(sel.id);
+      return;
+    }
+    const source: TrustTier = sel.source;
+    for (const [id, item] of this.memoryItems) {
+      if (item.provenance.source !== source) continue;
+      if (sel.sessionId !== undefined && item.provenance.sessionId !== sel.sessionId)
+        continue;
+      this.memoryItems.delete(id);
+    }
   }
 
   // -- usage (F1-07) -------------------------------------------------------
@@ -196,11 +355,21 @@ export class MemoryStore implements Store {
   }
 
   removeProject(cwd: string): void {
-    // CASCADE: dropping a SessionState from the map clears that session's
-    // messages/memory/usage in one move, so no orphan can remain. Sessions are
-    // NOT reparented — deleting a project deletes its sessions.
+    // CASCADE: drop the project's sessions (and, per session, its scope='session'
+    // memory) plus the project's own scope='project' memory. Sessions are NOT
+    // reparented. CASCADE EXEMPTION (§2/§6): user/org memory is NOT project-owned
+    // and is never touched here.
+    const doomedSessions: string[] = [];
     for (const [sessionId, s] of this.sessions) {
-      if (s.ref.cwd === cwd) this.sessions.delete(sessionId);
+      if (s.ref.cwd === cwd) doomedSessions.push(sessionId);
+    }
+    const doomed = new Set(doomedSessions);
+    for (const sessionId of doomedSessions) this.sessions.delete(sessionId);
+    for (const [id, item] of this.memoryItems) {
+      const isDoomedSession =
+        item.scope === 'session' && doomed.has(item.scopeKey);
+      const isThisProject = item.scope === 'project' && item.scopeKey === cwd;
+      if (isDoomedSession || isThisProject) this.memoryItems.delete(id);
     }
     this.projects.delete(cwd);
   }

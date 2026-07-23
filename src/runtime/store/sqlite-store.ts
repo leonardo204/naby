@@ -34,8 +34,23 @@ import { createRequire } from 'node:module';
 // a static ESM import is hoisted above any code that could suppress it. The
 // actual load happens lazily inside openSilently() below.
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
+import { decideMemoryWrite } from '../memory-gate.js';
 import type { RuntimeMessage } from '../engine.js';
-import type { McpEntry, Project, SessionRef, Store, UsageRecord } from './store.js';
+import type {
+  MemoryDeleteSelector,
+  MemoryItem,
+  MemoryProvenance,
+  MemoryScope,
+  MemoryStatus,
+  MemoryType,
+  MemoryWriteRequest,
+  McpEntry,
+  Project,
+  SessionRef,
+  Store,
+  TrustTier,
+  UsageRecord,
+} from './store.js';
 
 // ---------------------------------------------------------------------------
 // Experimental-warning suppression — TARGETED, not blanket.
@@ -112,7 +127,16 @@ function openSilently(path: string): DatabaseSyncType {
 // `ALTER TABLE ... ADD COLUMN` cannot be IF NOT EXISTS-guarded, an EXISTING v1/
 // v2 database instead picks the columns up through the version-gated ALTERs in
 // migrate() (run only when 0 < current < 3). Additive: no backfill, no loss.
-const SCHEMA_VERSION = 3;
+//
+// v4 (Phase 1.5) replaces the session-scoped `memory(session_id, key, value)`
+// table with the SCOPED `memory_items` table (user/project/session/org scope,
+// provenance, type, confidence, status — phase-1_5-memory-contracts §3). The
+// migration is LOSSLESS: every existing `memory` row is back-filled as
+// {scope:'session', scopeKey:session_id, type:'working', provenance.source:
+// 'user', status:'confirmed', confidence:1} and the old table is dropped, so the
+// legacy setMemory/getMemory/getAllMemory path keeps behaving exactly as before
+// (it now reads/writes the scope='session' view of memory_items).
+const SCHEMA_VERSION = 4;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -136,12 +160,33 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_by_session ON messages (session_id, seq);
 
-CREATE TABLE IF NOT EXISTS memory (
-  session_id TEXT NOT NULL,
-  key        TEXT NOT NULL,
-  value      TEXT NOT NULL,
-  PRIMARY KEY (session_id, key)
+-- v4 (Phase 1.5). SCOPED memory with provenance (phase-1_5-memory-contracts
+-- §3). Replaces the session-scoped memory(session_id, key, value) table; the
+-- legacy rows are back-filled into this one by migrate() and the old table is
+-- dropped. (scope, scope_key, key) is the upsert identity; id is the
+-- provenance/rollback handle. The CASCADE EXEMPTION (§2/§6) is enforced in
+-- deleteSession/removeProject, not by any FK — user/org rows have no session or
+-- project owner and are never cascaded.
+CREATE TABLE IF NOT EXISTS memory_items (
+  id                TEXT PRIMARY KEY,
+  scope             TEXT NOT NULL,   -- session | project | user | org
+  scope_key         TEXT NOT NULL,   -- sessionId | cwd | userId | orgId
+  type              TEXT NOT NULL,   -- working | episodic | semantic | procedural
+  key               TEXT NOT NULL,   -- stable slug within (scope, scope_key)
+  value             TEXT NOT NULL,
+  prov_source       TEXT NOT NULL,   -- user | artifact | external (trust tier)
+  prov_session_id   TEXT,            -- session it was learned in (rollback)
+  prov_basis        TEXT,            -- short "why this was written"
+  prov_created_from TEXT,            -- eval_event / message id, if any
+  confidence        REAL NOT NULL,   -- 0..1 (1 for user-confirmed)
+  status            TEXT NOT NULL,   -- proposed | confirmed
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  UNIQUE (scope, scope_key, key)
 );
+
+CREATE INDEX IF NOT EXISTS memory_items_by_scope ON memory_items (scope, scope_key);
+CREATE INDEX IF NOT EXISTS memory_items_by_source ON memory_items (prov_source);
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
   name    TEXT PRIMARY KEY,
@@ -242,6 +287,55 @@ function toProject(row: ProjectRow): Project {
   return project;
 }
 
+// Row shape for memory_items as it comes back from node:sqlite.
+type MemoryRow = {
+  id: string;
+  scope: string;
+  scope_key: string;
+  type: string;
+  key: string;
+  value: string;
+  prov_source: string;
+  prov_session_id: string | null;
+  prov_basis: string | null;
+  prov_created_from: string | null;
+  confidence: number;
+  status: string;
+  created_at: number;
+  updated_at: number;
+};
+
+function toMemoryItem(row: MemoryRow): MemoryItem {
+  const provenance: MemoryProvenance = { source: row.prov_source as TrustTier };
+  if (row.prov_session_id !== null && row.prov_session_id !== undefined)
+    provenance.sessionId = row.prov_session_id;
+  if (row.prov_basis !== null && row.prov_basis !== undefined)
+    provenance.basis = row.prov_basis;
+  if (row.prov_created_from !== null && row.prov_created_from !== undefined)
+    provenance.createdFrom = row.prov_created_from;
+  return {
+    id: row.id,
+    scope: row.scope as MemoryScope,
+    scopeKey: row.scope_key,
+    type: row.type as MemoryType,
+    key: row.key,
+    value: row.value,
+    provenance,
+    confidence: Number(row.confidence),
+    status: row.status as MemoryStatus,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+let memoryIdCounter = 0;
+function mintMemoryId(): string {
+  memoryIdCounter += 1;
+  return `m-${Date.now().toString(36)}-${memoryIdCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
 let uuidCounter = 0;
 function mintSessionId(): string {
   // randomUUID would do; this keeps the bundle free of a node:crypto import for
@@ -299,6 +393,39 @@ export class SqliteStore implements Store {
       this.db.exec('ALTER TABLE sessions ADD COLUMN cwd TEXT');
       this.db.exec('ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
       this.db.exec('ALTER TABLE sessions ADD COLUMN status TEXT');
+    }
+
+    // v?->v4 (Phase 1.5): back-fill the legacy session-scoped `memory` table
+    // into `memory_items`, LOSSLESSLY, then drop it. Gated on the legacy table
+    // actually existing (rather than only the version) so it is self-healing and
+    // never runs twice: after the first migration the `memory` table is gone, so
+    // this is a no-op on every subsequent open and on any brand-new database.
+    // Each row becomes {scope:'session', scopeKey:session_id, type:'working',
+    // provenance.source:'user', status:'confirmed', confidence:1}, exactly as
+    // phase-1_5-memory-contracts §3 requires. The id is a random hex handle;
+    // (scope='session', session_id, key) is unique because the legacy PK was
+    // (session_id, key). Wrapped in a transaction so a crash cannot half-migrate.
+    const legacyMemory = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory'")
+      .get() as { name: string } | undefined;
+    if (legacyMemory) {
+      const now = Date.now();
+      this.db.exec('BEGIN');
+      try {
+        this.db.exec(
+          `INSERT INTO memory_items
+             (id, scope, scope_key, type, key, value,
+              prov_source, confidence, status, created_at, updated_at)
+           SELECT lower(hex(randomblob(16))), 'session', session_id, 'working', key, value,
+                  'user', 1, 'confirmed', ${now}, ${now}
+           FROM memory`,
+        );
+        this.db.exec('DROP TABLE memory');
+        this.db.exec('COMMIT');
+      } catch (e) {
+        this.db.exec('ROLLBACK');
+        throw e;
+      }
     }
 
     if (current !== SCHEMA_VERSION) {
@@ -377,7 +504,16 @@ export class SqliteStore implements Store {
   deleteSession(sessionId: string): void {
     this.assertOpen();
     this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(sessionId);
-    this.db.prepare('DELETE FROM memory WHERE session_id = ?').run(sessionId);
+    // CASCADE EXEMPTION (phase-1_5-memory-contracts §2/§6): delete ONLY this
+    // session's scope='session' memory. user/project/org memory has no session
+    // owner and MUST survive a session delete — that is the exact break the
+    // personalization strategy requires. A scopeKey match alone is not enough:
+    // it is qualified by scope='session' so a project whose cwd happened to
+    // equal this sessionId (it cannot, but the guard makes the intent legible)
+    // is never touched.
+    this.db
+      .prepare("DELETE FROM memory_items WHERE scope = 'session' AND scope_key = ?")
+      .run(sessionId);
     this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
   }
@@ -407,21 +543,38 @@ export class SqliteStore implements Store {
 
   // -- memory --------------------------------------------------------------
 
+  // -- memory: legacy session-scoped view of memory_items ------------------
+  //
+  // These three are the Phase-1 API, preserved EXACTLY (spikes and the shell
+  // depend on them). They are now the scope='session' view of memory_items: a
+  // legacy write is a session-scoped, working, user-provenance, confirmed row
+  // with confidence 1 — the same mapping the v4 migration applied to existing
+  // rows, so an in-place migration and a fresh legacy write are indistinguishable.
+  // A direct user session write does not need the gate (source 'user', scope
+  // 'session', confirmed is exactly what the gate would allow); writing directly
+  // keeps the legacy semantics byte-identical.
+
   setMemory(sessionId: string, key: string, value: string): void {
     this.assertOpen();
     if (!this.getSession(sessionId)) this.touchSession(sessionId);
-    this.db
-      .prepare(
-        `INSERT INTO memory (session_id, key, value) VALUES (?, ?, ?)
-         ON CONFLICT (session_id, key) DO UPDATE SET value = excluded.value`,
-      )
-      .run(sessionId, key, value);
+    this.writeMemoryRow({
+      scope: 'session',
+      scopeKey: sessionId,
+      type: 'working',
+      key,
+      value,
+      provenance: { source: 'user', sessionId },
+      confidence: 1,
+      status: 'confirmed',
+    });
   }
 
   getMemory(sessionId: string, key: string): string | undefined {
     this.assertOpen();
     const row = this.db
-      .prepare('SELECT value FROM memory WHERE session_id = ? AND key = ?')
+      .prepare(
+        "SELECT value FROM memory_items WHERE scope = 'session' AND scope_key = ? AND key = ?",
+      )
       .get(sessionId, key) as { value: string } | undefined;
     return row?.value;
   }
@@ -429,11 +582,191 @@ export class SqliteStore implements Store {
   getAllMemory(sessionId: string): Record<string, string> {
     this.assertOpen();
     const rows = this.db
-      .prepare('SELECT key, value FROM memory WHERE session_id = ? ORDER BY key ASC')
+      .prepare(
+        "SELECT key, value FROM memory_items WHERE scope = 'session' AND scope_key = ? ORDER BY key ASC",
+      )
       .all(sessionId) as { key: string; value: string }[];
     const out: Record<string, string> = {};
     for (const r of rows) out[r.key] = r.value;
     return out;
+  }
+
+  // -- scoped memory (Phase 1.5) -------------------------------------------
+
+  /** The shared upsert by (scope, scopeKey, key). Preserves createdAt on update
+   * and bumps updatedAt; returns the resulting row. Does NOT gate — callers that
+   * must gate (putMemory) decide first and pass the resolved status. */
+  private writeMemoryRow(fields: {
+    scope: MemoryScope;
+    scopeKey: string;
+    type: MemoryType;
+    key: string;
+    value: string;
+    provenance: MemoryProvenance;
+    confidence: number;
+    status: MemoryStatus;
+  }): MemoryItem {
+    const now = Date.now();
+    const existing = this.db
+      .prepare(
+        'SELECT * FROM memory_items WHERE scope = ? AND scope_key = ? AND key = ?',
+      )
+      .get(fields.scope, fields.scopeKey, fields.key) as MemoryRow | undefined;
+
+    const id = existing ? existing.id : mintMemoryId();
+    const createdAt = existing ? Number(existing.created_at) : now;
+    const prov = fields.provenance;
+
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE memory_items SET
+             type = ?, value = ?, prov_source = ?, prov_session_id = ?,
+             prov_basis = ?, prov_created_from = ?, confidence = ?, status = ?,
+             updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          fields.type,
+          fields.value,
+          prov.source,
+          prov.sessionId ?? null,
+          prov.basis ?? null,
+          prov.createdFrom ?? null,
+          fields.confidence,
+          fields.status,
+          now,
+          id,
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO memory_items
+             (id, scope, scope_key, type, key, value,
+              prov_source, prov_session_id, prov_basis, prov_created_from,
+              confidence, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          fields.scope,
+          fields.scopeKey,
+          fields.type,
+          fields.key,
+          fields.value,
+          prov.source,
+          prov.sessionId ?? null,
+          prov.basis ?? null,
+          prov.createdFrom ?? null,
+          fields.confidence,
+          fields.status,
+          createdAt,
+          now,
+        );
+    }
+
+    const provenance: MemoryProvenance = { source: prov.source };
+    if (prov.sessionId !== undefined) provenance.sessionId = prov.sessionId;
+    if (prov.basis !== undefined) provenance.basis = prov.basis;
+    if (prov.createdFrom !== undefined) provenance.createdFrom = prov.createdFrom;
+    return {
+      id,
+      scope: fields.scope,
+      scopeKey: fields.scopeKey,
+      type: fields.type,
+      key: fields.key,
+      value: fields.value,
+      provenance,
+      confidence: fields.confidence,
+      status: fields.status,
+      createdAt,
+      updatedAt: now,
+    };
+  }
+
+  putMemory(req: MemoryWriteRequest): MemoryItem {
+    this.assertOpen();
+    const existingRow = this.db
+      .prepare(
+        'SELECT * FROM memory_items WHERE scope = ? AND scope_key = ? AND key = ?',
+      )
+      .get(req.scope, req.scopeKey, req.key) as MemoryRow | undefined;
+    const decision = decideMemoryWrite(
+      req,
+      existingRow ? toMemoryItem(existingRow) : undefined,
+    );
+    if (decision.behavior === 'deny') {
+      // A deny THROWS (contract §6): the caller must not treat a refused write
+      // as a silent no-op — memory poisoning is exactly the thing that must be
+      // loud.
+      throw new Error(`memory write denied: ${decision.reason}`);
+    }
+    // 'allow' carries the (possibly downgraded) status; 'hold' pins 'proposed'.
+    return this.writeMemoryRow({
+      scope: req.scope,
+      scopeKey: req.scopeKey,
+      type: req.type,
+      key: req.key,
+      value: req.value,
+      provenance: req.provenance,
+      confidence: req.confidence,
+      status: decision.status,
+    });
+  }
+
+  getScopedMemory(
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: { status?: MemoryStatus },
+  ): MemoryItem[] {
+    this.assertOpen();
+    const rows = (
+      opts?.status
+        ? this.db
+            .prepare(
+              'SELECT * FROM memory_items WHERE scope = ? AND scope_key = ? AND status = ? ORDER BY created_at ASC',
+            )
+            .all(scope, scopeKey, opts.status)
+        : this.db
+            .prepare(
+              'SELECT * FROM memory_items WHERE scope = ? AND scope_key = ? ORDER BY created_at ASC',
+            )
+            .all(scope, scopeKey)
+    ) as MemoryRow[];
+    return rows.map(toMemoryItem);
+  }
+
+  confirmMemory(id: string): void {
+    this.assertOpen();
+    // The ONLY path external-origin memory becomes confirmed (§4 invariant 1).
+    // No-op if already confirmed or absent.
+    this.db
+      .prepare(
+        "UPDATE memory_items SET status = 'confirmed', updated_at = ? WHERE id = ? AND status = 'proposed'",
+      )
+      .run(Date.now(), id);
+  }
+
+  deleteMemory(sel: MemoryDeleteSelector): void {
+    this.assertOpen();
+    if ('id' in sel) {
+      this.db.prepare('DELETE FROM memory_items WHERE id = ?').run(sel.id);
+      return;
+    }
+    // delete-by-source (poisoning rollback): drop every row from one trust tier,
+    // optionally narrowed to the session it was learned in.
+    const source: TrustTier = sel.source;
+    if (sel.sessionId !== undefined) {
+      this.db
+        .prepare(
+          'DELETE FROM memory_items WHERE prov_source = ? AND prov_session_id = ?',
+        )
+        .run(source, sel.sessionId);
+    } else {
+      this.db
+        .prepare('DELETE FROM memory_items WHERE prov_source = ?')
+        .run(source);
+    }
   }
 
   // -- usage (F1-07) -------------------------------------------------------
@@ -639,9 +972,18 @@ export class SqliteStore implements Store {
     try {
       for (const { session_id } of sessionRows) {
         this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(session_id);
-        this.db.prepare('DELETE FROM memory WHERE session_id = ?').run(session_id);
+        // CASCADE EXEMPTION (§2/§6): a session's scope='session' memory only.
+        this.db
+          .prepare("DELETE FROM memory_items WHERE scope = 'session' AND scope_key = ?")
+          .run(session_id);
         this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(session_id);
       }
+      // The project's OWN scope='project' memory (scopeKey = cwd) goes with it.
+      // user/org memory is NOT project-owned and MUST survive — it is never
+      // touched here (phase-1_5-memory-contracts §2/§6).
+      this.db
+        .prepare("DELETE FROM memory_items WHERE scope = 'project' AND scope_key = ?")
+        .run(cwd);
       this.db.prepare('DELETE FROM sessions WHERE cwd = ?').run(cwd);
       this.db.prepare('DELETE FROM projects WHERE cwd = ?').run(cwd);
       this.db.exec('COMMIT');

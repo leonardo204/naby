@@ -5,12 +5,14 @@
 //
 // It proves, against BOTH drivers where the claim is meaningful:
 //
-//   (1) MIGRATION v2 -> v3, no loss, idempotent. A real file-backed v2 database
+//   (1) MIGRATION v2 -> v4, no loss, idempotent. A real file-backed v2 database
 //       (old schema, `user_version = 2`, real session/message/memory rows) is
-//       reopened with the NEW code. It must upgrade to v3 in place — the three
+//       reopened with the NEW code. It must upgrade to v4 in place — the three
 //       new `sessions` columns added by version-gated ALTER, the `projects`
-//       table created — with every existing row intact, and a SECOND reopen
-//       must be a no-op. This is SqliteStore-only: with ':memory:' or MemoryStore
+//       table created, and the legacy `memory` rows losslessly back-filled into
+//       the scoped `memory_items` table (Phase 1.5) — with every existing row
+//       intact (the migrated session memory still reads through getAllMemory),
+//       and a SECOND reopen must be a no-op. This is SqliteStore-only: with ':memory:' or MemoryStore
 //       there is no schema to migrate and the assertion would pass vacuously,
 //       so the db is a REAL FILE in a temp dir, closed and REOPENED.
 //   (2) projects CRUD + MRU. upsert/touch/listProjects returns
@@ -172,14 +174,14 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(1a) MIGRATION v2->v3: existing sessions/messages/memory survive; new columns become usable',
-    startedAt === 2 && versionAfter1 === 3 && noLoss && afterPin?.pinned === true,
+    '(1a) MIGRATION v2->v4: existing sessions/messages/memory survive; new columns become usable',
+    startedAt === 2 && versionAfter1 === 4 && noLoss && afterPin?.pinned === true,
     `user_version ${startedAt}->${versionAfter1}; session=${JSON.stringify(sess)}; messages=${msgs.length} ("${
       (msgs[0] as { content?: string } | undefined)?.content
     }"); memory=${JSON.stringify(mem)}; new column write pinned=${afterPin?.pinned}`,
   );
 
-  // --- second reopen: current === 3, must be a pure no-op ------------------
+  // --- second reopen: current === 4, must be a pure no-op ------------------
   const store2 = new SqliteStore({ path: dbPath });
   const sess2 = store2.getSession('sess-v2');
   const msgs2 = store2.getMessages('sess-v2');
@@ -192,7 +194,7 @@ function checkMigration(checks: Check[], dbPath: string): void {
   record(
     checks,
     '(1b) MIGRATION is idempotent: a second reopen is a no-op, data + version unchanged',
-    versionAfter2 === 3 &&
+    versionAfter2 === 4 &&
       !!sess2 &&
       sess2.pinned === true &&
       sess2.cwd === undefined &&
