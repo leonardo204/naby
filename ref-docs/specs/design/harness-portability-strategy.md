@@ -2,10 +2,10 @@
 id: harness-portability-strategy
 title: Naby 하네스 이식성 전략 — 스킬·서브에이전트·커맨드를 벤더 밖 내 자산으로
 type: design
-version: 0.1.0
-status: draft
-scope: 하네스(스킬·서브에이전트·슬래시커맨드)를 특정 엔진(Claude Code)에 묶인 상속물이 아니라 Naby Layer가 소유·이식·공유하는 1급 자산으로 재정의하는 전략 — 현재 두 하네스 평면과 dev/prod 비대칭 진단, 6대 설계 결정, 프로바이더 독립 하네스 런타임, import/export·팀 공유, 임포트 하네스의 오염 방어, 그리고 Phase 배치·태스크 제안. 실제 스키마·태스크는 검증 후 Phase 문서로 분리한다.
-related: [personalized-agent-desktop-app, personalization-strategy, phase-1-contracts, phase-2-personalization-hitl, phase-1_5-memory-contracts]
+version: 0.2.0
+status: review
+scope: 하네스(스킬·서브에이전트·슬래시커맨드)를 특정 엔진(Claude Code)에 묶인 상속물이 아니라 Naby Layer가 소유·이식·공유하는 1급 자산으로 재정의하는 전략 — 현재 두 하네스 평면과 dev/prod 비대칭 진단, 6대 설계 결정, 프로바이더 독립 하네스 런타임, import/export·팀 공유, 임포트 하네스의 오염 방어. v0.2에서 phase 경계 해소: 코어는 Phase 1.6(Phase 2보다 먼저), 툴 실행 의존 조각만 Phase 2.5.
+related: [personalized-agent-desktop-app, personalization-strategy, phase-1-contracts, phase-2-personalization-hitl, phase-1_5-memory-contracts, phase-1_6-harness-ownership, phase-1_6-harness-contracts]
 updated: 2026-07-23
 ---
 
@@ -96,29 +96,40 @@ dev(Claude) 엔진에선 풍부한 하네스가 상속되는데, **prod(Azure/Ge
 
 ## 5. Phase 배치 및 태스크 제안
 
-하네스 런타임(D3)은 Phase 2의 툴/루프 소유에 의존한다. 단, **커맨드 이식(D3-커맨드)은 템플릿뿐이라 더 일찍 뽑아낼 수 있다.** 제안: **Phase 2.5 — Harness Portability**(2a/2b 뒤), 서브에이전트 오케스트레이션은 Phase 3으로 밀릴 수 있음. *(Phase 경계는 §6 open question.)*
+**핵심 재판단(v0.2)** — 하네스 이식성의 *대부분*은 Phase 2에 의존하지 않는다. 원래 Phase 2.5로 뒤에 둔 것은 **가장 무거운 조각(HP-07 툴 쓰는 서브에이전트)에 phase를 맞춘 과보수적 판단**이었다. 실제 의존성은 태스크마다 다르다:
 
-**Phase 2.5 최소 태스크 (제안 — 검증 후 impl 문서로 확정)**
+- **Phase 2 무의존** — HP-01(스키마)·HP-02(커맨드 CRUD)·HP-04(`~/.claude` 임포터)·HP-05(셋 export/import)·HP-06(임포트 게이트)·HP-08(org 상속)은 전부 **store + 프롬프트 주입 + import/export + 신뢰 게이트**뿐이다. 커맨드/스킬 지시문 주입은 메모리 주입(P15-02)과 **동일 메커니즘**(엔진 seam 위 system 조립)이라 5개 엔진에서 즉시 동작한다. HP-06는 **Phase 1.5 쓰기게이트/provenance를 그대로 재사용**한다(이미 구현됨).
+- **Phase 2 의존** — 툴을 *실행*하는 조각만: HP-03의 **툴 동반 스킬**과 HP-07의 **툴 쓰는 서브에이전트 오케스트레이션**은 Phase 2의 툴 실행기+게이트가 있어야 한다.
+
+**따라서 하네스 코어를 Phase 2보다 먼저, `Phase 1.6`으로 앞당긴다** (메모리가 1.5 코어 + 2b 추출루프로 쪼개진 것과 동일 패턴).
+
+**Phase 1.6 — Harness Ownership (Phase 2보다 먼저)**
 
 | ID | 항목 | 완료 기준 | 난이도 |
 |---|---|---|---|
-| HP-01 | 하네스 소유 스키마 (skills·subagents·commands·sets + provenance·enabled) | 세션/프로젝트 삭제가 하네스를 지우지 않음; user/org 스코프 존재 | S–M |
-| HP-02 | 커맨드 CRUD + 프로바이더 독립 확장 | 하드코딩 팔레트가 사용자 추가/삭제 가능; 5개 엔진 전부 동일 확장 | S |
-| HP-03 | 스킬 런타임 (자체 로딩·점진적 공개·주입) | 스킬이 dev/prod 양쪽에서 동일 트리거·주입 | M |
-| HP-04 | `~/.claude` / `.claude/` 임포터 (D4) | 기존 Claude Code 스킬·서브에이전트·커맨드를 Naby 스토어로 무손실 임포트 | M |
-| HP-05 | 하네스 셋 export/import + 병합·충돌 (D5) | 번들 반출→타 기기·동료가 임포트, 항목 단위 선택 | M |
-| HP-06 | 임포트 게이트 + provenance + 검토 UI (D6) | 임포트 항목 기본 비활성; 외부 유래 스킬은 검토 전 실행 불가; 오염 페이로드 음성 테스트 | M |
-| HP-07 | 서브에이전트 오케스트레이션 (프로바이더 독립) | Naby 런타임이 서브에이전트를 spawn·게이트·관찰; 5개 엔진에서 동작 | **L (Phase 3 후보)** |
-| HP-08 | org 스코프 하네스 상속 (팀 페르소나) | 신규 사용자가 조직 하네스 셋을 기본 상속 | M |
+| HP-01 | 하네스 소유 스키마 (commands·skills·subagents·sets + provenance·enabled·scope) | 세션/프로젝트 삭제가 하네스를 안 지움; user/org 스코프 존재 | S–M |
+| HP-02 | 커맨드 CRUD + 프로바이더 독립 확장 | 하드코딩 팔레트가 사용자 추가/삭제 가능; 5개 엔진 동일 확장 | S |
+| HP-03a | 스킬 런타임 — **지시문 주입만** (자체 로딩·점진적 공개) | 지시문 스킬이 dev/prod 동일 트리거·주입 (툴 없는 스킬) | M |
+| HP-04 | `~/.claude` / `.claude/` 임포터 (D4) | 기존 Claude Code 커맨드·스킬·서브에이전트를 Naby 스토어로 무손실 임포트 | M |
+| HP-05 | 하네스 셋 export/import + 병합·충돌 (D5) | 번들 반출→타 기기·동료 임포트, 항목 단위 선택 | M |
+| HP-06 | 임포트 게이트 + provenance + 검토 UI (D6) | 임포트 항목 기본 비활성; 외부 유래 검토 전 실행 불가; 오염 페이로드 음성 테스트 (**Phase 1.5 게이트 재사용**) | S–M |
+| HP-08 | org 스코프 하네스 상속 (팀 페르소나) | 신규 사용자가 조직 하네스 셋 기본 상속 | M |
 
-- **가장 싼 첫 승리**: HP-02(커맨드). 지금 하드코딩된 팔레트를 CRUD로 바꾸고 5개 프로바이더에 동일 적용 — 비대칭 절벽의 첫 조각을 즉시 메운다.
-- **가장 큰 작업**: HP-07(서브에이전트). Phase 2 루프 소유와 겹치므로 그 뒤에.
+**Phase 2.5 — Harness Execution (Phase 2와/뒤 — 툴 실행기 의존)**
+
+| ID | 항목 | 완료 기준 | 난이도 |
+|---|---|---|---|
+| HP-03b | 툴 동반 스킬 | 스킬이 참조하는 툴이 Phase 2 게이트 아래 실행 | M |
+| HP-07 | 서브에이전트 오케스트레이션 (프로바이더 독립) | Naby 런타임이 서브에이전트를 spawn·게이트·관찰; 5개 엔진 동작 | **L** |
+
+- **가장 싼 첫 승리**: HP-02(커맨드). 하드코딩 팔레트→CRUD, 5개 프로바이더 동일 — dev/prod 절벽의 첫 조각을 즉시 메운다. 오너 원질문("이 커맨드 추가/삭제")에 가장 직접적 답.
+- **왜 Phase 1.6인가**: (1) dev/prod 절벽은 *지금*의 문제다(Phase 1 완료 상태에서 이미 발생). (2) Phase 1.5와 동일 store+gate 패턴 — 방금 만든 쓰기게이트/provenance 재사용. (3) 팀 공유(HP-05/08)는 사내 강점이고 Phase 2 무의존.
 
 ---
 
 ## 6. Open questions (실행 문서로 승계)
 
-- **Phase 경계** — Harness Portability를 Phase 2.5 단일로 둘지, 커맨드(HP-02)만 앞당기고 서브에이전트(HP-07)는 Phase 3로 분리할지.
+- ~~**Phase 경계**~~ — **해소(v0.2)**: 하네스 코어(HP-01/02/03a/04/05/06/08)는 Phase 2 무의존이므로 **Phase 1.6으로 앞당김**; 툴 실행 의존 조각(HP-03b/07)만 **Phase 2.5**로 분리. §5 참조. → 실행: [`phase-1_6-harness-ownership`](../impl/phase-1_6-harness-ownership.md)(impl), [`phase-1_6-harness-contracts`](../interface/phase-1_6-harness-contracts.md)(interface).
 - **자체 포맷 vs Claude Code 포맷** — D2는 채택·래핑을 권고하나, Naby 고유 능력(멀티 프로바이더 모델 지정, 메모리 연동)을 표현하려면 확장 필드가 필요. 확장을 어디까지.
 - **서브에이전트 프로바이더 독립성** — 서브에이전트가 부모와 다른 프로바이더/모델로 돌 수 있어야 하나? (멀티 프로바이더의 실질 이점이나 복잡도 급증.)
 - **hooks 이식** — Claude Code hooks까지 이식 대상인가, 아니면 Naby 게이트/이벤트로 흡수하고 이식 범위에서 제외인가. (보안상 hooks 임포트는 임의 코드 실행 위험.)
