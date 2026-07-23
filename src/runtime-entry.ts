@@ -84,6 +84,18 @@ export type {
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
+  // Owned harness (Phase 1.6 HP-01) — phase-1_6-harness-contracts §2–§6. The
+  // shell (HP-02+) builds command/skill/subagent CRUD + review on these.
+  HarnessKind,
+  HarnessScope,
+  HarnessTrust,
+  HarnessStatus,
+  HarnessProvenance,
+  HarnessItem,
+  HarnessImportRequest,
+  HarnessImportDecision,
+  HarnessSet,
+  HarnessRemoveSelector,
 } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
@@ -95,6 +107,10 @@ export { runTurn, type RunTurnOptions } from './runtime/session.js';
 // runs it before a write lands. The injection helpers are what runTurn uses to
 // assemble memory into a turn (and are exported so the shell can pre/post-inspect).
 export { decideMemoryWrite } from './runtime/memory-gate.js';
+// Phase 1.6 HP-01 — the deterministic harness IMPORT gate. Pure; the store's
+// putHarnessItem/importHarnessSet run it before an import lands. Exported so the
+// shell (HP-06 review UI) can pre-inspect an import decision.
+export { decideHarnessImport } from './runtime/harness-gate.js';
 export {
   composeSystemWithMemory,
   DEFAULT_USER_ID,

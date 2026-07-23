@@ -174,14 +174,14 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(1a) MIGRATION v2->v5: existing sessions/messages/memory survive; new columns become usable',
-    startedAt === 2 && versionAfter1 === 5 && noLoss && afterPin?.pinned === true,
+    '(1a) MIGRATION v2->v6: existing sessions/messages/memory survive; new columns become usable',
+    startedAt === 2 && versionAfter1 === 6 && noLoss && afterPin?.pinned === true,
     `user_version ${startedAt}->${versionAfter1}; session=${JSON.stringify(sess)}; messages=${msgs.length} ("${
       (msgs[0] as { content?: string } | undefined)?.content
     }"); memory=${JSON.stringify(mem)}; new column write pinned=${afterPin?.pinned}`,
   );
 
-  // --- second reopen: current === 4, must be a pure no-op ------------------
+  // --- second reopen: current === 6, must be a pure no-op ------------------
   const store2 = new SqliteStore({ path: dbPath });
   const sess2 = store2.getSession('sess-v2');
   const msgs2 = store2.getMessages('sess-v2');
@@ -194,7 +194,7 @@ function checkMigration(checks: Check[], dbPath: string): void {
   record(
     checks,
     '(1b) MIGRATION is idempotent: a second reopen is a no-op, data + version unchanged',
-    versionAfter2 === 5 &&
+    versionAfter2 === 6 &&
       !!sess2 &&
       sess2.pinned === true &&
       sess2.cwd === undefined &&

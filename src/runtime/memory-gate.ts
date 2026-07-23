@@ -29,21 +29,11 @@ import type {
   MemoryItem,
   MemoryWriteDecision,
   MemoryWriteRequest,
-  TrustTier,
 } from './store/store.js';
-
-/** Fixed trust ordering (contract §4 invariant 2): user > artifact > external.
- * Higher number = more trusted. */
-const TRUST_RANK: Record<TrustTier, number> = {
-  user: 3,
-  artifact: 2,
-  external: 1,
-};
-
-/** True when `a` is strictly less trusted than `b`. */
-function lowerTierThan(a: TrustTier, b: TrustTier): boolean {
-  return TRUST_RANK[a] < TRUST_RANK[b];
-}
+// The trust ordering (user > artifact > external) is factored into trust.ts and
+// SHARED with the harness import-gate (harness-gate.ts), so the two gates can
+// never drift apart on how they rank provenance (contract §4).
+import { lowerTierThan } from './trust.js';
 
 /**
  * Decide whether (and how) a memory write may land. Pure and deterministic.

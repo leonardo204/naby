@@ -316,6 +316,139 @@ export type GoldenItemInput = {
 };
 
 // ---------------------------------------------------------------------------
+// Owned harness (Phase 1.6 HP-01) — phase-1_6-harness-contracts §2–§6
+// ---------------------------------------------------------------------------
+//
+// Phase 1.6 makes commands, skills, subagents and named harness SETS into
+// Naby-owned, scoped, provider-independent entities — the harness twin of Phase
+// 1.5's scoped memory. It REUSES two things already built in Phase 1.5: the
+// scoped-ownership + cascade-exemption model (§2 there) and the deterministic
+// trust-gate (§4 there). See phase-1_6-harness-contracts.
+//
+// THE LOAD-BEARING RULES (contract §2/§4):
+//   - Harness has NO session scope (a command/skill/subagent is a durable
+//     capability, not per-conversation state). Scopes are user | project | org.
+//   - CASCADE EXEMPTION: deleteSession NEVER touches harness; removeProject
+//     removes only scope='project' harness for that cwd; user/org survive.
+//   - (scope, scopeKey, kind, name) is the upsert identity; id is the
+//     provenance/rollback handle.
+//   - Imported (external) harness NEVER auto-enables — it lands 'disabled' and
+//     becomes 'enabled' only through setHarnessEnabled (an explicit user act).
+
+/** command verb | reusable skill | subagent persona (contract §3). */
+export type HarnessKind = 'command' | 'skill' | 'subagent';
+
+/** Harness scopes (contract §2). NO 'session' scope — durable capability, not
+ * per-conversation state. `scopeKey` is userId | cwd | orgId respectively. */
+export type HarnessScope = 'user' | 'project' | 'org';
+
+/** Trust tier of a harness item's ORIGIN (contract §3/§4). Same fixed ordering
+ * as memory (user > artifact > external); it is what the import gate keys on.
+ * authored-by-user > local artifact > imported. */
+export type HarnessTrust = 'user' | 'artifact' | 'external';
+
+/** enabled participates in a turn (injection/expansion); disabled is visible in
+ * the review UI but never injected. Imported items default 'disabled' (§4). */
+export type HarnessStatus = 'enabled' | 'disabled';
+
+/** Where a harness item came from — the rollback/provenance handle (contract
+ * §3). `source` drives the import gate (§4); `origin`/`format` let export
+ * round-trip. */
+export type HarnessProvenance = {
+  /** WHICH trust tier this came from — drives the import gate (§4). */
+  source: HarnessTrust;
+  /** e.g. '~/.claude/skills/foo/SKILL.md', 'set:team-onboarding@1.2'. */
+  origin?: string;
+  /** Interchange format the row came from, for round-trip export. */
+  format?: 'claude-skill-md' | 'claude-agent-md' | 'claude-command-md' | 'naby';
+  /** epoch ms the item was imported, if it was. */
+  importedAt?: number;
+};
+
+/** One owned harness row (contract §3). `(scope, scopeKey, kind, name)` is the
+ * upsert identity; `id` is the provenance/rollback handle. Exactly one of
+ * command/skill/subagent is populated, matching `kind`. */
+export type HarnessItem = {
+  /** UUID — the row's own key and the delete-by-id / provenance handle. */
+  id: string;
+  scope: HarnessScope;
+  /** userId | cwd | orgId, per scope (§2). */
+  scopeKey: string;
+  kind: HarnessKind;
+  /** command verb (no leading slash) | skill/subagent name; unique within
+   * (scope, scopeKey, kind). */
+  name: string;
+  description?: string;
+  /** enabled | disabled (imported => disabled until reviewed). */
+  status: HarnessStatus;
+  provenance: HarnessProvenance;
+  /** epoch ms */
+  createdAt: number;
+  /** epoch ms */
+  updatedAt: number;
+
+  // --- kind-specific payload (exactly one is populated, matching `kind`) ---
+  /** kind='command': the prompt body the verb expands to (provider-independent). */
+  command?: {
+    template: string;
+    argumentHint?: string;
+  };
+  /** kind='skill': SKILL.md body injected on trigger; toolRefs stored now,
+   * executed in Phase 2.5. */
+  skill?: {
+    instructions: string;
+    triggers?: string[];
+    toolRefs?: string[];
+  };
+  /** kind='subagent': system prompt + optional model; toolRefs stored now,
+   * orchestrated in Phase 2.5. */
+  subagent?: {
+    systemPrompt: string;
+    model?: string;
+    toolRefs?: string[];
+  };
+};
+
+/** An import request to the gate (contract §4). Everything a HarnessItem carries
+ * except the store-assigned id/createdAt/updatedAt and the gate-decided status;
+ * `requestedStatus` is what the caller ASKED for and the gate may downgrade
+ * (external can never be granted 'enabled'). */
+export type HarnessImportRequest = {
+  item: Omit<HarnessItem, 'id' | 'createdAt' | 'updatedAt' | 'status'>;
+  requestedStatus?: HarnessStatus;
+};
+
+/** The deterministic import-gate decision (contract §4). An 'allow' may downgrade
+ * to 'disabled'; a 'hold' persists disabled and needs review; a 'deny' throws. */
+export type HarnessImportDecision =
+  | { behavior: 'allow'; status: HarnessStatus }
+  | { behavior: 'hold'; status: 'disabled'; reason: string }
+  | { behavior: 'deny'; reason: string };
+
+/** A named, versioned bundle for team sharing (contract §5). Export produces
+ * one; import merges it through the gate (§4) — everything lands disabled. */
+export type HarnessSet = {
+  /** e.g. 'team-onboarding'. */
+  name: string;
+  /** semver; import records origin 'set:<name>@<version>'. */
+  version: string;
+  description?: string;
+  /** commands/skills/subagents with payloads inline. */
+  items: HarnessItem[];
+  manifest: {
+    createdAt: number;
+    /** display only; NOT a trust claim. */
+    createdBy?: string;
+    counts: { command: number; skill: number; subagent: number };
+    /** optional org signing (open question — contract §7). */
+    signature?: string;
+  };
+};
+
+/** Exactly-one-selector for removeHarness (contract §6). */
+export type HarnessRemoveSelector = { id: string } | { origin: string };
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -424,6 +557,56 @@ export interface Store {
 
   /** Remove one held-out artifact by id. */
   removeGoldenItem(id: string): void;
+
+  // -- owned harness (Phase 1.6 HP-01) -------------------------------------
+  //
+  // Naby-owned commands/skills/subagents; scoped (user/project/org); cascade-
+  // exempt for user/org exactly like scoped memory. The import gate
+  // (decideHarnessImport, harness-gate.ts) mirrors decideMemoryWrite: external
+  // origin NEVER auto-enables. See phase-1_6-harness-contracts §6.
+
+  /** Insert/update by (scope, scopeKey, kind, name). Import requests pass the
+   *  gate (§4): a 'deny' THROWS, a 'hold' persists as status:'disabled', an
+   *  'allow' persists with the gate-decided status (external is always
+   *  'disabled'). Returns the resulting row. */
+  putHarnessItem(req: HarnessImportRequest): HarnessItem;
+
+  /** Items for a scope, optionally filtered by kind and/or status. Ranking /
+   *  trigger-matching for injection happens ABOVE the store (impl), not here;
+   *  ordering is relevance-agnostic (createdAt asc). */
+  listHarness(
+    scope: HarnessScope,
+    scopeKey: string,
+    opts?: { kind?: HarnessKind; status?: HarnessStatus },
+  ): HarnessItem[];
+
+  getHarnessItem(id: string): HarnessItem | undefined;
+
+  /** Enable/disable — the ONLY path an imported (external) item becomes enabled
+   *  (§4 invariant 1). No-op if absent. */
+  setHarnessEnabled(id: string, enabled: boolean): void;
+
+  /** Delete one item by id, or every item from a provenance origin (rollback of
+   *  a bad imported set). Exactly one selector. */
+  removeHarness(sel: HarnessRemoveSelector): void;
+
+  /** Serialize a scope's ENABLED items (optionally a subset by id) into a
+   *  portable HarnessSet. */
+  exportHarnessSet(
+    scope: HarnessScope,
+    scopeKey: string,
+    opts?: { name: string; version: string; ids?: string[] },
+  ): HarnessSet;
+
+  /** Merge a HarnessSet through the gate; returns what landed (all disabled,
+   *  provenance source:'external', origin:'set:<name>@<version>'). `ids` selects
+   *  a subset; a conflict never overwrites an ENABLED local item — it lands as a
+   *  separate disabled candidate (contract §5). */
+  importHarnessSet(
+    set: HarnessSet,
+    into: { scope: HarnessScope; scopeKey: string },
+    opts?: { ids?: string[] },
+  ): HarnessItem[];
 
   // -- usage (F1-07) -------------------------------------------------------
 

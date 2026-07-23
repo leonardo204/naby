@@ -337,8 +337,8 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(e) LOSSLESS MIGRATION v4->v5: golden_items added and usable; memory_items + session SURVIVE; version stamped 5',
-    started === 4 && after === 5 && memorySurvived && sessionSurvived && goldenUsable,
+    '(e) LOSSLESS MIGRATION v4->v6: golden_items added and usable; memory_items + session SURVIVE; version stamped 6',
+    started === 4 && after === 6 && memorySurvived && sessionSurvived && goldenUsable,
     `user_version ${started}->${after}; userMem=${JSON.stringify(userMem.map((m) => ({ k: m.key, v: m.value, s: m.status })))} legacyTone=${legacySess.tone} sessionSurvived=${sessionSurvived}; golden usable=${goldenUsable} (rows=${golden.length})`,
   );
 }

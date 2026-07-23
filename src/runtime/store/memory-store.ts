@@ -15,11 +15,20 @@
 // state.
 
 import { decideMemoryWrite } from '../memory-gate.js';
+import { decideHarnessImport } from '../harness-gate.js';
+import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
+  HarnessImportRequest,
+  HarnessItem,
+  HarnessKind,
+  HarnessRemoveSelector,
+  HarnessScope,
+  HarnessSet,
+  HarnessStatus,
   MemoryDeleteSelector,
   MemoryItem,
   MemoryScope,
@@ -63,12 +72,42 @@ function mintGoldenId(): string {
     .slice(2, 10)}`;
 }
 
+let harnessCounter = 0;
+function mintHarnessId(): string {
+  harnessCounter += 1;
+  return `h-${Date.now().toString(36)}-${harnessCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
 function cloneMemory(item: MemoryItem): MemoryItem {
   return { ...item, provenance: { ...item.provenance } };
 }
 
 function cloneGolden(item: GoldenItem): GoldenItem {
   return { ...item };
+}
+
+/** Deep-ish clone of a harness item so stored state never aliases a caller's
+ * object (matches SqliteStore, which always returns fresh rows). */
+function cloneHarness(item: HarnessItem): HarnessItem {
+  const out: HarnessItem = {
+    ...item,
+    provenance: { ...item.provenance },
+  };
+  if (item.command) out.command = { ...item.command };
+  if (item.skill)
+    out.skill = {
+      ...item.skill,
+      ...(item.skill.triggers ? { triggers: [...item.skill.triggers] } : {}),
+      ...(item.skill.toolRefs ? { toolRefs: [...item.skill.toolRefs] } : {}),
+    };
+  if (item.subagent)
+    out.subagent = {
+      ...item.subagent,
+      ...(item.subagent.toolRefs ? { toolRefs: [...item.subagent.toolRefs] } : {}),
+    };
+  return out;
 }
 
 export class MemoryStore implements Store {
@@ -91,6 +130,12 @@ export class MemoryStore implements Store {
   // path reads it, which is what makes the excluded-from-learning invariant
   // structural, exactly as the golden_items table is separate in SqliteStore.
   private readonly goldenItems = new Map<string, GoldenItem>();
+  // Owned harness (Phase 1.6 HP-01), keyed by its own id — a STORE-LEVEL
+  // collection (never per-session): harness has no session scope and user/org
+  // harness outlives any session, so it cannot live in a SessionState. This is
+  // what makes the cascade EXEMPTION expressible — deleteSession never touches
+  // it, removeProject drops only scope='project' rows for the cwd.
+  private readonly harnessItems = new Map<string, HarnessItem>();
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -152,6 +197,9 @@ export class MemoryStore implements Store {
         this.memoryItems.delete(id);
       }
     }
+    // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): a session
+    // delete NEVER touches harness. Harness has no session scope, so there is
+    // deliberately no harnessItems removal here.
   }
 
   // -- messages ------------------------------------------------------------
@@ -348,6 +396,159 @@ export class MemoryStore implements Store {
     this.goldenItems.delete(id);
   }
 
+  // -- owned harness (Phase 1.6 HP-01) -------------------------------------
+  //
+  // Same semantics as SqliteStore's harness_items ops, so the two drivers stay
+  // observationally identical.
+
+  private findHarnessRow(
+    scope: HarnessScope,
+    scopeKey: string,
+    kind: HarnessKind,
+    name: string,
+  ): HarnessItem | undefined {
+    for (const item of this.harnessItems.values()) {
+      if (
+        item.scope === scope &&
+        item.scopeKey === scopeKey &&
+        item.kind === kind &&
+        item.name === name
+      ) {
+        return item;
+      }
+    }
+    return undefined;
+  }
+
+  /** Shared upsert by (scope, scopeKey, kind, name). Preserves id/createdAt on
+   * update, bumps updatedAt. Stores a defensively-cloned item; returns a clone. */
+  private writeHarnessItem(fields: {
+    scope: HarnessScope;
+    scopeKey: string;
+    kind: HarnessKind;
+    name: string;
+    description?: string;
+    status: HarnessStatus;
+    provenance: HarnessItem['provenance'];
+    command?: HarnessItem['command'];
+    skill?: HarnessItem['skill'];
+    subagent?: HarnessItem['subagent'];
+  }): HarnessItem {
+    const now = Date.now();
+    const existing = this.findHarnessRow(
+      fields.scope,
+      fields.scopeKey,
+      fields.kind,
+      fields.name,
+    );
+    const item: HarnessItem = {
+      id: existing ? existing.id : mintHarnessId(),
+      scope: fields.scope,
+      scopeKey: fields.scopeKey,
+      kind: fields.kind,
+      name: fields.name,
+      status: fields.status,
+      provenance: { ...fields.provenance },
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now,
+    };
+    if (fields.description !== undefined) item.description = fields.description;
+    if (fields.command !== undefined) item.command = fields.command;
+    if (fields.skill !== undefined) item.skill = fields.skill;
+    if (fields.subagent !== undefined) item.subagent = fields.subagent;
+    const stored = cloneHarness(item);
+    this.harnessItems.set(stored.id, stored);
+    return cloneHarness(stored);
+  }
+
+  putHarnessItem(req: HarnessImportRequest): HarnessItem {
+    const existing = this.findHarnessRow(
+      req.item.scope,
+      req.item.scopeKey,
+      req.item.kind,
+      req.item.name,
+    );
+    const decision = decideHarnessImport(req, existing);
+    if (decision.behavior === 'deny') {
+      throw new Error(`harness import denied: ${decision.reason}`);
+    }
+    return this.writeHarnessItem({
+      scope: req.item.scope,
+      scopeKey: req.item.scopeKey,
+      kind: req.item.kind,
+      name: req.item.name,
+      ...(req.item.description !== undefined ? { description: req.item.description } : {}),
+      status: decision.status,
+      provenance: req.item.provenance,
+      ...(req.item.command !== undefined ? { command: req.item.command } : {}),
+      ...(req.item.skill !== undefined ? { skill: req.item.skill } : {}),
+      ...(req.item.subagent !== undefined ? { subagent: req.item.subagent } : {}),
+    });
+  }
+
+  listHarness(
+    scope: HarnessScope,
+    scopeKey: string,
+    opts?: { kind?: HarnessKind; status?: HarnessStatus },
+  ): HarnessItem[] {
+    const out: HarnessItem[] = [];
+    for (const item of this.harnessItems.values()) {
+      if (item.scope !== scope || item.scopeKey !== scopeKey) continue;
+      if (opts?.kind && item.kind !== opts.kind) continue;
+      if (opts?.status && item.status !== opts.status) continue;
+      out.push(cloneHarness(item));
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  getHarnessItem(id: string): HarnessItem | undefined {
+    const item = this.harnessItems.get(id);
+    return item ? cloneHarness(item) : undefined;
+  }
+
+  setHarnessEnabled(id: string, enabled: boolean): void {
+    const item = this.harnessItems.get(id);
+    if (!item) return; // no-op if absent
+    // The ONLY path an imported (external) item becomes enabled (§4 invariant 1).
+    item.status = enabled ? 'enabled' : 'disabled';
+    item.updatedAt = Date.now();
+  }
+
+  removeHarness(sel: HarnessRemoveSelector): void {
+    if ('id' in sel) {
+      this.harnessItems.delete(sel.id);
+      return;
+    }
+    // delete-by-origin: roll back a whole imported set.
+    for (const [id, item] of this.harnessItems) {
+      if (item.provenance.origin === sel.origin) this.harnessItems.delete(id);
+    }
+  }
+
+  exportHarnessSet(
+    scope: HarnessScope,
+    scopeKey: string,
+    opts?: { name: string; version: string; ids?: string[] },
+  ): HarnessSet {
+    let items = this.listHarness(scope, scopeKey, { status: 'enabled' });
+    if (opts?.ids) {
+      const wanted = new Set(opts.ids);
+      items = items.filter((it) => wanted.has(it.id));
+    }
+    return buildHarnessSet(items, opts);
+  }
+
+  importHarnessSet(
+    set: HarnessSet,
+    into: { scope: HarnessScope; scopeKey: string },
+    opts?: { ids?: string[] },
+  ): HarnessItem[] {
+    return mergeHarnessSet(set, into, opts, {
+      find: (s, k, kind, name) => this.findHarnessRow(s, k, kind, name),
+      put: (req) => this.putHarnessItem(req),
+    });
+  }
+
   // -- usage (F1-07) -------------------------------------------------------
 
   appendUsage(sessionId: string, record: UsageRecord): void {
@@ -439,6 +640,15 @@ export class MemoryStore implements Store {
         item.scope === 'session' && doomed.has(item.scopeKey);
       const isThisProject = item.scope === 'project' && item.scopeKey === cwd;
       if (isDoomedSession || isThisProject) this.memoryItems.delete(id);
+    }
+    // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): drop only
+    // this project's OWN scope='project' harness (scopeKey = cwd). user/org
+    // harness is NOT project-owned and MUST survive; harness has no session
+    // scope, so doomed sessions carry none.
+    for (const [id, item] of this.harnessItems) {
+      if (item.scope === 'project' && item.scopeKey === cwd) {
+        this.harnessItems.delete(id);
+      }
     }
     this.projects.delete(cwd);
   }

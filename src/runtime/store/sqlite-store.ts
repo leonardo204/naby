@@ -35,11 +35,22 @@ import { createRequire } from 'node:module';
 // actual load happens lazily inside openSilently() below.
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import { decideMemoryWrite } from '../memory-gate.js';
+import { decideHarnessImport } from '../harness-gate.js';
+import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
+  HarnessImportRequest,
+  HarnessItem,
+  HarnessKind,
+  HarnessProvenance,
+  HarnessRemoveSelector,
+  HarnessScope,
+  HarnessSet,
+  HarnessStatus,
+  HarnessTrust,
   MemoryDeleteSelector,
   MemoryItem,
   MemoryProvenance,
@@ -148,7 +159,21 @@ function openSilently(path: string): DatabaseSyncType {
 // migration and NO loss (memory_items, sessions, everything else untouched). The
 // version is bumped only to record that it happened. The excluded-from-learning
 // invariant is structural: no injection or extraction path reads this table.
-const SCHEMA_VERSION = 5;
+//
+// v6 (Phase 1.6 HP-01) adds the `harness_items` table — Naby-owned, scoped
+// commands/skills/subagents with provenance (phase-1_6-harness-contracts §2/§3).
+// Purely ADDITIVE, exactly like v5: the table and its indexes are IF NOT EXISTS
+// in the DDL, so a brand-new database gets it on first open and an existing v5
+// database picks it up on next open with NO data migration and NO loss
+// (memory_items, golden_items, sessions, everything else untouched). NO BACKFILL.
+// The version is bumped only to record that it happened. Self-healing:
+// re-opening is a no-op. (scope, scope_key, kind, name) is the upsert identity;
+// the kind-specific payload is stored as a JSON column (a store-internal detail
+// — the interface exposes typed command/skill/subagent). CASCADE EXEMPTION
+// (§2): deleteSession never touches harness; removeProject removes only
+// scope='project' harness for that cwd; user/org survive — enforced in the
+// methods, not by any FK.
+const SCHEMA_VERSION = 6;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -269,6 +294,39 @@ CREATE TABLE IF NOT EXISTS golden_items (
 );
 
 CREATE INDEX IF NOT EXISTS golden_items_by_scope ON golden_items (scope_key);
+
+-- v6 (Phase 1.6 HP-01). Naby-owned harness: commands/skills/subagents, scoped
+-- (user/project/org — NO session scope), with provenance
+-- (phase-1_6-harness-contracts §2/§3). Purely ADDITIVE: this table + its indexes
+-- are IF NOT EXISTS, so a brand-new db gets it on first open and an existing v5
+-- db picks it up with NO backfill and NO loss. (scope, scope_key, kind, name) is
+-- the upsert identity; id is the provenance/rollback handle. The kind-specific
+-- payload (command|skill|subagent) is stored as a single JSON column — a
+-- store-internal detail; the interface exposes it as typed fields. The CASCADE
+-- EXEMPTION (§2) is enforced in deleteSession/removeProject, not by any FK:
+-- deleteSession never touches this table; removeProject deletes only
+-- scope='project' rows for that cwd; user/org rows have no session/project owner
+-- and are never cascaded.
+CREATE TABLE IF NOT EXISTS harness_items (
+  id                TEXT PRIMARY KEY,
+  scope             TEXT NOT NULL,   -- user | project | org
+  scope_key         TEXT NOT NULL,   -- userId | cwd | orgId
+  kind              TEXT NOT NULL,   -- command | skill | subagent
+  name              TEXT NOT NULL,   -- verb / skill / subagent name (upsert target within scope+kind)
+  description       TEXT,
+  status            TEXT NOT NULL,   -- enabled | disabled (imported => disabled)
+  prov_source       TEXT NOT NULL,   -- user | artifact | external (trust tier)
+  prov_origin       TEXT,            -- '~/.claude/...' | 'set:name@ver' (rollback)
+  prov_format       TEXT,            -- claude-skill-md | claude-agent-md | claude-command-md | naby
+  prov_imported_at  INTEGER,         -- epoch ms it was imported, if it was
+  payload           TEXT NOT NULL,   -- kind-specific payload, as JSON (store-internal)
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  UNIQUE (scope, scope_key, kind, name)
+);
+
+CREATE INDEX IF NOT EXISTS harness_items_by_scope ON harness_items (scope, scope_key);
+CREATE INDEX IF NOT EXISTS harness_items_by_origin ON harness_items (prov_origin);
 `;
 
 // ---------------------------------------------------------------------------
@@ -409,6 +467,80 @@ let goldenIdCounter = 0;
 function mintGoldenId(): string {
   goldenIdCounter += 1;
   return `g-${Date.now().toString(36)}-${goldenIdCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+// Row shape for harness_items as it comes back from node:sqlite. The
+// kind-specific payload lives in the `payload` JSON column (store-internal).
+type HarnessRow = {
+  id: string;
+  scope: string;
+  scope_key: string;
+  kind: string;
+  name: string;
+  description: string | null;
+  status: string;
+  prov_source: string;
+  prov_origin: string | null;
+  prov_format: string | null;
+  prov_imported_at: number | null;
+  payload: string;
+  created_at: number;
+  updated_at: number;
+};
+
+/** The payload JSON as stored — exactly the three optional kind-specific fields
+ * of HarnessItem (one populated). */
+type HarnessPayload = Pick<HarnessItem, 'command' | 'skill' | 'subagent'>;
+
+function toHarnessItem(row: HarnessRow): HarnessItem {
+  const provenance: HarnessProvenance = { source: row.prov_source as HarnessTrust };
+  if (row.prov_origin !== null && row.prov_origin !== undefined)
+    provenance.origin = row.prov_origin;
+  if (row.prov_format !== null && row.prov_format !== undefined)
+    provenance.format = row.prov_format as HarnessProvenance['format'];
+  if (row.prov_imported_at !== null && row.prov_imported_at !== undefined)
+    provenance.importedAt = Number(row.prov_imported_at);
+
+  const payload = JSON.parse(row.payload) as HarnessPayload;
+
+  const item: HarnessItem = {
+    id: row.id,
+    scope: row.scope as HarnessScope,
+    scopeKey: row.scope_key,
+    kind: row.kind as HarnessKind,
+    name: row.name,
+    status: row.status as HarnessStatus,
+    provenance,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+  if (row.description !== null && row.description !== undefined)
+    item.description = row.description;
+  if (payload.command !== undefined) item.command = payload.command;
+  if (payload.skill !== undefined) item.skill = payload.skill;
+  if (payload.subagent !== undefined) item.subagent = payload.subagent;
+  return item;
+}
+
+/** Extract just the kind-specific payload for JSON storage. */
+function harnessPayloadOf(item: {
+  command?: HarnessItem['command'];
+  skill?: HarnessItem['skill'];
+  subagent?: HarnessItem['subagent'];
+}): HarnessPayload {
+  const payload: HarnessPayload = {};
+  if (item.command !== undefined) payload.command = item.command;
+  if (item.skill !== undefined) payload.skill = item.skill;
+  if (item.subagent !== undefined) payload.subagent = item.subagent;
+  return payload;
+}
+
+let harnessIdCounter = 0;
+function mintHarnessId(): string {
+  harnessIdCounter += 1;
+  return `h-${Date.now().toString(36)}-${harnessIdCounter.toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
 }
@@ -592,6 +724,10 @@ export class SqliteStore implements Store {
       .prepare("DELETE FROM memory_items WHERE scope = 'session' AND scope_key = ?")
       .run(sessionId);
     this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(sessionId);
+    // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): a session
+    // delete NEVER touches harness. Harness has no session scope (a
+    // command/skill/subagent is a durable capability, not per-conversation
+    // state), so there is deliberately no harness_items delete here.
     this.db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
   }
 
@@ -916,6 +1052,211 @@ export class SqliteStore implements Store {
     this.db.prepare('DELETE FROM golden_items WHERE id = ?').run(id);
   }
 
+  // -- owned harness (Phase 1.6 HP-01) -------------------------------------
+
+  /** Find one harness row by its upsert identity (scope, scopeKey, kind, name). */
+  private findHarnessRow(
+    scope: HarnessScope,
+    scopeKey: string,
+    kind: HarnessKind,
+    name: string,
+  ): HarnessItem | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT * FROM harness_items WHERE scope = ? AND scope_key = ? AND kind = ? AND name = ?',
+      )
+      .get(scope, scopeKey, kind, name) as HarnessRow | undefined;
+    return row ? toHarnessItem(row) : undefined;
+  }
+
+  /** The shared upsert by (scope, scopeKey, kind, name). Preserves id/createdAt
+   * on update and bumps updatedAt. Does NOT gate — callers that must gate
+   * (putHarnessItem) decide first and pass the resolved status. */
+  private writeHarnessRow(fields: {
+    scope: HarnessScope;
+    scopeKey: string;
+    kind: HarnessKind;
+    name: string;
+    description?: string;
+    status: HarnessStatus;
+    provenance: HarnessProvenance;
+    command?: HarnessItem['command'];
+    skill?: HarnessItem['skill'];
+    subagent?: HarnessItem['subagent'];
+  }): HarnessItem {
+    const now = Date.now();
+    const existing = this.db
+      .prepare(
+        'SELECT * FROM harness_items WHERE scope = ? AND scope_key = ? AND kind = ? AND name = ?',
+      )
+      .get(fields.scope, fields.scopeKey, fields.kind, fields.name) as
+      | HarnessRow
+      | undefined;
+
+    const id = existing ? existing.id : mintHarnessId();
+    const createdAt = existing ? Number(existing.created_at) : now;
+    const prov = fields.provenance;
+    const payloadJson = JSON.stringify(harnessPayloadOf(fields));
+
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE harness_items SET
+             description = ?, status = ?, prov_source = ?, prov_origin = ?,
+             prov_format = ?, prov_imported_at = ?, payload = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          fields.description ?? null,
+          fields.status,
+          prov.source,
+          prov.origin ?? null,
+          prov.format ?? null,
+          prov.importedAt ?? null,
+          payloadJson,
+          now,
+          id,
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO harness_items
+             (id, scope, scope_key, kind, name, description, status,
+              prov_source, prov_origin, prov_format, prov_imported_at,
+              payload, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          fields.scope,
+          fields.scopeKey,
+          fields.kind,
+          fields.name,
+          fields.description ?? null,
+          fields.status,
+          prov.source,
+          prov.origin ?? null,
+          prov.format ?? null,
+          prov.importedAt ?? null,
+          payloadJson,
+          createdAt,
+          now,
+        );
+    }
+
+    const stored = this.db
+      .prepare('SELECT * FROM harness_items WHERE id = ?')
+      .get(id) as HarnessRow;
+    return toHarnessItem(stored);
+  }
+
+  putHarnessItem(req: HarnessImportRequest): HarnessItem {
+    this.assertOpen();
+    const existing = this.findHarnessRow(
+      req.item.scope,
+      req.item.scopeKey,
+      req.item.kind,
+      req.item.name,
+    );
+    const decision = decideHarnessImport(req, existing);
+    if (decision.behavior === 'deny') {
+      // A deny THROWS: an import that violates the trust ordering must be loud,
+      // never a silent no-op (the harness twin of memory-poisoning defense).
+      throw new Error(`harness import denied: ${decision.reason}`);
+    }
+    // 'allow' carries the (possibly downgraded) status; 'hold' pins 'disabled'.
+    return this.writeHarnessRow({
+      scope: req.item.scope,
+      scopeKey: req.item.scopeKey,
+      kind: req.item.kind,
+      name: req.item.name,
+      ...(req.item.description !== undefined ? { description: req.item.description } : {}),
+      status: decision.status,
+      provenance: req.item.provenance,
+      ...(req.item.command !== undefined ? { command: req.item.command } : {}),
+      ...(req.item.skill !== undefined ? { skill: req.item.skill } : {}),
+      ...(req.item.subagent !== undefined ? { subagent: req.item.subagent } : {}),
+    });
+  }
+
+  listHarness(
+    scope: HarnessScope,
+    scopeKey: string,
+    opts?: { kind?: HarnessKind; status?: HarnessStatus },
+  ): HarnessItem[] {
+    this.assertOpen();
+    const clauses = ['scope = ?', 'scope_key = ?'];
+    const params: unknown[] = [scope, scopeKey];
+    if (opts?.kind) {
+      clauses.push('kind = ?');
+      params.push(opts.kind);
+    }
+    if (opts?.status) {
+      clauses.push('status = ?');
+      params.push(opts.status);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM harness_items WHERE ${clauses.join(' AND ')} ORDER BY created_at ASC`,
+      )
+      .all(...(params as [])) as HarnessRow[];
+    return rows.map(toHarnessItem);
+  }
+
+  getHarnessItem(id: string): HarnessItem | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT * FROM harness_items WHERE id = ?')
+      .get(id) as HarnessRow | undefined;
+    return row ? toHarnessItem(row) : undefined;
+  }
+
+  setHarnessEnabled(id: string, enabled: boolean): void {
+    this.assertOpen();
+    // The ONLY path an imported (external) item becomes enabled (§4 invariant 1).
+    // No-op if absent.
+    this.db
+      .prepare('UPDATE harness_items SET status = ?, updated_at = ? WHERE id = ?')
+      .run(enabled ? 'enabled' : 'disabled', Date.now(), id);
+  }
+
+  removeHarness(sel: HarnessRemoveSelector): void {
+    this.assertOpen();
+    if ('id' in sel) {
+      this.db.prepare('DELETE FROM harness_items WHERE id = ?').run(sel.id);
+      return;
+    }
+    // delete-by-origin: roll back a whole imported set.
+    this.db.prepare('DELETE FROM harness_items WHERE prov_origin = ?').run(sel.origin);
+  }
+
+  exportHarnessSet(
+    scope: HarnessScope,
+    scopeKey: string,
+    opts?: { name: string; version: string; ids?: string[] },
+  ): HarnessSet {
+    this.assertOpen();
+    // Export only ENABLED items (contract §5/§6), optionally a subset by id.
+    let items = this.listHarness(scope, scopeKey, { status: 'enabled' });
+    if (opts?.ids) {
+      const wanted = new Set(opts.ids);
+      items = items.filter((it) => wanted.has(it.id));
+    }
+    return buildHarnessSet(items, opts);
+  }
+
+  importHarnessSet(
+    set: HarnessSet,
+    into: { scope: HarnessScope; scopeKey: string },
+    opts?: { ids?: string[] },
+  ): HarnessItem[] {
+    this.assertOpen();
+    return mergeHarnessSet(set, into, opts, {
+      find: (s, k, kind, name) => this.findHarnessRow(s, k, kind, name),
+      put: (req) => this.putHarnessItem(req),
+    });
+  }
+
   // -- usage (F1-07) -------------------------------------------------------
 
   appendUsage(sessionId: string, record: UsageRecord): void {
@@ -1130,6 +1471,13 @@ export class SqliteStore implements Store {
       // touched here (phase-1_5-memory-contracts §2/§6).
       this.db
         .prepare("DELETE FROM memory_items WHERE scope = 'project' AND scope_key = ?")
+        .run(cwd);
+      // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): the
+      // project's OWN scope='project' harness (scopeKey = cwd) goes with it;
+      // user/org harness is NOT project-owned and MUST survive. Harness has no
+      // session scope, so a doomed session carries none.
+      this.db
+        .prepare("DELETE FROM harness_items WHERE scope = 'project' AND scope_key = ?")
         .run(cwd);
       this.db.prepare('DELETE FROM sessions WHERE cwd = ?').run(cwd);
       this.db.prepare('DELETE FROM projects WHERE cwd = ?').run(cwd);
