@@ -2,7 +2,7 @@
 id: phase-1_6-harness-ownership
 title: Phase 1.6 — Harness Ownership (commands/skills/subagents as Naby-owned, portable, importable assets)
 type: impl
-version: 0.1.1
+version: 0.2.0
 status: draft
 scope: The Phase-2-independent core of harness portability, sequenced BEFORE Phase 2 — Naby-owned scoped harness (commands/skills/subagents/sets) with provenance, provider-independent command CRUD + expansion, instruction-only skill runtime, a ~/.claude importer, harness-set export/import + team sharing, an import trust-gate reusing the Phase-1.5 memory gate, and org-scope inheritance. Establishes tasks and acceptance; shapes live in phase-1_6-harness-contracts. Tool-execution-dependent pieces (tool-bearing skills, subagent orchestration) are Phase 2.5.
 related: [harness-portability-strategy, phase-1_6-harness-contracts, personalized-agent-desktop-app, phase-1-contracts, phase-1_5-memory-contracts, phase-2-personalization-hitl]
@@ -47,7 +47,7 @@ Phase 1.6 does **not** need Phase 2's tool executors or rich gate. `toolRefs` on
 
 Priorities: **Must** = Phase 1.6 not done without it; **Should** = strongly wanted; **Could** = seed now.
 
-> **Implementation status (2026-07-23).** ✅ **Done + verified**: HP-01 (owned harness schema + import gate `decideHarnessImport` reusing the shared `trust.ts` tiers + SCHEMA v5→v6 + cascade exemption + export/import-set store surface; parent `spike:harness` 13/13, regressions green), HP-02 (command CRUD `/api/harness` + Settings "Commands" section + palette merge/override + builtin non-regression; shell tsc baseline-only, vitest 174/174 with 35 new, build ok). 🔧 **Next**: HP-03a (instruction-only skill runtime), HP-04 (`~/.claude` importer), HP-06 (import review UI), HP-05 (set export/import UI), HP-08 (org inheritance). ⏸️ **Phase 2.5**: HP-03b (tool-bearing skills), HP-07 (subagent orchestration).
+> **Implementation status (2026-07-23) — Phase 1.6 core complete.** ✅ **Done + verified**: HP-01 (owned harness schema + import gate `decideHarnessImport` reusing shared `trust.ts` + SCHEMA v5→v6 + cascade exemption + export/import-set store surface; `spike:harness` 13/13), HP-02 (command CRUD `/api/harness` + Settings "Commands" + palette merge/override + builtin non-regression), HP-03a (instruction-only skill injection into `runTurn`, tool-bearing skills excluded, no-op preserved; `spike:skill` 10/10), HP-04 (`~/.claude`/`.claude` importer — commands/skills/subagents, hooks dropped, external→disabled via gate), HP-06 (import review UI — all kinds, provenance, enable/disable, delete-by-origin rollback), HP-05 (harness-set export/import — file download/upload, item selection, conflict never overwrites local enabled), HP-08 (org scope in export/import + palette merge; auto-seeding left as open question). Evidence: parent `spike:harness` 13/13 + `spike:skill` 10/10 + regressions green; shell tsc baseline-only, vitest 216/216 (77 new across the phase), build ok. ⏸️ **Phase 2.5 (tool-execution-dependent)**: HP-03b (tool-bearing skills execute), HP-07 (subagent orchestration).
 
 | ID | Feature | Description | Priority | Completion criteria |
 |------|------|------|------|------|
