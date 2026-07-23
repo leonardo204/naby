@@ -2,7 +2,7 @@
 id: phase-1_5-personalization-data-layer
 title: Phase 1.5 — Personalization Data Layer (scoped memory, injection hook, event schema, golden set)
 type: impl
-version: 0.1.0
+version: 0.2.0
 status: draft
 scope: The four-task Phase 1.5 that turns Naby's store from a session-scoped key-value bag into a personalization substrate — scoped (user/project/session/org) memory with provenance, a turn-time memory retrieval+injection hook under a token budget, an eval-event schema extended for task-type/domain/edit-diff, and a per-user golden-set holdout — plus the seven memory-architecture decisions and the memory-poisoning write gate. Establishes tasks and acceptance; the on-disk contract lives in phase-1_5-memory-contracts.
 related: [personalization-strategy, personalized-agent-desktop-app, phase-1-contracts, phase-1_5-memory-contracts, phase-2-personalization-hitl]
@@ -49,6 +49,8 @@ The strategy defines a six-stage loop (strategy §3.2). Phase 1.5 is not the who
 ## 3. Feature list — the four minimum tasks
 
 The completion criteria below are the acceptance for this phase. Priorities: **Must** = Phase 1.5 is not done without it; **Should** = strongly wanted this phase; **Could** = seed now, complete later.
+
+> **Implementation status (2026-07-23).** ✅ **Done + verified**: P15-01 (scoped memory + provenance + lossless v3→v4 migration + cascade exemption), P15-02 (injection hook, token budget, confirmed-only, no-op), P15-05 (write gate, 4 invariants), P15-04 (golden-set holdout, consent, excluded-from-learning, v5), P15-06 (memory review/delete UI — `/api/memory` list/confirm/delete/delete-by-source + Settings "Memory" section). Evidence: parent `spike:p15` 11/11, `spike:golden` 11/11, regressions green; shell tsc baseline-only, vitest 139/139 (15 new), build ok. ⏸️ **Deferred to Phase 2**: **P15-03** — the eval-event schema is only meaningful once Phase 2a's F2-04 logger writes to it, so it lands **with F2-04** (phase-2 §5) rather than as an empty table now. ⬜ **Later**: P15-07 (cold-start bootstrap, Could).
 
 | ID | Feature | Description | Priority | Completion criteria |
 |------|------|------|------|------|

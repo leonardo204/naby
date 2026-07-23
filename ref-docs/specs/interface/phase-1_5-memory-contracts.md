@@ -2,7 +2,7 @@
 id: phase-1_5-memory-contracts
 title: Phase 1.5 — Memory Contracts (scoped schema, write gate, injection, Store extension)
 type: interface
-version: 0.1.1
+version: 0.2.0
 status: draft
 scope: The on-disk and in-process contracts for Phase 1.5 scoped memory — the memory record shape (scope/type/provenance/confidence/status), the keying model and how it extends (not violates) the Phase-1 sessionId-only invariant, the cascade-exemption rules, the deterministic memory write-gate contract, the turn-time retrieval + token-budget injection contract, and the Store interface additions.
 related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl]
@@ -183,9 +183,62 @@ interface Store {
 
 ---
 
+## 6.2 Golden set (P15-04)
+
+The per-user evaluation holdout (impl §5). A **separate table** from scoped memory — the physical disjointness IS the excluded-from-learning guarantee: injection/extraction read `memory_items` only, so a held-out artifact can never leak into a turn or into learning.
+
+```ts
+type GoldenConsent = 'granted' | 'revoked' | 'pending';
+
+type GoldenItem = {
+  id: string;                 // UUID — row key AND the addressable re-scoring handle (Phase 2b F2-07)
+  scopeKey: string;           // the user (single-user machine: a constant); same space as scope='user'
+  taskType: string;           // aligns with eval_events.task_type / P15-03 — score aggregates per task type
+  input: string;              // the original prompt the artifact answered
+  expected: string;           // the user's real past output — the HELD-OUT truth scored against later
+  excludedFromLearning: true; // ALWAYS true — literal type makes `false` inexpressible; store never accepts it
+  consent: GoldenConsent;     // defaults to 'pending'
+  createdAt: number;
+  lastScoredAt: number | null;// null in Phase 1.5 — reserved so re-scoring needs no later migration
+};
+
+type GoldenItemInput = {      // what a caller supplies; id/createdAt/lastScoredAt/excludedFromLearning are store-owned
+  scopeKey: string;
+  taskType: string;
+  input: string;
+  expected: string;
+  consent?: GoldenConsent;    // defaults to 'pending'
+};
+```
+
+Store additions (extend §6):
+
+```ts
+interface Store {
+  // … §6 scoped-memory ops …
+  /** Capture a held-out artifact. excludedFromLearning is stamped true; consent
+   *  defaults to 'pending'; lastScoredAt is null. Returns the row with its id. */
+  addGoldenItem(item: GoldenItemInput): GoldenItem;
+  /** A user's golden set, optionally filtered by consent. */
+  listGoldenSet(scopeKey: string, opts?: { consent?: GoldenConsent }): GoldenItem[];
+  getGoldenItem(id: string): GoldenItem | undefined;
+  setGoldenConsent(id: string, consent: GoldenConsent): void;
+  removeGoldenItem(id: string): void;
+}
+```
+
+**Invariants.**
+
+- **Excluded from learning — structurally, not by flag alone.** Golden items live in their own table/map; the injection path (§5) and any future extraction path read `memory_items` exclusively. The `excludedFromLearning: true` literal is the type-level backstop; the physical separation is the real guarantee.
+- **Consent is per-item and mutable.** `setGoldenConsent` moves an item between `granted`/`revoked`/`pending`; scoring (Phase 2b) considers only `granted`.
+- **`id` is the re-scoring handle.** Phase 2b F2-07 re-scores by `id`; `lastScoredAt` is reserved (null now) so re-scoring adds no migration.
+- **Golden set is user-scoped and lifecycle-independent** — like `user` scoped memory, it survives session/project deletes (§2).
+
+---
+
 ## 7. Migration & compatibility
 
-- **One version-gated migration** widens the `memory` table (or adds a `memory_items` table and back-fills — implementation choice, either satisfies §3's lossless requirement). Existing rows map as in §3; the Phase-1 session-memory read path is preserved.
+- **SCHEMA_VERSION 3 → 5, in two additive steps.** v4 replaces the legacy `memory(session_id, key, value)` with the scoped `memory_items` table and back-fills existing rows losslessly (§3); v5 adds the `golden_items` table (§6.2) purely additively (`IF NOT EXISTS`, no back-fill). Migrations are self-healing (gated on the presence of the legacy table / target table, not only the version stamp); the Phase-1 session-memory read path is preserved throughout.
 - **The `Store` interface stays the seam.** As with F1-05's driver (`node:sqlite`), a schema choice is a store-internal detail; the runtime depends on the interface in §6, not on the table layout.
 - **No engine or contract-§2 change.** Injection assembles memory into `EngineRunInput` above the engine seam; the engine interface (contracts §2) is untouched.
 
