@@ -5,7 +5,7 @@ type: design
 version: 1.1.0
 status: review
 scope: 개인화를 제품의 상위 축으로 재정의하는 전략 — 개인화 3층 모델, 북극성 지표(편집률 감소 곡선), 개인화 루프의 공백 진단, 메모리 아키텍처 7대 결정, Phase 1.5 신설 근거, 콜드스타트·골든셋 평가, 메모리 오염 리스크. Phase 1.5 태스크와 메모리 계약은 별도 문서로 내려간다.
-related: [personalized-agent-desktop-app, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
+related: [personalized-agent-desktop-app, harness-portability-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
 updated: 2026-07-23
 ---
 
@@ -15,6 +15,8 @@ updated: 2026-07-23
 > - Phase 1.5 태스크·수용기준 → [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md) (impl)
 > - 스코프 메모리 스키마·주입·쓰기 게이트 계약 → [`phase-1_5-memory-contracts`](../interface/phase-1_5-memory-contracts.md) (interface)
 > - 제품 전반 설계·로드맵 → [`personalized-agent-desktop-app`](personalized-agent-desktop-app.md) §5에 Phase 1.5가 편입됨.
+>
+> **자매 전략** — [`harness-portability-strategy`](harness-portability-strategy.md): 이 문서가 *기억*의 소유권·이식성을 다룬다면, 그쪽은 *하네스*(스킬·서브에이전트·커맨드)의 소유권·이식성을 다룬다. 같은 명제("모델을 바꿔도 내가 남는다")의 두 축이다.
 >
 > v1.0 서비스기획서(`naby-서비스기획서.md`, 사내 환경·거버넌스 축)는 폐기하지 않으며 **상위 축만 개인화로 교체**한다. 본 문서 §9의 미해결 결정(암호화·소유권 정책·기성 메모리 계층 채용)은 각 실행 문서에 **open question**으로 승계되어 있고, 여기서 임의로 확정하지 않는다.
 

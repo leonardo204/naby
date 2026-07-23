@@ -2,10 +2,10 @@
 id: phase-2-personalization-hitl
 title: Phase 2 — In-house Tools + HITL Approval Gate + Personalization Measurement
 type: impl
-version: 0.4.0
+version: 0.4.1
 status: review
 scope: Phase 2a (in-house tool executors, the risk-classified HITL approval gate, guardrails, deterministic metrics) and Phase 2b (asynchronous LLM-as-judge personalization scoring), including the local data model
-related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts]
+related: [personalized-agent-desktop-app, harness-portability-strategy, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts]
 updated: 2026-07-23
 ---
 

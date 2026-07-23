@@ -2,10 +2,10 @@
 id: personalized-agent-desktop-app
 title: Personalized Persona Agent Desktop App — Design Overview
 type: design
-version: 0.8.0
+version: 0.9.0
 status: review
 scope: Product concept, locked decisions, layer architecture, engine and provider model, cross-phase risks and roadmap — the shared context both phase plans build on
-related: [personalization-strategy, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
+related: [personalization-strategy, harness-portability-strategy, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
 supersedes: personalized-agent-desktop-app-build-plan
 updated: 2026-07-23
 ---
@@ -14,8 +14,9 @@ updated: 2026-07-23
 
 > What we are building and why: fork OpenCockpit as the shell, then layer our core capabilities (personalization quality, HITL) on top.
 
-**Document info** · Written 2026-07-19 · Version v0.8 (Draft) · Audience: the team executing this plan, and the project owner · Status: Review
+**Document info** · Written 2026-07-19 · Version v0.9 (Draft) · Audience: the team executing this plan, and the project owner · Status: Review
 
+> v0.9 changes — **harness (skills / subagents / slash commands) is proposed as the next Naby-owned, portable asset — the sibling of memory.** A code audit found two disconnected harness planes today: the dev `ClaudeAgentSdkEngine` inherits the *full* Claude Code harness from `~/.claude` (`settingSources: ['user','project','local']`), while the prod `AiSdkEngine` (five providers) has **no harness concept at all** — so switching from the dev Claude engine to any metered provider silently drops every skill/subagent/command (a dev/prod cliff). And the shell's slash palette (`/plan`, `/qa`, …) is hardcoded with no add/delete/import/export. The proposal: the Naby Layer owns the harness as a first-class asset (§3.6 gains **Harness**), with a provider-independent harness runtime, `~/.claude` import, harness-set export/import for team sharing, and an import trust-gate reusing the memory-poisoning defense. Strategy in [`harness-portability-strategy`](harness-portability-strategy.md); a `Phase 2.5` roadmap row (proposed) is added below. Nothing here is locked — the harness strategy is `status: draft`.
 > v0.8 changes — **personalization is promoted to the product's top axis, and a `Phase 1.5` (personalization data layer) is inserted between Phase 1 and Phase 2a.** A repository audit found the structural reason Phase 1 reads as "a multi-LLM wrapper": memory is session-scoped (`memory(session_id, key)`) and the turn path never reads or writes it — there is nowhere to accumulate a person and no path to inject them. Phase 1.5 fixes that before Phase 2 needs the data: scoped (user/project/session/org) memory with provenance, a token-budgeted turn-time injection hook, an eval-event schema widened for task-type/domain/edit-diff, a per-user golden-set holdout, and a **memory write gate** (memory poisoning — OWASP ASI06 — persists past a session and must be gated like a tool call). The strategy is [`personalization-strategy`](personalization-strategy.md); tasks in [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md); memory schema/write-gate/injection contract in [`phase-1_5-memory-contracts`](../interface/phase-1_5-memory-contracts.md). The §6 "memory keyed by `sessionId` only" invariant is refined (not broken): it governs transcripts/usage/session-memory; user/org memory now survives session and project deletes.
 > v0.7 changes — **the Naby Layer is declared the single owner of projects, sessions, memory, and context.** Naby keeps its own canonical records in its runtime store (`app.db`) and serves every session/project/recent/pinned browsing UI *from that store* (§3.6). Provider-native stores (`~/.claude/projects`, …) stay strictly **below** the Naby Layer, read **only by the engine**, never by Naby's session/project UI. **Project** becomes a first-class Naby-owned entity (the store gains a `projects` table; sessions link to a project + provider). This resolves the open `[needs confirmation]` on how much of OpenCockpit's feature-agent survives (§2.3): the browsing UIs survive, but their **data source moves to the Naby store**. Existing `~/.cockpit/projects.json` is imported once into the Naby store on first run (no data loss). Full A→E realignment is in scope → [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md).
 > v0.6 changes — **the engine becomes a swappable backend, and the runtime layer becomes provider-independent.** Three refinements: (1) an **API key is per provider, with no personal/organization role** — the app just takes a provider's key. (2) **Memory, context, MCP, tools, the gate, and sessions are provider- and key-independent** — switching provider changes only which model answers; everything else carries over (§3.2, §3.3). (3) The **engine is an abstraction with two backends** behind one seam ("engine owns the loop; gate + executors + tools are injected"): **`AiSdkEngine`** (production, five providers) and **`ClaudeAgentSdkEngine`** (dev/test only, Claude via local OAuth, no API key, no metered cost) — both verified to attach our provider-independent gate and executors identically (§3.4).
@@ -189,9 +190,10 @@ For a product whose core feature is a reliable approval gate, a path where `tool
 ┌──────────────────────────────────────────────────────────────────────┐
 │                            NABY LAYER  (we own)                        │
 │   canonical records in app.db — served straight to the UI             │
-│   ┌────────────┬────────────┬────────────┬────────────┬────────────┐  │
-│   │  Projects  │  Sessions  │   Agents   │  Context   │   Memory   │  │
-│   └────────────┴────────────┴────────────┴────────────┴────────────┘  │
+│   ┌──────────┬──────────┬──────────┬─────────┬─────────┬───────────┐  │
+│   │ Projects │ Sessions │  Agents  │ Context │ Memory  │ Harness*  │  │
+│   └──────────┴──────────┴──────────┴─────────┴─────────┴───────────┘  │
+│   * Harness (skills·subagents·commands) — PROPOSED, Phase 2.5           │
 │   session list · project list · recent · pinned · transcript view     │
 │   ── all fed from app.db, never from a provider-native store ──        │
 └───────────────────────────────▲──────────────────────────────────────┘
@@ -244,7 +246,8 @@ Risks owned by a single phase are tracked in that phase's document. Listed here 
 | **Phase 1.5** | **Personalization data layer** — scoped (user/project/session/org) memory with provenance, token-budgeted turn-time injection hook, eval-event schema (task-type/domain/edit-diff), per-user golden-set holdout, memory write gate | Substrate the Phase 2 loop learns from; session-delete no longer erases user memory | M (est.) | `personalization-strategy` · `phase-1_5-personalization-data-layer` · `phase-1_5-memory-contracts` |
 | Phase 2a | In-house tool executors + HITL approval gate + guardrails + deterministic metrics | Tool layer, approval gate, 3 metrics | L (est.) | `phase-2-personalization-hitl` |
 | Phase 2b | Asynchronous evaluation agent (LLM-judge) + score integration | Personalization score, side-by-side dashboard | M (est.) | `phase-2-personalization-hitl` |
-| (Later) Phase 3 | Memory contamination isolation, domain isolation, admin console, persona generation agent | Separate plan | — | — |
+| **Phase 2.5** *(proposed)* | **Harness portability** — Naby-owned skills/subagents/commands, provider-independent harness runtime, `~/.claude` import, harness-set export/import + team sharing, import trust-gate | Hardcoded palette → owned CRUD asset; harness survives a provider switch; team-set inheritance | M–L (est.) | `harness-portability-strategy` · `phase-2_5-harness-portability` (planned) |
+| (Later) Phase 3 | Memory contamination isolation, domain isolation, admin console, persona generation agent, provider-independent subagent orchestration | Separate plan | — | — |
 
 * Sizes are T-shirt estimates (S/M/L) and must be re-estimated once work begins.
 
