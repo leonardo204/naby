@@ -30,6 +30,7 @@
     "spike:p15": "tsx src/spikes/spike-p15-memory.ts",
     "spike:golden": "tsx src/spikes/spike-p15-golden.ts",
     "spike:harness": "tsx src/spikes/spike-harness.ts",
+    "spike:skill": "tsx src/spikes/spike-skill-inject.ts",
     "spike:claude-auth": "tsx src/spikes/spike-claude-auth.ts",
     "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build:app && node scripts/build-dist.mjs --publish never",

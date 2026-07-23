@@ -121,6 +121,22 @@ export {
   retrieveForInjection,
   selectMemoryForInjection,
 } from './runtime/memory-inject.js';
+// Phase 1.6 HP-03a — turn-time SKILL instruction injection. Pure trigger-match +
+// budget selection + assembly, mirroring the memory helpers; what runTurn uses to
+// inject enabled, instruction-only skills into a turn (exported so the shell can
+// pre/post-inspect a selection). Tool-bearing skills are excluded here (Phase 2.5).
+export {
+  composeSystemWithSkills,
+  gatherSkillCandidates,
+  isInstructionOnly,
+  renderInjectedSkills,
+  renderSkillBlock,
+  retrieveSkillsForInjection,
+  selectSkillsForInjection,
+  skillMatchesTurn,
+  type InjectedSkills,
+  type SkillInjectionQuery,
+} from './runtime/skill-inject.js';
 
 // F1-08 — the user's stored "which provider answers" choice, and the mapping
 // from it to selectEngine's options (including where the env vars rank).

@@ -19,6 +19,12 @@ import type {
   ToolSchema,
 } from './engine.js';
 import { composeSystemWithMemory, retrieveForInjection } from './memory-inject.js';
+import {
+  composeSystemWithSkills,
+  retrieveSkillsForInjection,
+  type InjectedSkills,
+  type SkillInjectionQuery,
+} from './skill-inject.js';
 import type { InjectedMemory, MemoryInjectionQuery, Store } from './store/store.js';
 
 export type RunTurnOptions = {
@@ -94,6 +100,35 @@ export type RunTurnOptions = {
    * the caller can record the per-turn memory log (contract §5). Fires only when
    * `memoryInjection` is set; the items array is empty on a no-op turn. */
   onMemoryInjection?: (injected: InjectedMemory) => void;
+
+  // -- skill instruction injection (Phase 1.6, HP-03a) ----------------------
+  //
+  // OPT-IN, and independent of memory injection above. When absent, runTurn does
+  // ZERO skill work and the turn is byte-for-byte what it would have been (the
+  // no-op invariant) — which is why the existing spikes, passing no config here,
+  // are unchanged. When present, runTurn injects the ENABLED, INSTRUCTION-ONLY
+  // skills that the turn triggers (or that are always-on), within a hard token
+  // budget SEPARATE from memory's, into the turn's SYSTEM field (above the engine
+  // seam — never a stored transcript message), side by side with any memory
+  // block. Tool-bearing skills are NOT injected (Phase 2.5) but are counted so
+  // the omission is observable (contract §3, impl §6).
+
+  /** Inject enabled, instruction-only skills into this turn's system prompt,
+   * under a hard token budget. Omit to disable skill injection entirely (a pure
+   * no-op). */
+  skillInjection?: {
+    /** HARD cap on injected skill tokens for this turn (separate from memory's). */
+    tokenBudget: number;
+    /** user-scope key — a single-user-machine constant by default. */
+    userId?: string;
+    /** org-scope key — omit unless in-house org harness is in play. */
+    orgId?: string;
+  };
+  /** Called once with what was injected (skills, tokensUsed, droppedForBudget,
+   * excludedForTools) so the caller can log/inspect the per-turn skill selection.
+   * Fires only when `skillInjection` is set; the skills array is empty on a no-op
+   * turn and `excludedForTools` reports tool-bearing skills held for Phase 2.5. */
+  onSkillInjection?: (injected: InjectedSkills) => void;
 };
 
 /** Run one turn on the given engine, folding its events into the store. Returns
@@ -137,6 +172,30 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     // Record what was injected (item ids, tokensUsed, droppedForBudget) so a
     // bad injection is auditable and memory hit rate is computable.
     opts.onMemoryInjection?.(injected);
+  }
+
+  // -- SKILL INSTRUCTION INJECTION (Phase 1.6, HP-03a) ----------------------
+  // Assemble the enabled, instruction-only skills this turn triggers into the
+  // SAME system field, right after any memory block, under their own header —
+  // provider/engine-independent, above the engine seam. When skill injection is
+  // off, or nothing relevant is enabled, `effectiveSystem` is left exactly as the
+  // memory step produced it (byte-for-byte the no-op), so a turn with neither
+  // config is what Phase 1 would have sent. Tool-bearing skills are excluded (no
+  // half-run before Phase 2.5) and reported via `excludedForTools`.
+  if (opts.skillInjection) {
+    const skillQuery: SkillInjectionQuery = {
+      userText,
+      tokenBudget: opts.skillInjection.tokenBudget,
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    };
+    const skillOpts: { userId?: string; orgId?: string } = {};
+    if (opts.skillInjection.userId !== undefined)
+      skillOpts.userId = opts.skillInjection.userId;
+    if (opts.skillInjection.orgId !== undefined)
+      skillOpts.orgId = opts.skillInjection.orgId;
+    const injectedSkills = retrieveSkillsForInjection(store, skillQuery, skillOpts);
+    effectiveSystem = composeSystemWithSkills(effectiveSystem, injectedSkills);
+    opts.onSkillInjection?.(injectedSkills);
   }
 
   const controller = new AbortController();
