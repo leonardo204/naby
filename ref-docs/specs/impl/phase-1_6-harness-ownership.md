@@ -2,7 +2,7 @@
 id: phase-1_6-harness-ownership
 title: Phase 1.6 — Harness Ownership (commands/skills/subagents as Naby-owned, portable, importable assets)
 type: impl
-version: 0.1.0
+version: 0.1.1
 status: draft
 scope: The Phase-2-independent core of harness portability, sequenced BEFORE Phase 2 — Naby-owned scoped harness (commands/skills/subagents/sets) with provenance, provider-independent command CRUD + expansion, instruction-only skill runtime, a ~/.claude importer, harness-set export/import + team sharing, an import trust-gate reusing the Phase-1.5 memory gate, and org-scope inheritance. Establishes tasks and acceptance; shapes live in phase-1_6-harness-contracts. Tool-execution-dependent pieces (tool-bearing skills, subagent orchestration) are Phase 2.5.
 related: [harness-portability-strategy, phase-1_6-harness-contracts, personalized-agent-desktop-app, phase-1-contracts, phase-1_5-memory-contracts, phase-2-personalization-hitl]
@@ -46,6 +46,8 @@ Phase 1.6 does **not** need Phase 2's tool executors or rich gate. `toolRefs` on
 ## 3. Feature list
 
 Priorities: **Must** = Phase 1.6 not done without it; **Should** = strongly wanted; **Could** = seed now.
+
+> **Implementation status (2026-07-23).** ✅ **Done + verified**: HP-01 (owned harness schema + import gate `decideHarnessImport` reusing the shared `trust.ts` tiers + SCHEMA v5→v6 + cascade exemption + export/import-set store surface; parent `spike:harness` 13/13, regressions green), HP-02 (command CRUD `/api/harness` + Settings "Commands" section + palette merge/override + builtin non-regression; shell tsc baseline-only, vitest 174/174 with 35 new, build ok). 🔧 **Next**: HP-03a (instruction-only skill runtime), HP-04 (`~/.claude` importer), HP-06 (import review UI), HP-05 (set export/import UI), HP-08 (org inheritance). ⏸️ **Phase 2.5**: HP-03b (tool-bearing skills), HP-07 (subagent orchestration).
 
 | ID | Feature | Description | Priority | Completion criteria |
 |------|------|------|------|------|
