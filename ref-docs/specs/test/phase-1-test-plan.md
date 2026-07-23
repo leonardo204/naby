@@ -2,11 +2,11 @@
 id: phase-1-test-plan
 title: Phase 1 — Verification Plan (spikes, acceptance, 3-OS matrix)
 type: test
-version: 0.3.1
+version: 0.3.2
 status: draft
 scope: How Phase 0 spikes and Phase 1 acceptance criteria are verified — spikes, per-feature acceptance, the Naby-store realignment (Phases B–E), security tests, the 3-OS matrix, and irreversible release checkpoints
-related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, personalized-agent-desktop-app]
-updated: 2026-07-22
+related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, personalized-agent-desktop-app, phase-1_5-personalization-data-layer]
+updated: 2026-07-23
 ---
 
 # Phase 1 — Verification Plan
@@ -14,6 +14,8 @@ updated: 2026-07-22
 > Verifies [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md) against the design in [`phase-1-shell-architecture`](../design/phase-1-shell-architecture.md) and the contracts in [`phase-1-contracts`](../interface/phase-1-contracts.md).
 
 **Principle**: the architecture document tags claims `[V]`/`[E]`/`[C]`/`[?]`. Everything `[C]` or `[?]` that is load-bearing appears in §1 as a spike, because searching cannot settle it — only running it can.
+
+> **Scope note.** This plan verifies **Phase 1** only. **Phase 1.5** (personalization data layer) carries its own acceptance criteria inline in [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md) §3/§6 (e.g. *session-delete must not erase user memory*; *injection stays within token budget*; *the memory write gate is negative-tested against a simulated injection*). Those graduate into this test plan — or a dedicated Phase 1.5 test doc — when that phase is scheduled.
 
 ---
 

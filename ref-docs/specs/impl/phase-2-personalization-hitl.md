@@ -2,11 +2,11 @@
 id: phase-2-personalization-hitl
 title: Phase 2 — In-house Tools + HITL Approval Gate + Personalization Measurement
 type: impl
-version: 0.3.0
+version: 0.4.0
 status: review
 scope: Phase 2a (in-house tool executors, the risk-classified HITL approval gate, guardrails, deterministic metrics) and Phase 2b (asynchronous LLM-as-judge personalization scoring), including the local data model
-related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts]
-updated: 2026-07-20
+related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts]
+updated: 2026-07-23
 ---
 
 # Phase 2 — In-house Tools + HITL Approval Gate + Personalization Measurement
@@ -15,10 +15,11 @@ updated: 2026-07-20
 
 **Goal**: give the agent its **tools** and make acting with them safe and measurable. **2a** builds the in-house tool executors, upgrades Phase 1's minimal gate into a **risk-classified HITL approval gate**, adds deterministic guardrails, and records quantitative metrics — all in our provider-independent runtime. **2b** adds an **asynchronous LLM-as-judge** that scores "how much like me did it write," complementing the 2a metrics.
 
-**Entry conditions** — carried from Phase 1:
+**Entry conditions** — carried from Phase 1 and **Phase 1.5**:
 - SPIKE-03 passed on **both engines**: in `AiSdkEngine` every tool call is surfaced execute-less to our loop; in the dev `ClaudeAgentSdkEngine` a `PreToolUse` hook fires on every call and its deny is authoritative. The gate is ours, attached per engine ([contracts](../interface/phase-1-contracts.md) §3).
 - The runtime scaffold exists: the gate injection point, the engine interface, the MCP registry, and a **local SQLite store** (F1-05). The eval tables in §5 **extend that store** — they are not a new database.
 - A minimal always-prompt gate already runs in Phase 1, so no tool has ever executed ungated. Phase 2 replaces its *decision logic*, not the contract.
+- **Phase 1.5 personalization substrate is in place** ([`phase-1_5-personalization-data-layer`](phase-1_5-personalization-data-layer.md)): scoped memory with provenance (D), the turn-time injection hook (E), the widened eval-event schema (A), the golden-set holdout (F), and the memory write gate. Phase 2b's extraction/injection loop and LLM-judge **write into and read from that substrate** rather than building it — without it there is no accumulated data to learn from. F2-04's `eval_events` (§5) targets the P15-03-widened shape, so there is no second migration.
 
 ---
 
@@ -68,6 +69,7 @@ Invariants that must hold (full list in [contracts](../interface/phase-1-contrac
 | F2-07 | Evaluation agent (LLM-as-judge) | Score logged draft→final pairs **asynchronously and post hoc** (voice/personalization, 0–1). Never blocks the send path. Runs through the engine on a **chosen provider** | Should | A personalization score recorded per draft |
 | F2-08 | Isolated judge context | Run scoring in an **isolated context** (a separate `engine.run` with its own message history) so it never contaminates the main conversation | Should | Main session context unchanged |
 | F2-09 | Dashboard integration | Show deterministic metrics (2a) and judge scores (2b) **side by side** to surface correlation | Could | Both series displayed together |
+| F2-10 | **Preference extraction → memory** | Close loop stages **B (extract)** and **C (verify)** (strategy §3.2): from logged draft→final→edit records, propose candidate preference rules and write them to Phase 1.5 scoped memory as `status:'proposed'` (through the memory write gate); above-threshold or user-confirmed become `confirmed` and thereby injectable (E). Runs async, off the hot path | Should | A confirmed preference, extracted from real edits, is injected on a later turn (via [`phase-1_5-memory-contracts`](../interface/phase-1_5-memory-contracts.md) §5) and measurably reduces edit distance on the golden set |
 
 - **A multi-provider strength**: the judge can run on a *different* provider than the drafting model — scoring Claude output with GPT or Gemini avoids the same-model blind spot. Which provider is an open question (§9).
 - Execution: F2-07 runs on a **batch/low-load trigger**; identical draft/prompt pairs are cached to avoid re-scoring.
@@ -80,6 +82,9 @@ Invariants that must hold (full list in [contracts](../interface/phase-1-contrac
 - **Edit Distance** = normalized change from draft to final (token diff or normalized Levenshtein). Lower = more "like me."
 - **Override Rate** = proportion denied or heavily modified at the gate.
 - **Personalization Score (2b)** = voice/tone match (0–1) from the judge over a draft→final pair. **Complements** the three deterministic metrics — never sole evidence, always reported alongside them.
+- **Edit-Rate Reduction Curve (north star, strategy §2.2)** = the trend of edit distance *within a fixed task type* as usage accumulates. This is the product's real success signal, but it lies if used alone — better personalization invites harder tasks, re-inflating edits. The **golden-set holdout** (Phase 1.5 P15-04) is the fixed-difficulty control that de-confounds it.
+- **Memory Hit Rate** = injected memory items actually reflected/cited in the output ÷ injected items (Phase 1.5 P15-02 logs the denominator). Low ⇒ retrieval strategy is wrong.
+- **Memory Correction Rate** = rate at which the user edits/deletes memory (via the review surface, Phase 1.5 P15-06). **High is a trust signal, not a defect** (users are looking); near-zero means no one trusts it or knows it exists.
 - Analogy: record **how much you rewrite** the assistant's drafts each day (deterministic), while a separate inspector grades **whether the voice sounds like you** (2b). Less to fix + rising score = learning happened.
 
 ---
@@ -87,6 +92,8 @@ Invariants that must hold (full list in [contracts](../interface/phase-1-contrac
 ## 5. Data model (SQLite — extends the Phase 1 store)
 
 Phase 1 already owns `userData/app.db` (sessions, transcripts, memory, MCP registry). Phase 2 **adds** these tables. Whether the database is encrypted at rest is sharpened here, because `eval_events` holds potentially sensitive draft/final text (§9).
+
+> **Phase 1.5 alignment.** The `eval_events` shape below (notably `task_type`, `domain`, and the edit record) is the shape **Phase 1.5 P15-03 widens the event schema to** — so Phase 2a's F2-04 logger writes into an already-migrated table, not a fresh one. P15-03 additionally preserves the **edit diff** (not just the scalar `edit_distance`) so per-task-type analysis and preference extraction (F2-10) have the raw signal. Scoped preference/persona memory does **not** live in `eval_events`; it lives in the Phase 1.5 scoped-memory tables ([`phase-1_5-memory-contracts`](../interface/phase-1_5-memory-contracts.md) §3).
 
 ```sql
 -- Eval event: one draft→final record

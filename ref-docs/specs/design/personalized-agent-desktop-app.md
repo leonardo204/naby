@@ -2,20 +2,21 @@
 id: personalized-agent-desktop-app
 title: Personalized Persona Agent Desktop App — Design Overview
 type: design
-version: 0.7.0
+version: 0.8.0
 status: review
 scope: Product concept, locked decisions, layer architecture, engine and provider model, cross-phase risks and roadmap — the shared context both phase plans build on
-related: [phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-2-personalization-hitl]
+related: [personalization-strategy, phase-1-desktop-shell, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
 supersedes: personalized-agent-desktop-app-build-plan
-updated: 2026-07-21
+updated: 2026-07-23
 ---
 
 # Personalized Persona Agent Desktop App — Design Overview
 
 > What we are building and why: fork OpenCockpit as the shell, then layer our core capabilities (personalization quality, HITL) on top.
 
-**Document info** · Written 2026-07-19 · Version v0.7 (Draft) · Audience: the team executing this plan, and the project owner · Status: Review
+**Document info** · Written 2026-07-19 · Version v0.8 (Draft) · Audience: the team executing this plan, and the project owner · Status: Review
 
+> v0.8 changes — **personalization is promoted to the product's top axis, and a `Phase 1.5` (personalization data layer) is inserted between Phase 1 and Phase 2a.** A repository audit found the structural reason Phase 1 reads as "a multi-LLM wrapper": memory is session-scoped (`memory(session_id, key)`) and the turn path never reads or writes it — there is nowhere to accumulate a person and no path to inject them. Phase 1.5 fixes that before Phase 2 needs the data: scoped (user/project/session/org) memory with provenance, a token-budgeted turn-time injection hook, an eval-event schema widened for task-type/domain/edit-diff, a per-user golden-set holdout, and a **memory write gate** (memory poisoning — OWASP ASI06 — persists past a session and must be gated like a tool call). The strategy is [`personalization-strategy`](personalization-strategy.md); tasks in [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md); memory schema/write-gate/injection contract in [`phase-1_5-memory-contracts`](../interface/phase-1_5-memory-contracts.md). The §6 "memory keyed by `sessionId` only" invariant is refined (not broken): it governs transcripts/usage/session-memory; user/org memory now survives session and project deletes.
 > v0.7 changes — **the Naby Layer is declared the single owner of projects, sessions, memory, and context.** Naby keeps its own canonical records in its runtime store (`app.db`) and serves every session/project/recent/pinned browsing UI *from that store* (§3.6). Provider-native stores (`~/.claude/projects`, …) stay strictly **below** the Naby Layer, read **only by the engine**, never by Naby's session/project UI. **Project** becomes a first-class Naby-owned entity (the store gains a `projects` table; sessions link to a project + provider). This resolves the open `[needs confirmation]` on how much of OpenCockpit's feature-agent survives (§2.3): the browsing UIs survive, but their **data source moves to the Naby store**. Existing `~/.cockpit/projects.json` is imported once into the Naby store on first run (no data loss). Full A→E realignment is in scope → [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md).
 > v0.6 changes — **the engine becomes a swappable backend, and the runtime layer becomes provider-independent.** Three refinements: (1) an **API key is per provider, with no personal/organization role** — the app just takes a provider's key. (2) **Memory, context, MCP, tools, the gate, and sessions are provider- and key-independent** — switching provider changes only which model answers; everything else carries over (§3.2, §3.3). (3) The **engine is an abstraction with two backends** behind one seam ("engine owns the loop; gate + executors + tools are injected"): **`AiSdkEngine`** (production, five providers) and **`ClaudeAgentSdkEngine`** (dev/test only, Claude via local OAuth, no API key, no metered cost) — both verified to attach our provider-independent gate and executors identically (§3.4).
 > v0.5 changes — **the engine pivot.** Five providers became mandatory (Anthropic, Bedrock Claude, Azure OpenAI, Gemini, OpenAI). Investigation showed that serving GPT/Gemini/Azure-OpenAI to the Claude Code engine over a translating gateway is unreliable and unsupported (§3.5), so the **execution engine changes from the Claude Agent SDK to Vercel AI SDK v7** — the only surveyed TS framework with first-party adapters for all five providers plus an ownable pre-execution approval gate (§3.3, §3.4). The approval gate moves from a Claude Code `PreToolUse` hook to **our own code inside the tool executor we own**. Tool executors are now **built in-house** (Phase 2). The OpenCockpit fork is kept for the UI shell and packaging; its engine layer is replaced. A side effect: AI SDK v7 does not persist sessions, so the local SQLite store (F1-05) becomes genuinely necessary rather than redundant — resolving a v0.4 contradiction.
@@ -108,7 +109,7 @@ flowchart TD
   subgraph RT["Agent Runtime — provider- and key-independent"]
     G["Approval gate — our code<br>allow / deny / modify-input"]
     F["Tool executors — in-house (Phase 2)"]
-    MEM["Memory / context / personalization store"]
+    MEM["Memory / context / personalization store<br>session-scoped in Phase 1 → user/project/session/org-scoped in Phase 1.5"]
     MCP["MCP registry"]
     H["Guardrails — block secrets · destructive commands"]
     J["Event logger — approval rate · edit distance · override rate"]
@@ -136,6 +137,7 @@ flowchart TD
 * Only `AiSdkEngine` reads the credential vault, and only to select the model.
 * **K is the Naby store — the single owner of projects, sessions, memory, and context (§3.6).** The session/project browsing UI reads projects and sessions *through K*, never from a provider-native store. Only the engine reads a provider's native store, and only to run a turn.
 * Runtime + `AiSdkEngine` + K are Phase 1; executors, guardrails, logger, and L are Phase 2.
+* **Memory is session-scoped in Phase 1 and the turn path does not yet read it. Phase 1.5 makes memory scoped (user/project/session/org) with provenance, adds a token-budgeted injection hook into the turn, and gates memory writes** — the substrate the extraction/injection loop (Phase 2b) learns from. → [`personalization-strategy`](personalization-strategy.md), [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md).
 * Source: original work (2026)
 
 ### 3.3 Auth model — one API key per provider
@@ -227,7 +229,9 @@ Risks owned by a single phase are tracked in that phase's document. Listed here 
 - **AI SDK major-version cadence** — a new major roughly every six months. → Wrap the SDK behind our own engine interface; run the gate regression suite on every bump. Patches are backported to prior majors, so upgrades have a runway rather than a cliff.
 - **Provider adapter drift** — five first-party adapters each track their provider's API independently. → Pin the AI SDK minor; a per-provider smoke test (one tool-using turn per provider) runs in CI so an adapter regression surfaces before release.
 - **Shared-key billing exposure** — when several users share one provider key, usage is pooled. → Per-user quota, cost caps, and key rotation are unsolved in this scope; see §6.
-- Phase-specific risks: packaging, signing, and update-path risks → [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md); prompt injection and 2b evaluation cost → [`phase-2-personalization-hitl`](../impl/phase-2-personalization-hitl.md).
+- **Memory poisoning (OWASP ASI06)** — once memory persists across sessions (Phase 1.5), a prompt injection that dies with a session no longer does: a poisoned memory item detonates weeks later, and session-level defenses (input screening, output filtering) do not catch it. → A **memory write gate** (trust tiers: user-utterance > artifact > external; external-origin never auto-confirms), per-item **provenance** for selective rollback, and a user-facing review/delete surface — all specified in Phase 1.5, which is why the write gate lands *before* any Phase 2 tool can read external content and write memory. → [`phase-1_5-memory-contracts`](../interface/phase-1_5-memory-contracts.md) §4, [`personalization-strategy`](personalization-strategy.md) §7.1.
+- **`app.db` encryption at rest** — deferred while the store held only transcripts; once Phase 1.5/2 hold personal preferences and draft/final text, it becomes a decision, not a deferral. → Tie to the in-house information-classification policy; tracked in §6 and each phase's open questions.
+- Phase-specific risks: packaging, signing, and update-path risks → [`phase-1-desktop-shell`](../impl/phase-1-desktop-shell.md); prompt injection and 2b evaluation cost → [`phase-2-personalization-hitl`](../impl/phase-2-personalization-hitl.md); the personalization data substrate and its poisoning defense → [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md).
 
 ---
 
@@ -237,6 +241,7 @@ Risks owned by a single phase are tracked in that phase's document. Listed here 
 |---|---|---|---|---|
 | Phase 0 | Fork feasibility spike (SPIKE-01…08) | go/no-go decision | S (~1 week, est.) | `phase-1-desktop-shell` · `phase-1-test-plan` |
 | Phase 1 | Electron desktop shell + chat + **AI SDK v7 engine + multi-provider API-key auth** | 3-OS installable app, chat round trip on ≥2 providers | L (est.) | `phase-1-desktop-shell` · `phase-1-shell-architecture` · `phase-1-contracts` · `phase-1-test-plan` |
+| **Phase 1.5** | **Personalization data layer** — scoped (user/project/session/org) memory with provenance, token-budgeted turn-time injection hook, eval-event schema (task-type/domain/edit-diff), per-user golden-set holdout, memory write gate | Substrate the Phase 2 loop learns from; session-delete no longer erases user memory | M (est.) | `personalization-strategy` · `phase-1_5-personalization-data-layer` · `phase-1_5-memory-contracts` |
 | Phase 2a | In-house tool executors + HITL approval gate + guardrails + deterministic metrics | Tool layer, approval gate, 3 metrics | L (est.) | `phase-2-personalization-hitl` |
 | Phase 2b | Asynchronous evaluation agent (LLM-judge) + score integration | Personalization score, side-by-side dashboard | M (est.) | `phase-2-personalization-hitl` |
 | (Later) Phase 3 | Memory contamination isolation, domain isolation, admin console, persona generation agent | Separate plan | — | — |

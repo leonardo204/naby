@@ -2,11 +2,11 @@
 id: phase-1-shell-architecture
 title: Phase 1 — Desktop Shell Technical Design
 type: design
-version: 0.3.0
+version: 0.3.1
 status: draft
 scope: Technical design for the Phase 1 shell — Electron process model, embedded Next server, engine abstraction (AI SDK v7 prod / Agent SDK dev), provider adapters, secret storage, the Naby store as owner of projects/sessions, browsing-UI API re-backing, localhost hardening, packaging and update pipeline
-related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-contracts, phase-1-test-plan]
-updated: 2026-07-21
+related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-contracts, phase-1-test-plan, phase-1_5-personalization-data-layer]
+updated: 2026-07-23
 ---
 
 # Phase 1 — Desktop Shell Technical Design
@@ -44,7 +44,7 @@ flowchart LR
 
 **Everything privileged lives in main.** The renderer keeps Electron 43 defaults — `contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`, `webSecurity: true` `[V]`. A sandboxed preload still gets `contextBridge` and `ipcRenderer` `[V]`, which is all the bridge needs, so the sandbox stays on.
 
-**The runtime is provider-independent; only the engine and its provider adapter touch a key.** The gate, executors, memory, MCP registry, and session store never see a provider or a key — the engine is the sole boundary at which a provider is selected (design §3.4).
+**The runtime is provider-independent; only the engine and its provider adapter touch a key.** The gate, executors, memory, MCP registry, and session store never see a provider or a key — the engine is the sole boundary at which a provider is selected (design §3.4). *(The memory store is session-scoped in Phase 1; Phase 1.5 makes it scoped/injected/gated without changing this process model — [`phase-1_5-personalization-data-layer`](../impl/phase-1_5-personalization-data-layer.md).)*
 
 Bridge constraints `[V]`: structured clone governs every payload — symbols and prototypes are dropped, and an error thrown in an `ipcMain.handle` handler reaches the renderer with only its `.message`. Error taxonomy therefore has to travel as data, not as exception types (see [`phase-1-contracts`](../interface/phase-1-contracts.md)). Never expose `ipcRenderer` wholesale, and validate `event.senderFrame` against an allowlist in every handler `[V]`.
 

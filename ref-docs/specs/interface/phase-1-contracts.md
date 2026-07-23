@@ -2,11 +2,11 @@
 id: phase-1-contracts
 title: Phase 1 — Interface Contracts (IPC, engine interface, provider config, storage)
 type: interface
-version: 0.3.0
+version: 0.4.0
 status: draft
 scope: Contracts between renderer and main, the engine abstraction seam and its two backends, the gate contract, the provider configuration schema, the Store interface (incl. projects and session↔project links), the re-backed browsing HTTP routes, and the on-disk storage layout for Phase 1
-related: [phase-1-shell-architecture, phase-1-desktop-shell, phase-1-test-plan, personalized-agent-desktop-app]
-updated: 2026-07-21
+related: [phase-1-shell-architecture, phase-1-desktop-shell, phase-1-test-plan, personalized-agent-desktop-app, phase-1_5-memory-contracts]
+updated: 2026-07-23
 ---
 
 # Phase 1 — Interface Contracts
@@ -200,7 +200,7 @@ The runtime depends on a narrow `Store` interface, not on a driver. The F1-05 dr
 | Provider keys | OS keychain via `safeStorage` | main | One per provider; verify backend ≠ `basic_text` on Linux before writing |
 | Provider profiles | `userData/providers.json` | main | No secrets — only `credentialRef` |
 | **Conversation transcripts** | `userData/app.db` (SQLite) | **the runtime** | We store and replay history; provider-independent. **Also the source for the UI's transcript view** (§8) — never a provider `.jsonl` |
-| **Memory / context** | `userData/app.db` (SQLite) | **the runtime** | Keyed to user/session, **not** to provider or key |
+| **Memory / context** | `userData/app.db` (SQLite) | **the runtime** | Keyed to user/session, **not** to provider or key. Phase 1: session-scoped `memory(session_id, key)`. **Phase 1.5 extends this to scoped (user/project/session/org) memory with provenance — see [`phase-1_5-memory-contracts`](phase-1_5-memory-contracts.md); user/org memory is exempt from the session/project cascades below** |
 | Session index | `userData/app.db` (SQLite) | the runtime | `SessionRef` — now carries `cwd`/`pinned`/`status` |
 | **Projects** | `userData/app.db` (SQLite) | **the runtime** | `Project` (§6.1). Naby-owned; the session/project UI reads these, never `~/.cockpit/projects.json` |
 | MCP registry | `userData/app.db` (SQLite) | the runtime | `McpEntry[]`, provider-independent |
@@ -257,9 +257,10 @@ interface Store {
    *  last_opened_at = now); otherwise applies `patch`. Idempotent. */
   upsertProject(cwd: string, patch?: Partial<Omit<Project, 'cwd' | 'createdAt'>>): Project;
   /** Delete the project AND CASCADE: every session with this cwd, and each of
-   *  those sessions' messages + memory + usage. A project delete never leaves
-   *  orphaned session state. Sessions are NOT reparented — deleting a project
-   *  deletes its sessions. */
+   *  those sessions' messages + usage + SESSION-SCOPED memory. A project delete
+   *  never leaves orphaned session state. Sessions are NOT reparented — deleting
+   *  a project deletes its sessions. Phase 1.5: user/org-scoped memory is NOT
+   *  cascaded (phase-1_5-memory-contracts §6). */
   removeProject(cwd: string): void;
   /** Mark the project opened now (bumps last_opened_at → front of the MRU list).
    *  Creates it if absent, so opening a new directory needs no prior upsert. */
@@ -284,8 +285,8 @@ interface Store {
 **Guarantees.**
 
 - **MRU ordering is a contract, not an incidental sort.** `listProjects()` is `last_opened_at DESC`; `listSessions()`, `listSessionsByProject()`, and `listPinnedSessions()` are `last_used_at DESC`. `touchProject`/`touchSession` move an item to the front. The re-backed `/api/global-state` (recent) and `/api/projects` rely on this (§8).
-- **CASCADE is total and explicit.** `removeProject(cwd)` deletes the project's sessions and each session's messages, memory, and usage — mirroring `deleteSession`'s existing explicit cascade (FK enforcement stays off; the store cascades in code).
-- **`cwd` is a link, not a new key.** Messages, memory, and usage remain keyed by `sessionId` only (§6 keying invariant). `setSessionProject` changes the owning-project link and nothing else; a projectless session (`cwd` absent) is fully valid.
+- **CASCADE is total and explicit** *(for session-scoped state)*. `removeProject(cwd)` deletes the project's sessions and each session's messages, usage, and **session-scoped** memory — mirroring `deleteSession`'s existing explicit cascade (FK enforcement stays off; the store cascades in code). **Phase 1.5 exemption:** user- and org-scoped memory are NOT session- or project-owned and MUST survive both cascades — see [`phase-1_5-memory-contracts`](phase-1_5-memory-contracts.md) §2/§6.
+- **`cwd` is a link, not a new key.** Messages, usage, and **session-scoped** memory remain keyed by `sessionId` only (§6 keying invariant — this governs transcripts/usage/session-memory, and is refined, not broken, by Phase 1.5's user/project/org scopes). `setSessionProject` changes the owning-project link and nothing else; a projectless session (`cwd` absent) is fully valid.
 - **`providerId` stays a hint.** A session still records the last provider that answered; linking it to a project does not constrain which provider may answer next (design §3.4).
 
 ---

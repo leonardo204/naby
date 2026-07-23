@@ -2,11 +2,11 @@
 id: phase-1-desktop-shell
 title: Phase 1 — Chat-first Desktop Shell (incl. Phase 0 spike)
 type: impl
-version: 0.4.0
+version: 0.4.1
 status: review
 scope: Phase 0 feasibility spike and Phase 1 execution — Electron packaging of the OpenCockpit fork, chat-first trimming, the engine abstraction (AI SDK v7 prod + Agent SDK dev/test), per-provider API-key auth, provider-independent runtime scaffold, local SQLite sessions, and the Naby-store realignment (projects/sessions ownership + browsing-UI re-backing)
-related: [personalized-agent-desktop-app, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-2-personalization-hitl]
-updated: 2026-07-21
+related: [personalized-agent-desktop-app, phase-1-shell-architecture, phase-1-contracts, phase-1-test-plan, phase-1_5-personalization-data-layer, phase-2-personalization-hitl]
+updated: 2026-07-23
 ---
 
 # Phase 1 — Chat-first Desktop Shell
