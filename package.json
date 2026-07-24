@@ -34,6 +34,7 @@
     "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",
     "spike:add-mcp": "npm run build:runtime && tsx src/spikes/spike-add-mcp.ts",
     "spike:fetch-url": "npm run build:runtime && tsx src/spikes/spike-fetch-url.ts",
+    "spike:multimodal": "tsx src/spikes/spike-multimodal.ts",
     "spike:claude-auth": "tsx src/spikes/spike-claude-auth.ts",
     "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build:app && node scripts/build-dist.mjs --publish never",

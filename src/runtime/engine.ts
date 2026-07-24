@@ -100,11 +100,26 @@ export type ModelSelection = {
 //     reject an orphan tool result. Carrying the name makes tool results
 //     self-describing and round-trippable across a provider switch.
 
+/** A base64 image attached to a user turn (multimodal input). `data` is raw
+ *  base64 (no `data:` prefix); `media_type` is an image MIME type. Carried on the
+ *  user RuntimeMessage so both engines can build a provider-native image block.
+ *  Transient by default — runTurn attaches this turn's images to the just-appended
+ *  user message WITHOUT persisting them, so a 5 MB paste is not re-sent every turn
+ *  nor stored on disk (see session.ts). */
+export type RuntimeImage = {
+  /** e.g. 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'. */
+  media_type: string;
+  /** base64, no `data:` prefix. */
+  data: string;
+};
+
 export type RuntimeMessage =
   | {
       role: 'user' | 'assistant';
       content: string;
       toolCalls?: ToolCall[];
+      /** Images on a USER turn (multimodal). Absent on assistant/tool. */
+      images?: RuntimeImage[];
     }
   | {
       role: 'tool';

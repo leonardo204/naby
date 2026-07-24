@@ -15,6 +15,7 @@ import type {
   Executor,
   Gate,
   ModelSelection,
+  RuntimeImage,
   ToolOutput,
   ToolSchema,
 } from './engine.js';
@@ -33,6 +34,11 @@ export type RunTurnOptions = {
   sessionId: string;
   model: ModelSelection;
   userText: string;
+  /** Images attached to THIS user turn (multimodal input). Attached to the
+   *  just-appended user message for the engine to build a native image block —
+   *  TRANSIENT: not persisted (so a large paste is neither stored on disk nor
+   *  replayed on every later turn) and not part of the reloaded transcript. */
+  images?: RuntimeImage[];
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
   gate: Gate;
@@ -246,11 +252,27 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     });
   };
 
+  // Read the transcript back from the store: after F1-05 this may have come
+  // from disk, written by a previous process and possibly a different engine.
+  // Then attach THIS turn's images to the just-appended (last) user message —
+  // TRANSIENTLY: the store copy stays text-only, so images ride this one turn
+  // to the engine without being persisted or replayed later. Attaching before
+  // the loop keeps the engine seam unchanged (it just sees a user message that
+  // happens to carry images).
+  const turnMessages = store.getMessages(sessionId);
+  if (opts.images && opts.images.length > 0) {
+    for (let i = turnMessages.length - 1; i >= 0; i -= 1) {
+      const m = turnMessages[i];
+      if (m && m.role === 'user') {
+        turnMessages[i] = { ...m, images: opts.images };
+        break;
+      }
+    }
+  }
+
   for await (const ev of engine.run({
     model,
-    // Read the transcript back from the store: after F1-05 this may have come
-    // from disk, written by a previous process and possibly a different engine.
-    messages: store.getMessages(sessionId),
+    messages: turnMessages,
     ...(effectiveSystem !== undefined ? { system: effectiveSystem } : {}),
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     toolSchemas,

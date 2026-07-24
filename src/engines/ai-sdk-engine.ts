@@ -167,7 +167,22 @@ export function toModelMessages(messages: readonly RuntimeMessage[]): ModelMessa
     }
 
     if (m.role === 'user') {
-      out.push({ role: 'user', content: m.content });
+      // Multimodal: a user turn with images becomes a content-part array — the
+      // text (if any) plus one image part per attachment, encoded as a data URL
+      // the AI-SDK adapter maps to each provider's native image input (OpenAI
+      // Responses `input_image`, Anthropic image block, …). No images → plain
+      // string, byte-identical to before.
+      if (m.images && m.images.length > 0) {
+        type UserContent = Exclude<Extract<ModelMessage, { role: 'user' }>['content'], string>;
+        const content: UserContent = [];
+        if (m.content) content.push({ type: 'text', text: m.content });
+        for (const img of m.images) {
+          content.push({ type: 'image', image: `data:${img.media_type};base64,${img.data}` });
+        }
+        out.push({ role: 'user', content });
+      } else {
+        out.push({ role: 'user', content: m.content });
+      }
       continue;
     }
 

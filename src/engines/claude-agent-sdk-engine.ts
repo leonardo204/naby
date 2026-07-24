@@ -56,12 +56,14 @@ import type {
   HookInput,
   PreToolUseHookInput,
   PreToolUseHookSpecificOutput,
+  SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type {
   Engine,
   EngineEvent,
   EngineRunInput,
   JsonSchema,
+  RuntimeImage,
   RuntimeMessage,
   ToolCall,
   Usage,
@@ -444,6 +446,51 @@ export function renderPrompt(messages: EngineRunInput['messages']): string {
   ].join('\n');
 }
 
+/** The images on the newest user turn, or undefined. `runTurn` attaches this
+ *  turn's images to the last user message (session.ts). */
+function lastUserImages(messages: EngineRunInput['messages']): RuntimeImage[] | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m?.role === 'user') return m.images;
+  }
+  return undefined;
+}
+
+/**
+ * The prompt for `query()`. Text-only turns stay a plain STRING (byte-identical
+ * to before). A turn with images becomes a one-shot `AsyncIterable<SDKUserMessage>`
+ * whose content is the rendered text plus an Anthropic base64 image block per
+ * attachment — the only prompt shape the SDK accepts images on. The single yield
+ * then completes, which ends the streaming input and runs exactly one turn.
+ */
+export function buildAgentPrompt(
+  messages: EngineRunInput['messages'],
+): string | AsyncIterable<SDKUserMessage> {
+  const text = renderPrompt(messages);
+  const images = lastUserImages(messages);
+  if (!images || images.length === 0) return text;
+
+  const content = [
+    ...(text ? [{ type: 'text' as const, text }] : []),
+    ...images.map((img) => ({
+      type: 'image' as const,
+      source: {
+        type: 'base64' as const,
+        media_type: img.media_type as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
+        data: img.data,
+      },
+    })),
+  ];
+  const userMessage = {
+    type: 'user',
+    parent_tool_use_id: null,
+    message: { role: 'user', content },
+  } as SDKUserMessage;
+  return (async function* () {
+    yield userMessage;
+  })();
+}
+
 // ---------------------------------------------------------------------------
 // HARNESS MESSAGES — the ones the driver loop used to drop on the floor.
 // ---------------------------------------------------------------------------
@@ -792,7 +839,7 @@ export class ClaudeAgentSdkEngine implements Engine {
     else input.signal.addEventListener('abort', () => ac.abort(), { once: true });
 
     const q = query({
-      prompt: renderPrompt(input.messages),
+      prompt: buildAgentPrompt(input.messages),
       // Built by the exported pure function above, so the EXACT object this
       // production path sends can be asserted without a model call.
       options: buildQueryOptions({
