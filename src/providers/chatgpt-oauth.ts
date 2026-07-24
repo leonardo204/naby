@@ -58,6 +58,15 @@ export const CHATGPT_CALLBACK_PATH = '/auth/callback';
 export const CHATGPT_OAUTH_ENABLE_FLAG = 'NABY_ENABLE_CHATGPT_OAUTH';
 /** The provider id / kind under which tokens live in the vault. */
 export const CHATGPT_OAUTH_PROVIDER_ID = 'openai-chatgpt-oauth';
+/**
+ * The default subscription model when a turn requests none. This is the CODEX
+ * backend's current agentic default (`gpt-5.6-sol`, openclaw's
+ * `OPENAI_CODEX_DEFAULT_MODEL`). The older `gpt-5-codex` slug is REJECTED by the
+ * ChatGPT-account codex backend — 400 `"The 'gpt-5-codex' model is not supported
+ * when using Codex with a ChatGPT account."` — because the catalog moved to the
+ * gpt-5.6 family. A user may still override with any slug their account exposes.
+ */
+export const CHATGPT_OAUTH_DEFAULT_MODEL = 'gpt-5.6-sol';
 
 /** JWT custom claim namespace carrying the ChatGPT account id + plan. */
 const AUTH_CLAIM = 'https://api.openai.com/auth';
@@ -433,6 +442,186 @@ export function forceStoreFalse(body: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// store:false + stream:true body injection (spec §4 — the codex backend REJECTS
+// BOTH `store:true` AND a non-streaming request: `400 "Stream must be set to
+// true"`). The AI-SDK OpenAI-responses adapter, driven by `generateText`, sends
+// a NON-streaming request (`stream:false`/omitted) and expects a JSON body back.
+// So the transport (a) forces `store:false`+`stream:true` on the wire, then (b)
+// aggregates the SSE stream back into the single JSON Response the adapter
+// expects (see makeChatgptFetch / aggregateResponsesSse). Isolated here so the
+// engine and the five metered providers never see any of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Force `store:false` and `stream:true` into a JSON request body. Returns the
+ * rewritten body and whether WE turned streaming on (i.e. the caller had not
+ * already asked to stream) — which is the signal that the SSE response must be
+ * aggregated back to JSON. A non-JSON body is returned untouched, never forced.
+ */
+export function forceCodexBody(body: string): { body: string; streamForced: boolean } {
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const alreadyStreaming = parsed.stream === true;
+      parsed.store = false;
+      parsed.stream = true;
+      return { body: JSON.stringify(parsed), streamForced: !alreadyStreaming };
+    }
+    return { body, streamForced: false };
+  } catch {
+    return { body, streamForced: false };
+  }
+}
+
+/** A terminal Responses SSE type carrying the final `response` object. */
+const RESPONSES_TERMINAL_TYPES = new Set([
+  'response.completed',
+  'response.done',
+  'response.incomplete',
+]);
+
+/**
+ * Consume a Responses-API SSE stream and return the single non-streaming JSON
+ * Response the AI-SDK adapter expects.
+ *
+ * IMPORTANT — the codex backend STREAMS the output incrementally and its
+ * terminal `response.completed` event carries an EMPTY `output: []` (the items
+ * were already delivered as `response.output_item.done` events). A non-streaming
+ * caller needs the full `output` array, so we ASSEMBLE it here: every
+ * `response.output_item.done` item is collected by its output_index, and on the
+ * terminal event we splice the assembled items into `response.output` when the
+ * terminal's own output is empty. The result is the exact shape a non-streaming
+ * `/responses` call returns, so the adapter parses it unchanged.
+ *
+ * An `error`/`response.failed` event (or a stream that ends with no terminal)
+ * becomes a 4xx/502 JSON error Response so the adapter surfaces it like a normal
+ * API error (no silent empty turn). SSE framing mirrors the codex client: events
+ * split on a blank line, `data:` lines joined, `[DONE]` ignored. Exported for
+ * unit testing.
+ */
+export async function aggregateResponsesSse(res: Response): Promise<Response> {
+  const jsonHeaders = { 'content-type': 'application/json' } as const;
+  if (!res.body) {
+    return new Response(
+      JSON.stringify({ error: { message: 'ChatGPT backend returned no response body' } }),
+      { status: 502, headers: jsonHeaders },
+    );
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  // Assembled output items, keyed by output_index so order is preserved and a
+  // re-emitted item replaces (not duplicates) its earlier copy.
+  const items = new Map<number, unknown>();
+  let itemSeq = 0;
+
+  const parseEventData = (chunk: string): Record<string, unknown> | null => {
+    const dataLines = chunk
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trim());
+    if (dataLines.length === 0) return null;
+    const data = dataLines.join('\n').trim();
+    if (!data || data === '[DONE]') return null;
+    try {
+      return JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+
+  const assembledOutput = (): unknown[] =>
+    [...items.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
+
+  const handleEvent = (event: Record<string, unknown>): Response | null => {
+    const type = typeof event.type === 'string' ? event.type : undefined;
+    if (!type) return null;
+
+    // A completed output item (assistant message, function call, reasoning) in
+    // its full final shape — this is where the codex backend actually delivers
+    // the content, not in the terminal event.
+    if (type === 'response.output_item.done') {
+      const item = (event as { item?: unknown }).item;
+      if (item && typeof item === 'object') {
+        const idxRaw = (event as { output_index?: unknown }).output_index;
+        const idx = typeof idxRaw === 'number' ? idxRaw : itemSeq;
+        items.set(idx, item);
+        itemSeq = Math.max(itemSeq, idx + 1);
+      }
+      return null;
+    }
+
+    if (type === 'error' || type === 'response.failed') {
+      const nested =
+        event.error && typeof event.error === 'object' ? (event.error as Record<string, unknown>) : undefined;
+      const respErr = (event as { response?: { error?: { message?: string } } }).response?.error;
+      const message =
+        (typeof event.message === 'string' ? event.message : undefined) ??
+        (typeof nested?.message === 'string' ? nested.message : undefined) ??
+        respErr?.message ??
+        'ChatGPT backend stream error';
+      return new Response(JSON.stringify({ error: { message } }), { status: 400, headers: jsonHeaders });
+    }
+
+    if (RESPONSES_TERMINAL_TYPES.has(type)) {
+      const response = (event as { response?: unknown }).response;
+      if (response && typeof response === 'object') {
+        const resp = response as Record<string, unknown>;
+        // Splice the assembled items in when the terminal's own output is empty
+        // (the codex case); keep a non-empty terminal output as authoritative.
+        const termOut = Array.isArray(resp.output) ? (resp.output as unknown[]) : [];
+        if (termOut.length === 0 && items.size > 0) {
+          resp.output = assembledOutput();
+        }
+        return new Response(JSON.stringify(resp), { status: 200, headers: jsonHeaders });
+      }
+      return new Response(
+        JSON.stringify({ error: { message: 'ChatGPT backend terminal event had no response object' } }),
+        { status: 502, headers: jsonHeaders },
+      );
+    }
+    return null;
+  };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = buffer.indexOf('\n\n');
+      while (idx !== -1) {
+        const chunk = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const event = parseEventData(chunk);
+        if (event) {
+          const out = handleEvent(event);
+          if (out) return out;
+        }
+        idx = buffer.indexOf('\n\n');
+      }
+    }
+    // Flush a trailing event with no blank-line terminator.
+    if (buffer.trim()) {
+      const event = parseEventData(buffer);
+      if (event) {
+        const out = handleEvent(event);
+        if (out) return out;
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* nothing to release */
+    }
+  }
+  return new Response(
+    JSON.stringify({ error: { message: 'ChatGPT backend stream ended before completion' } }),
+    { status: 502, headers: jsonHeaders },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The custom fetch (the AiSdkEngine custom transport — spec §8)
 // ---------------------------------------------------------------------------
 
@@ -547,11 +736,14 @@ export type ChatgptFetchOptions = {
   fedramp?: boolean;
 };
 
-/** Overlay our auth/query headers + store:false onto a request init. */
+/** Overlay our auth/query headers + store:false + stream:true onto a request
+ *  init. `streamForced` (WE turned streaming on) adds the SSE Accept header the
+ *  backend needs; the response is then aggregated back to JSON in makeChatgptFetch. */
 function injectRequest(
   init: RequestInit | undefined,
   token: { accessToken: string; accountId: string },
   opts: ChatgptFetchOptions,
+  streamForced: boolean,
 ): RequestInit {
   const headers = new Headers(init?.headers);
   const injected = buildQueryHeaders({
@@ -565,10 +757,12 @@ function injectRequest(
   });
   // Our headers WIN over anything the adapter set (e.g. a dummy Bearer key).
   for (const [k, v] of Object.entries(injected)) headers.set(k, v);
+  // The codex backend streams SSE; ask for it when we forced streaming on.
+  if (streamForced) headers.set('accept', 'text/event-stream');
 
   const next: RequestInit = { ...init, headers };
   if (typeof init?.body === 'string') {
-    next.body = forceStoreFalse(init.body);
+    next.body = forceCodexBody(init.body).body;
   }
   return next;
 }
@@ -576,8 +770,11 @@ function injectRequest(
 /**
  * Build the custom `fetch` for `createOpenAI({ fetch })`. On every call it:
  *   1. `ensureFreshToken()` (refreshes if within the skew window),
- *   2. injects the §4 headers + forces `store:false`,
- *   3. on a live 401, `refreshNow()` and retries ONCE.
+ *   2. injects the §4 headers + forces `store:false` AND `stream:true`,
+ *   3. on a live 401, `refreshNow()` and retries ONCE,
+ *   4. AGGREGATES the forced SSE stream back into the single JSON Response the
+ *      non-streaming AI-SDK adapter expects (the backend rejects a non-streaming
+ *      request: `400 "Stream must be set to true"`).
  *
  * It matches `typeof globalThis.fetch`, so it drops straight into the adapter.
  */
@@ -587,13 +784,63 @@ export function makeChatgptFetch(
 ): typeof globalThis.fetch {
   const underlying = opts.fetch ?? globalThis.fetch;
   const doFetch: typeof globalThis.fetch = async (input, init) => {
+    // Whether WE turn streaming on — stable across the 401 retry (same body).
+    const streamForced =
+      typeof init?.body === 'string' ? forceCodexBody(init.body).streamForced : false;
     const token = await source.ensureFreshToken();
-    const res = await underlying(input, injectRequest(init, token, opts));
-    if (res.status !== 401) return res;
-    // A 401 despite a "fresh" token means the access token was rejected — force
-    // a refresh and retry exactly once. A second 401 surfaces to the caller.
-    const refreshed = await source.refreshNow();
-    return underlying(input, injectRequest(init, refreshed, opts));
+    let res = await underlying(input, injectRequest(init, token, opts, streamForced));
+    if (res.status === 401) {
+      // A 401 despite a "fresh" token means the access token was rejected — force
+      // a refresh and retry exactly once. A second 401 surfaces to the caller.
+      const refreshed = await source.refreshNow();
+      res = await underlying(input, injectRequest(init, refreshed, opts, streamForced));
+    }
+    // DEV-ONLY diagnostics: on any non-2xx, surface the backend's error body so a
+    // failing subscription turn is debuggable instead of a silent "no response".
+    // NEVER logs token material — only method/url/status and the error body (and
+    // the outgoing request body, which carries the prompt/model, no credential).
+    if (!res.ok) {
+      try {
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const url =
+          typeof input === 'string'
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : (input as Request).url;
+        const reqBody = typeof init?.body === 'string' ? forceCodexBody(init.body).body : '';
+        const errText = await res.clone().text();
+        console.error(
+          `[chatgpt-oauth] backend ${res.status} ${res.statusText} ${method} ${url}\n` +
+            `  request: ${reqBody.slice(0, 800)}\n` +
+            `  response: ${errText.slice(0, 1200)}`,
+        );
+      } catch {
+        /* diagnostics must never break the request */
+      }
+      return res;
+    }
+    // Success. When WE forced streaming, the body is a Responses SSE stream but
+    // the adapter is expecting one JSON object — aggregate the terminal event's
+    // full `response` back into a plain JSON Response. When the caller asked to
+    // stream itself (streamForced=false), pass the SSE through untouched.
+    if (streamForced) {
+      const aggregated = await aggregateResponsesSse(res);
+      // A non-2xx aggregated status is a backend/stream failure (error event,
+      // truncated stream) — surface it to the terminal like the raw-fetch path,
+      // never the success body (which carries the model's answer, not a secret
+      // but pure noise on every turn).
+      if (!aggregated.ok) {
+        try {
+          const errText = await aggregated.clone().text();
+          console.error(`[chatgpt-oauth] aggregated ${aggregated.status}: ${errText.slice(0, 800)}`);
+        } catch {
+          /* diagnostics must never break the request */
+        }
+      }
+      return aggregated;
+    }
+    return res;
   };
   return doFetch;
 }

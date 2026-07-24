@@ -28,6 +28,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModelV4 } from '@ai-sdk/provider';
 import {
+  CHATGPT_OAUTH_DEFAULT_MODEL,
   CHATGPT_QUERY_BASE_URL,
   isChatgptOauthEnabled,
   makeChatgptFetch,
@@ -414,8 +415,8 @@ export function describeProviders(env: NodeJS.ProcessEnv = process.env): Provide
       label: 'ChatGPT (subscription, dev-only — ToS caveat)',
       configFields: [],
       credentialKinds: ['chatgpt-oauth'],
-      modelMeaning: 'ChatGPT/Codex model slug, e.g. gpt-5-codex or gpt-5.1-codex',
-      defaultModel: 'gpt-5-codex',
+      modelMeaning: 'ChatGPT/Codex model slug, e.g. gpt-5.6-sol or gpt-5.6',
+      defaultModel: CHATGPT_OAUTH_DEFAULT_MODEL,
       // Not a plain API-key env: the credential is an OAuth token set in the
       // vault. Named so the "developers can also set …" copy stays coherent; the
       // resolver skips this kind (no 'api-key'), so it never reads this var.

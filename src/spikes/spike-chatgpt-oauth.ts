@@ -27,6 +27,8 @@ import {
   extractExpiryMs,
   buildQueryHeaders,
   forceStoreFalse,
+  forceCodexBody,
+  aggregateResponsesSse,
   expiresAtFrom,
   isTokenExpired,
   applyRefreshResponse,
@@ -146,6 +148,87 @@ function makeJwt(payload: Record<string, unknown>): string {
     `wasTrue→${parsed.store} absent→${parsedAdded.store} nonJson="${nonJson}"`,
   );
 }
+
+// -- (d2) stream:true forcing + SSE→JSON aggregation ------------------------
+{
+  // forceCodexBody sets store:false AND stream:true, and reports whether IT
+  // turned streaming on (the aggregation signal).
+  const forced = forceCodexBody('{"model":"gpt-5.6-sol","input":[]}');
+  const fp = JSON.parse(forced.body) as { store: boolean; stream: boolean };
+  const already = forceCodexBody('{"model":"x","stream":true}');
+  const ap = JSON.parse(already.body) as { stream: boolean };
+  const nonJson = forceCodexBody('not json');
+  const ok =
+    fp.store === false &&
+    fp.stream === true &&
+    forced.streamForced === true &&
+    ap.stream === true &&
+    already.streamForced === false &&
+    nonJson.body === 'not json' &&
+    nonJson.streamForced === false;
+  check(
+    '(d2) forceCodexBody sets store:false+stream:true; flags stream forcing; non-JSON untouched',
+    ok,
+    `store→${fp.store} stream→${fp.stream} forced→${forced.streamForced} already→${already.streamForced}`,
+  );
+}
+
+// -- (d3) aggregateResponsesSse: terminal event → JSON; error → 4xx ----------
+await (async () => {
+  const sse = (events: string[]): Response =>
+    new Response(events.join(''), { headers: { 'content-type': 'text/event-stream' } });
+  // A completed stream: deltas then response.completed carrying the full object.
+  const completed = sse([
+    'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+    'data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message"}],"usage":{"input_tokens":3}}}\n\n',
+    'data: [DONE]\n\n',
+  ]);
+  const aggregated = await aggregateResponsesSse(completed);
+  const body = (await aggregated.json()) as { id?: string; usage?: { input_tokens?: number } };
+  const okDone = aggregated.status === 200 && body.id === 'resp_1' && body.usage?.input_tokens === 3;
+
+  // THE CODEX CASE: output is delivered as output_item.done events; the terminal
+  // response.completed carries an EMPTY output:[] — the items must be spliced in,
+  // in output_index order.
+  const codexStyle = sse([
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning"}}\n\n',
+    'data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]}}\n\n',
+    'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","summary":[]}}\n\n',
+    'data: {"type":"response.completed","response":{"id":"resp_2","output":[],"usage":{"input_tokens":5}}}\n\n',
+    'data: [DONE]\n\n',
+  ]);
+  const aggCodex = await aggregateResponsesSse(codexStyle);
+  const codexBody = (await aggCodex.json()) as {
+    id?: string;
+    output?: { type?: string; content?: { text?: string }[] }[];
+  };
+  const okCodex =
+    aggCodex.status === 200 &&
+    codexBody.id === 'resp_2' &&
+    codexBody.output?.length === 2 &&
+    // spliced in output_index order: reasoning(0) then message(1)
+    codexBody.output?.[0]?.type === 'reasoning' &&
+    codexBody.output?.[1]?.content?.[0]?.text === 'world';
+
+  // A failed stream surfaces as a 4xx JSON error, not a silent empty turn.
+  const failed = sse([
+    'data: {"type":"response.failed","response":{"error":{"message":"boom"}}}\n\n',
+  ]);
+  const aggFail = await aggregateResponsesSse(failed);
+  const failBody = (await aggFail.json()) as { error?: { message?: string } };
+  const okFail = aggFail.status === 400 && failBody.error?.message === 'boom';
+
+  // A stream that ends with no terminal event is a 502, never a 200-with-nothing.
+  const truncated = sse(['data: {"type":"response.output_text.delta","delta":"x"}\n\n']);
+  const aggTrunc = await aggregateResponsesSse(truncated);
+  const okTrunc = aggTrunc.status === 502;
+
+  check(
+    '(d3) aggregateResponsesSse: completed→200, codex empty-output→spliced items, failed→400, truncated→502',
+    okDone && okCodex && okFail && okTrunc,
+    `done=${aggregated.status}/${body.id} codex=${aggCodex.status}/${codexBody.output?.length}items fail=${aggFail.status}/${failBody.error?.message} trunc=${aggTrunc.status}`,
+  );
+})();
 
 // -- (e) expiry math --------------------------------------------------------
 {

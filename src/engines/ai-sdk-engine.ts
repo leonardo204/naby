@@ -371,9 +371,19 @@ export class AiSdkEngine implements Engine {
           // Passing a multi-step stopWhen would let the SDK drive the loop.
         });
       } catch (e) {
+        // DEV diagnostic: the model step threw (e.g. the provider adapter could
+        // not parse the response, an auth/quota error, an aborted turn). Surface
+        // it to the terminal so a "no visible answer" turn is debuggable; the UI
+        // still gets the error event below.
+        const msg = e instanceof Error ? e.message : String(e);
+        const detail =
+          e && typeof e === 'object' && 'cause' in e && (e as { cause?: unknown }).cause
+            ? ` | cause: ${String((e as { cause?: unknown }).cause)}`
+            : '';
+        console.error(`[ai-sdk-engine] model step threw: ${msg}${detail}`);
         yield {
           kind: 'error',
-          message: e instanceof Error ? e.message : String(e),
+          message: msg,
           code: 'ENGINE_THREW',
         };
         yield { kind: 'result', ok: false, usage };
