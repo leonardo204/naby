@@ -197,8 +197,11 @@ export {
 
 // Which engine answers a turn, and the sentence that explains it to a user.
 export {
+  CHATGPT_OAUTH_COST_BASIS,
+  CHATGPT_OAUTH_LABEL,
   DEV_ENGINE_LABEL,
   ENGINE_ENV_VAR,
+  isChatgptOauthAvailable,
   noEngineMessage,
   preflightEngine,
   selectEngine,
@@ -208,6 +211,56 @@ export {
   type EngineSelection,
   type SelectEngineOptions,
 } from './engines/select.js';
+
+// DEV-ONLY, FLAG-SEALED ChatGPT subscription-OAuth (spec chatgpt-oauth-dev-provider).
+// Exported pure core: PKCE, JWT account-id extraction, query-header assembly,
+// store:false injection, expiry/refresh-rotation, the runtime flag gate, and the
+// custom transport fetch. Constructing anything here is inert unless the seal is
+// open (`isChatgptOauthEnabled`); with the flag off — the default — the provider
+// is never OFFERED (describeProviders/isChatgptOauthAvailable), so this is dead
+// code in an official build. NOTHING here claims OpenAI endorsement.
+export {
+  applyRefreshResponse,
+  base64UrlEncode,
+  buildAuthorizeUrl,
+  buildQueryHeaders,
+  buildRefreshBody,
+  buildTokenExchangeBody,
+  CHATGPT_AUTHORIZE_URL,
+  CHATGPT_CALLBACK_FALLBACK_PORT,
+  CHATGPT_CALLBACK_PATH,
+  CHATGPT_CALLBACK_PORT,
+  CHATGPT_CLIENT_ID,
+  CHATGPT_OAUTH_ENABLE_FLAG,
+  CHATGPT_OAUTH_PROVIDER_ID,
+  CHATGPT_ORIGINATOR,
+  CHATGPT_QUERY_BASE_URL,
+  CHATGPT_REVOKE_URL,
+  CHATGPT_SCOPE,
+  CHATGPT_TOKEN_URL,
+  decodeJwtPayload,
+  expiresAtFrom,
+  extractAccountId,
+  extractEmail,
+  extractExpiryMs,
+  extractIsFedramp,
+  forceStoreFalse,
+  generatePkce,
+  generateState,
+  isChatgptOauthEnabled,
+  isPermanentRefreshFailure,
+  isTokenExpired,
+  makeChatgptFetch,
+  PERMANENT_REFRESH_FAILURES,
+  REFRESH_SKEW_MS,
+  tokensFromExchange,
+  type ChatgptFetchOptions,
+  type ChatgptOauthTokens,
+  type ChatgptTokenResponse,
+  type ChatgptTokenSource,
+  type PkcePair,
+  type QueryHeaderOptions,
+} from './providers/chatgpt-oauth.js';
 
 // F1-07 — usage accounting and the price table behind the cost display.
 export {

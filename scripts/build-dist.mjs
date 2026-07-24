@@ -69,6 +69,38 @@ function configArgsForAgentSdkBundle() {
   return { tmp, args: ['--config', tmp] };
 }
 
+// ---------------------------------------------------------------------------
+// NABY_ENABLE_CHATGPT_OAUTH — the DEV-ONLY ChatGPT subscription-OAuth seal.
+// ---------------------------------------------------------------------------
+//
+// ChatGPT subscription-OAuth (src/providers/chatgpt-oauth.ts,
+// electron/chatgpt-oauth.ts) talks to the UNOFFICIAL ChatGPT backend — a ToS
+// grey zone, dev/test only, the same risk class as the Agent SDK. It is sealed
+// by DEFENSE IN DEPTH:
+//
+//   1. RUNTIME flag — `isChatgptOauthEnabled(NABY_ENABLE_CHATGPT_OAUTH)`. With
+//      it off (the default), `describeProviders` and `isChatgptOauthAvailable`
+//      never offer the provider and `createModel` refuses to construct it, so
+//      every code path is dead.
+//   2. BUILD absence — `electron/chatgpt-oauth.ts` is NOT an electron-builder
+//      entry point (see scripts/build-electron.mjs) and is imported by nothing
+//      in `main.ts`, so it is never compiled into a packaged app — exactly the
+//      "absent from the artifact" property the Agent SDK exclusion gives.
+//
+//   ⚠️  OFFICIAL / PUBLIC DISTRIBUTION MUST NOT SET NABY_ENABLE_CHATGPT_OAUTH. ⚠️
+//   Enabling subscription reuse in a shipped app crosses the ToS line the spec
+//   (ref-docs/specs/impl/chatgpt-oauth-dev-provider.md §2) drew. This guard makes
+//   an accidental official build with the flag set LOUD and reviewable.
+function guardChatgptOauthSeal() {
+  if (process.env.NABY_ENABLE_CHATGPT_OAUTH) {
+    console.warn(
+      '[build] ⚠️  NABY_ENABLE_CHATGPT_OAUTH is set during a dist build. The ChatGPT ' +
+        'subscription-OAuth path is DEV-ONLY and must NEVER ship to end users ' +
+        '(unofficial backend, ToS grey zone). Unset it for any official/public build.',
+    );
+  }
+}
+
 /**
  * Resolve electron-builder from node_modules/.bin rather than trusting PATH.
  *
@@ -112,6 +144,9 @@ const args = process.argv.slice(2);
 if (args.includes('--dir')) {
   process.env.SKIP_NOTARIZE ??= '1';
 }
+
+// Dev-only ChatGPT-OAuth seal: warn loudly if the flag leaked into a dist build.
+guardChatgptOauthSeal();
 
 // Opt-in Agent-SDK bundling (test builds only — see the note above).
 const bundle = configArgsForAgentSdkBundle();

@@ -184,6 +184,11 @@ function resolveFromEnv(opts: ResolveOptions): ResolvedProvider | null {
   const forced = opts.providerId || process.env.NABY_PROVIDER || '';
   for (const description of describeProviders()) {
     if (forced && forced !== description.kind) continue;
+    // The DEV-ONLY ChatGPT-OAuth provider has no static api-key env: its
+    // credential is an OAuth token set resolved through the vault-backed token
+    // source, not this metered path. Skip any kind that does not take an
+    // 'api-key', so a stray NABY_ENABLE_CHATGPT_OAUTH is never read as a key.
+    if (!description.credentialKinds.includes('api-key')) continue;
     const apiKey = process.env[description.envVar];
     if (!apiKey) continue;
     const profile = applyModel(defaultProfileFor(description.kind), opts.requestedModel);
@@ -214,7 +219,16 @@ export async function resolveProviderCredential(
   if (bridge) {
     const profiles = await bridge.listProfiles();
     const candidates = forced ? profiles.filter((p) => p.id === forced) : profiles;
+    // The metered path resolves an api-key STRING. The DEV-ONLY ChatGPT-OAuth
+    // provider is not an api-key credential (it is a live token source), so it
+    // is never resolved here — it runs through its own flag-sealed dev seam.
+    const meteredKinds = new Set(
+      describeProviders()
+        .filter((d) => d.credentialKinds.includes('api-key'))
+        .map((d) => d.kind),
+    );
     for (const profile of candidates) {
+      if (!meteredKinds.has(profile.kind)) continue;
       const apiKey = await bridge.getKey(profile.id);
       if (!apiKey) continue;
       // A profile whose required config is blank cannot construct a model, and

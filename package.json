@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Personalized persona agent desktop app — spike harness (Phase 0)",
+  "description": "Personalized persona agent desktop app \u2014 spike harness (Phase 0)",
   "main": "dist/electron/main.mjs",
   "scripts": {
     "build:runtime": "node scripts/build-runtime.mjs",
@@ -31,6 +31,7 @@
     "spike:golden": "tsx src/spikes/spike-p15-golden.ts",
     "spike:harness": "tsx src/spikes/spike-harness.ts",
     "spike:skill": "tsx src/spikes/spike-skill-inject.ts",
+    "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",
     "spike:claude-auth": "tsx src/spikes/spike-claude-auth.ts",
     "icon": "node scripts/make-icon.mjs",
     "dist": "npm run build:app && node scripts/build-dist.mjs --publish never",

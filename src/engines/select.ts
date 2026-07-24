@@ -39,6 +39,7 @@ import {
   resolveProviderCredential,
   type ResolveOptions,
 } from '../providers/resolve.js';
+import { isChatgptOauthEnabled } from '../providers/chatgpt-oauth.js';
 
 // ---------------------------------------------------------------------------
 // Names + cost basis
@@ -66,6 +67,33 @@ export const DEV_ENGINE_LABEL = 'Claude (subscription, local sign-in)';
 
 /** The env var that forces the choice. */
 export const ENGINE_ENV_VAR = 'NABY_ENGINE';
+
+/**
+ * How the DEV-ONLY ChatGPT-subscription provider is labelled wherever a person
+ * can see it. Unlike the Claude dev engine, this one carries an explicit ToS
+ * caveat and "dev only" — OpenAI has not blessed subscription reuse.
+ */
+export const CHATGPT_OAUTH_LABEL = 'ChatGPT (subscription, dev-only — ToS caveat)';
+
+/**
+ * The cost basis of a ChatGPT-subscription turn: it runs on a signed-in
+ * subscription, not a metered API key, so — like the Claude dev engine — no
+ * per-message dollar bill is invented for it.
+ */
+export const CHATGPT_OAUTH_COST_BASIS: CostBasis = 'subscription';
+
+/**
+ * Whether the DEV-ONLY ChatGPT subscription-OAuth provider may be OFFERED here.
+ *
+ * This is the selection-side face of the runtime seal (mirrors
+ * `isClaudeAgentSdkAvailable()` for the Claude dev engine): the provider is
+ * offered only when `NABY_ENABLE_CHATGPT_OAUTH` is set, so a default/official
+ * build never shows a subscription-OAuth choice it must not run. `describeProviders`
+ * gates the same way, so the settings list and the selector stay in lockstep.
+ */
+export function isChatgptOauthAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isChatgptOauthEnabled(env);
+}
 
 // ---------------------------------------------------------------------------
 // The decision

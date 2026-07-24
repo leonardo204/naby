@@ -27,6 +27,12 @@ import { createAzure } from '@ai-sdk/azure';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModelV4 } from '@ai-sdk/provider';
+import {
+  CHATGPT_QUERY_BASE_URL,
+  isChatgptOauthEnabled,
+  makeChatgptFetch,
+  type ChatgptTokenSource,
+} from './chatgpt-oauth.js';
 
 // ---------------------------------------------------------------------------
 // Profile shape (contract §4, verbatim)
@@ -37,7 +43,12 @@ export type ProviderKind =
   | 'bedrock'
   | 'azure-openai'
   | 'google'
-  | 'openai';
+  | 'openai'
+  // DEV-ONLY, flag-sealed (see chatgpt-oauth.ts). Answers on a signed-in ChatGPT
+  // subscription via the unofficial Codex Responses backend. Never offered unless
+  // `isChatgptOauthEnabled()` — the type includes it so `createModel`'s switch is
+  // exhaustive, but `describeProviders`/selection gate it behind the flag.
+  | 'openai-chatgpt-oauth';
 
 export type ProviderConfig =
   | { kind: 'anthropic' }
@@ -66,7 +77,8 @@ export type ProviderConfig =
       apiVersion?: string;
     }
   | { kind: 'google' } // Gemini
-  | { kind: 'openai' };
+  | { kind: 'openai' }
+  | { kind: 'openai-chatgpt-oauth' }; // DEV-ONLY subscription OAuth (flag-sealed)
 
 export type ProviderProfile = {
   id: string;
@@ -100,6 +112,17 @@ export type ProviderCredential =
       accessKeyId: string;
       secretAccessKey: string;
       sessionToken?: string;
+    }
+  // DEV-ONLY (flag-sealed). Not a static secret: a live token SOURCE that the
+  // custom transport pulls a fresh access token from per request, refreshing +
+  // rotating behind a 401. The vault (electron/chatgpt-oauth.ts) implements it.
+  | {
+      kind: 'chatgpt-oauth';
+      source: ChatgptTokenSource;
+      platform?: string;
+      release?: string;
+      arch?: string;
+      fedramp?: boolean;
     };
 
 export const apiKeyCredential = (apiKey: string): ProviderCredential => ({
@@ -214,25 +237,61 @@ export function createModel(
       return azure(config.deployment);
     }
 
+    case 'openai-chatgpt-oauth': {
+      // DEV-ONLY, flag-sealed subscription transport (spec §3/§8). The runtime
+      // seal is enforced where the provider is OFFERED (describeProviders /
+      // isChatgptOauthAvailable); this factory refuses to construct if the flag
+      // is off, so even a hand-built profile cannot reach the backend in an
+      // official build. The credential is a token SOURCE, not a key.
+      if (!isChatgptOauthEnabled()) {
+        throw new ProviderConfigError(
+          `provider "openai-chatgpt-oauth" is a dev-only, flag-sealed path and is not enabled here`,
+        );
+      }
+      if (credential.kind !== 'chatgpt-oauth') {
+        throw new ProviderConfigError(
+          `provider "openai-chatgpt-oauth" requires a chatgpt-oauth credential, got "${credential.kind}"`,
+        );
+      }
+      // A DUMMY apiKey keeps the adapter happy; the real auth is the Bearer token
+      // our customFetch injects (and which wins over this placeholder). The
+      // RESPONSES factory hits `/responses`, not `/chat/completions`.
+      const openai = createOpenAI({
+        baseURL: CHATGPT_QUERY_BASE_URL,
+        apiKey: 'chatgpt-oauth-subscription',
+        fetch: makeChatgptFetch(credential.source, {
+          ...(credential.platform !== undefined ? { platform: credential.platform } : {}),
+          ...(credential.release !== undefined ? { release: credential.release } : {}),
+          ...(credential.arch !== undefined ? { arch: credential.arch } : {}),
+          ...(credential.fedramp !== undefined ? { fedramp: credential.fedramp } : {}),
+        }),
+      });
+      return openai.responses(profile.model);
+    }
+
     case 'bedrock': {
       // Bedrock quirk, normalized here: two auth shapes. A bearer api key
       // (AWS_BEARER_TOKEN_BEDROCK style) or classic SigV4 access keys.
       // `profile.model` may be a plain model id or an inference-profile ID —
       // both are passed through untouched.
-      const bedrock =
-        credential.kind === 'api-key'
-          ? createAmazonBedrock({
-              region: config.region,
-              apiKey: requireApiKey(credential, 'bedrock'),
-            })
-          : createAmazonBedrock({
-              region: config.region,
-              accessKeyId: credential.accessKeyId,
-              secretAccessKey: credential.secretAccessKey,
-              ...(credential.sessionToken
-                ? { sessionToken: credential.sessionToken }
-                : {}),
-            });
+      if (credential.kind === 'api-key') {
+        const bedrock = createAmazonBedrock({
+          region: config.region,
+          apiKey: requireApiKey(credential, 'bedrock'),
+        });
+        return bedrock(profile.model);
+      }
+      if (credential.kind !== 'aws-sigv4') {
+        throw new ProviderConfigError(
+          `provider "bedrock" requires an api-key or aws-sigv4 credential, got "${credential.kind}"`,
+        );
+      }
+      const bedrock = createAmazonBedrock({
+        region: config.region,
+        accessKeyId: credential.accessKeyId,
+        secretAccessKey: credential.secretAccessKey,
+        ...(credential.sessionToken ? { sessionToken: credential.sessionToken } : {}),
+      });
       return bedrock(profile.model);
     }
   }
@@ -276,9 +335,17 @@ export const PROVIDER_KINDS: readonly ProviderKind[] = [
   'openai',
 ] as const;
 
-/** The five supported kinds and the config each one needs. */
-export function describeProviders(): ProviderDescription[] {
-  return [
+/**
+ * The five supported (metered, API-key) kinds and the config each needs.
+ *
+ * A SIXTH, DEV-ONLY kind (`openai-chatgpt-oauth`) is appended ONLY when the
+ * runtime seal is open (`isChatgptOauthEnabled(env)`). With the flag off — the
+ * default, and every official build — this returns exactly the five metered
+ * providers, so nothing downstream (resolution, selection, the settings UI) can
+ * even see the subscription-OAuth provider, let alone run it.
+ */
+export function describeProviders(env: NodeJS.ProcessEnv = process.env): ProviderDescription[] {
+  const base: ProviderDescription[] = [
     {
       kind: 'anthropic',
       label: 'Anthropic (direct API)',
@@ -336,6 +403,30 @@ export function describeProviders(): ProviderDescription[] {
       keyHelp: 'platform.openai.com → API keys',
     },
   ];
+
+  // DEV-ONLY, flag-sealed. Appended last, and ONLY when the seal is open. This
+  // is the single point where the subscription-OAuth provider becomes visible;
+  // everything else keys off `describeProviders`, so the flag gate here is the
+  // seal for resolution and the settings list alike.
+  if (isChatgptOauthEnabled(env)) {
+    base.push({
+      kind: 'openai-chatgpt-oauth',
+      label: 'ChatGPT (subscription, dev-only — ToS caveat)',
+      configFields: [],
+      credentialKinds: ['chatgpt-oauth'],
+      modelMeaning: 'ChatGPT/Codex model slug, e.g. gpt-5-codex or gpt-5.1-codex',
+      defaultModel: 'gpt-5-codex',
+      // Not a plain API-key env: the credential is an OAuth token set in the
+      // vault. Named so the "developers can also set …" copy stays coherent; the
+      // resolver skips this kind (no 'api-key'), so it never reads this var.
+      envVar: 'NABY_ENABLE_CHATGPT_OAUTH',
+      keyHelp:
+        'Dev-only: sign in with your ChatGPT subscription. Uses the unofficial ' +
+        'ChatGPT backend — a ToS grey zone, never shipped to end users.',
+    });
+  }
+
+  return base;
 }
 
 // ---------------------------------------------------------------------------
