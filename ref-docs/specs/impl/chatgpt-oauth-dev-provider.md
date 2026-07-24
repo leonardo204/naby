@@ -2,11 +2,11 @@
 id: chatgpt-oauth-dev-provider
 title: ChatGPT Subscription-OAuth — Dev-Only Provider (excluded from official distribution)
 type: impl
-version: 0.1.0
+version: 0.1.1
 status: draft
 scope: Adding a ChatGPT (OpenAI) subscription-OAuth provider that answers turns via a signed-in ChatGPT Plus/Pro subscription instead of a metered API key — DEV/TEST ONLY, flag-sealed out of official builds exactly like the Claude Agent SDK. Covers the ToS verdict that makes this dev-only, the AiSdkEngine custom-transport integration at the provider-independent engine seam, the OAuth/token-vault/refresh tasks, and why Google Gemini is excluded entirely.
 related: [personalized-agent-desktop-app, phase-1-contracts, phase-1-shell-architecture, phase-1-desktop-shell]
-updated: 2026-07-23
+updated: 2026-07-24
 ---
 
 # ChatGPT Subscription-OAuth — Dev-Only Provider
@@ -39,6 +39,8 @@ The engine seam is provider-independent: the gate, executors, memory injection, 
 - **CostBasis = 'subscription'** (like the dev engine) — a subscription turn shows no invented dollar bill (engines/select.ts `CostBasis`).
 
 ## 4. Tasks
+
+> **Implementation status (2026-07-24) — core done, UI/e2e pending.** ✅ **Done + verified (pure/core, CO-01~05)**: the flag-sealed pure core `src/providers/chatgpt-oauth.ts` (PKCE S256, JWT account-id/exp extraction, query headers, `store:false` injection, expiry+skew, refresh rotation, `makeChatgptFetch` custom transport, `isChatgptOauthEnabled` seal); the `openai-chatgpt-oauth` provider kind wired into `registry.ts`/`resolve.ts`/`select.ts` (gated on the seal, `costBasis:'subscription'`); the Electron OAuth+vault module `electron/chatgpt-oauth.ts` (browser PKCE flow + localhost:1455 callback + `safeStorage` token vault + `ensureFreshToken`); the `build-dist.mjs` `guardChatgptOauthSeal()` build seal. Evidence: `npm run typecheck` clean, `spike:chatgpt` **10/10** (incl. the DEV-ONLY SEAL test — flag off ⇒ not enabled/available/described), all regression spikes green, `build:runtime` ok. 🔧 **Pending**: **CO-05 UI** (IPC wiring of the electron OAuth module + a sign-in/out + provider-switcher entry, offered only when the seal is open) and **CO-06** real-auth e2e (needs the owner's ChatGPT sign-in — not automatable).
 
 | ID | Feature | Priority | Completion criteria |
 |---|---|---|---|
