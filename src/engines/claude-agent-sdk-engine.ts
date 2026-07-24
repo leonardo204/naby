@@ -186,6 +186,15 @@ export function buildQueryOptions(args: {
     // the old inherited cwd this same setting was actively harmful. The two
     // lines are a pair: do not keep this one without that one.
     settingSources: ['user', 'project', 'local'],
+    // NABY OWNS MCP. Without this the SDK MERGES the user's global MCP servers
+    // (`~/.claude` settings, project `.mcp.json`, plugins) into the session, so a
+    // server the user configured for Claude Code elsewhere leaks in as
+    // `mcp__<name>__*` tools alongside Naby's own — and "add an MCP" from chat
+    // finds it already present. `strictMcpConfig` restricts MCP to ONLY what we
+    // pass in `mcpServers` (the in-process `nabytools` server, which already
+    // carries Naby's registry — app.db mcp_servers). It is MCP-specific and does
+    // NOT affect CLAUDE.md/hooks, which still load via settingSources above.
+    strictMcpConfig: true,
     // NOTE: allowedTools is deliberately UNSET — listing our tool there
     // would auto-approve it and silently shadow the gate.
     abortController,

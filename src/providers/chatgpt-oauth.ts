@@ -453,10 +453,24 @@ export function forceStoreFalse(body: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Force `store:false` and `stream:true` into a JSON request body. Returns the
- * rewritten body and whether WE turned streaming on (i.e. the caller had not
- * already asked to stream) — which is the signal that the SSE response must be
- * aggregated back to JSON. A non-JSON body is returned untouched, never forced.
+ * Force the codex-backend request shape onto a JSON request body:
+ *   * `store:false`  — the backend rejects `store:true`.
+ *   * `stream:true`  — the backend rejects a non-streaming request.
+ *   * `reasoning:{effort:'none'}` — TOOL-LOOP FIX. With a reasoning model + store:false
+ *     the codex backend requires every `function_call` replayed in a later turn's
+ *     `input` to be ACCOMPANIED by the preceding encrypted `reasoning` item. The AI-SDK
+ *     openai-responses adapter (driven by generateText) does not carry reasoning items
+ *     across our tool loop, so a tool-using turn 400s on the follow-up request. Turning
+ *     reasoning off means no reasoning item is ever produced, so there is nothing to
+ *     replay and the tool loop (e.g. `naby_add_mcp`) completes. Forced unconditionally
+ *     because the backend/adapter would otherwise default a strong model like
+ *     gpt-5.6-sol to a thinking effort that reintroduces the problem. Trade-off: no
+ *     extended thinking on this dev-only path — acceptable for a convenience provider;
+ *     a full reasoning round-trip is a later enhancement.
+ *
+ * Returns the rewritten body and whether WE turned streaming on (i.e. the caller had not
+ * already asked to stream) — the signal that the SSE response must be aggregated back to
+ * JSON. A non-JSON body is returned untouched, never forced.
  */
 export function forceCodexBody(body: string): { body: string; streamForced: boolean } {
   try {
@@ -465,6 +479,7 @@ export function forceCodexBody(body: string): { body: string; streamForced: bool
       const alreadyStreaming = parsed.stream === true;
       parsed.store = false;
       parsed.stream = true;
+      parsed.reasoning = { effort: 'none' };
       return { body: JSON.stringify(parsed), streamForced: !alreadyStreaming };
     }
     return { body, streamForced: false };

@@ -154,22 +154,27 @@ function makeJwt(payload: Record<string, unknown>): string {
   // forceCodexBody sets store:false AND stream:true, and reports whether IT
   // turned streaming on (the aggregation signal).
   const forced = forceCodexBody('{"model":"gpt-5.6-sol","input":[]}');
-  const fp = JSON.parse(forced.body) as { store: boolean; stream: boolean };
+  const fp = JSON.parse(forced.body) as { store: boolean; stream: boolean; reasoning?: { effort?: string } };
   const already = forceCodexBody('{"model":"x","stream":true}');
   const ap = JSON.parse(already.body) as { stream: boolean };
+  // reasoning is FORCED off even when the caller already set it (tool-loop fix).
+  const override = forceCodexBody('{"model":"x","reasoning":{"effort":"high"}}');
+  const op = JSON.parse(override.body) as { reasoning?: { effort?: string } };
   const nonJson = forceCodexBody('not json');
   const ok =
     fp.store === false &&
     fp.stream === true &&
+    fp.reasoning?.effort === 'none' &&
     forced.streamForced === true &&
     ap.stream === true &&
     already.streamForced === false &&
+    op.reasoning?.effort === 'none' &&
     nonJson.body === 'not json' &&
     nonJson.streamForced === false;
   check(
-    '(d2) forceCodexBody sets store:false+stream:true; flags stream forcing; non-JSON untouched',
+    '(d2) forceCodexBody sets store:false+stream:true+reasoning:none (forced); flags streaming; non-JSON untouched',
     ok,
-    `store→${fp.store} stream→${fp.stream} forced→${forced.streamForced} already→${already.streamForced}`,
+    `store→${fp.store} stream→${fp.stream} reasoning→${fp.reasoning?.effort} override→${op.reasoning?.effort} forced→${forced.streamForced}`,
   );
 }
 
