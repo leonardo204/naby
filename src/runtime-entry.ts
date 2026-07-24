@@ -55,6 +55,16 @@ export {
   makeSendMessage,
   Outbox,
   sendMessageSchema,
+  // naby_add_mcp — the agent registers an MCP server (as a proposal).
+  makeAddMcp,
+  addMcpSchema,
+  ADD_MCP_TOOL_NAME,
+  type McpProposalSink,
+  // fetch_url — the model reads a public web page/API.
+  makeFetchUrl,
+  fetchUrlSchema,
+  isBlockedFetchHost,
+  htmlToText,
   type OutboxEntry,
 } from './runtime/tools.js';
 
@@ -62,8 +72,10 @@ export {
 // it constructs is its own choice. SqliteStore is the durable one — note that
 // `node:sqlite` is experimental and its availability inside Electron is still
 // to be verified in F1-02/SPIKE-04 (see sqlite-store.ts).
+export { isMcpEntryActive } from './runtime/store/store.js';
 export type {
   McpEntry,
+  McpStatus,
   Project,
   SessionRef,
   Store,

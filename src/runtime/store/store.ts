@@ -76,6 +76,17 @@ export type Project = {
 // MCP registry (contract §5, stored per §6)
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether an MCP entry is active (`enabled`) or a not-yet-trusted PROPOSAL
+ * (`proposed`). Absent = `enabled` — every entry a user added by hand through
+ * Settings is trusted and active, and old rows without the field stay active.
+ * A proposal is one the CHAT AGENT added on the user's behalf (`naby_add_mcp`):
+ * it is STORED and shown in Settings but NEVER loaded into the toolset until the
+ * user explicitly approves it, mirroring the trust rule that external-origin
+ * harness/memory lands disabled (trust.ts / harness-gate.ts).
+ */
+export type McpStatus = 'enabled' | 'proposed';
+
 export type McpEntry =
   | {
       name: string;
@@ -83,6 +94,7 @@ export type McpEntry =
       command: string;
       args?: string[];
       env?: Record<string, string>;
+      status?: McpStatus;
     }
   | {
       name: string;
@@ -90,7 +102,14 @@ export type McpEntry =
       url: string;
       headers?: Record<string, string>;
       timeoutMs?: number;
+      status?: McpStatus;
     };
+
+/** True when an MCP entry should be loaded into the live toolset — everything
+ *  except an agent PROPOSAL awaiting user approval. */
+export function isMcpEntryActive(entry: McpEntry): boolean {
+  return entry.status !== 'proposed';
+}
 
 // ---------------------------------------------------------------------------
 // Per-turn usage (F1-07)
