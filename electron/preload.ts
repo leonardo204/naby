@@ -166,6 +166,33 @@ const onboarding = {
 };
 
 // ---------------------------------------------------------------------------
+// CO-05 — ChatGPT subscription-OAuth (DEV-ONLY, flag-sealed)
+// ---------------------------------------------------------------------------
+//
+// One named function per channel, like every other bridge here. Each resolves to
+// plain data (`ChatgptOauthStatus`) — labels only, NEVER a token. `available`
+// reflects the dev seal on the main side, so a build with the flag off has
+// `available:false` and the renderer never even offers the sign-in. There is no
+// read path to the stored tokens, by construction: `signIn` stores them in the
+// vault and returns only `{email, accountId}`; nothing hands them back.
+
+type ChatgptOauthStatus = {
+  available: boolean;
+  signedIn: boolean;
+  email: string | null;
+  accountId: string | null;
+};
+
+const chatgptOauth = {
+  /** `{available, signedIn, email, accountId}`. Labels only, never a token. */
+  status: (): Promise<Result<ChatgptOauthStatus>> => ipcRenderer.invoke('chatgpt-oauth:status'),
+  /** Run the browser PKCE sign-in; resolves with the new status once stored. */
+  signIn: (): Promise<Result<ChatgptOauthStatus>> => ipcRenderer.invoke('chatgpt-oauth:signin'),
+  /** Clear the stored token set. Idempotent. */
+  signOut: (): Promise<Result<ChatgptOauthStatus>> => ipcRenderer.invoke('chatgpt-oauth:signout'),
+};
+
+// ---------------------------------------------------------------------------
 // F1-09 — auto-update (contract §1.3)
 // ---------------------------------------------------------------------------
 //
@@ -248,4 +275,7 @@ contextBridge.exposeInMainWorld('naby', {
   onboarding,
   /** F1-09 — auto-update status and controls. */
   updates,
+  /** CO-05 — DEV-ONLY ChatGPT subscription sign-in. `available:false` unless the
+   *  dev seal is open; no read path to the stored tokens. */
+  chatgptOauth,
 });

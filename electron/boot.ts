@@ -24,6 +24,7 @@ import { createUpdater, type Updater } from './updater.js';
 // `dist/naby-runtime.mjs` at run time instead of inlining ai@7 into the main
 // process bundle a second time.
 import type {
+  ChatgptTokenSource,
   CredentialBridge,
   installCredentialBridge as InstallCredentialBridgeType,
   ProviderDescription,
@@ -31,6 +32,10 @@ import type {
   Store,
   defaultProfileFor as DefaultProfileForType,
 } from '../dist/naby-runtime.mjs';
+// TYPE-ONLY (erased at build). The DEV-ONLY ChatGPT-OAuth module is never
+// statically imported — it is reached through a computed dynamic import below —
+// so this type import adds nothing to `main.mjs`.
+import type * as ChatgptOauthModule from './chatgpt-oauth.js';
 
 /** The subset of the runtime bundle the main process calls into. */
 type NabyRuntime = {
@@ -38,7 +43,13 @@ type NabyRuntime = {
   describeProviders: () => ProviderDescription[];
   defaultProfileFor: typeof DefaultProfileForType;
   installCredentialBridge: typeof InstallCredentialBridgeType;
+  /** CO-05 dev seal + token-source seam (both dead unless the flag is set). */
+  isChatgptOauthEnabled: (env?: NodeJS.ProcessEnv) => boolean;
+  installChatgptTokenSource: (source: ChatgptTokenSource | undefined) => void;
 };
+
+/** The flag-sealed Electron ChatGPT-OAuth module, as loaded at runtime. */
+type ChatgptOauthMain = typeof ChatgptOauthModule;
 
 export type BootResult = {
   server: EmbeddedServer;
@@ -148,6 +159,23 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     return runtime;
   }
 
+  // -- CO-05: the DEV-ONLY ChatGPT-OAuth module (flag-sealed) ---------------
+  //
+  // Reached ONLY through this computed dynamic import, so esbuild never inlines
+  // the unofficial-backend flow into `main.mjs` (the same trick that keeps the
+  // runtime bundle out of the main bundle). The compiled entry lives next to
+  // `main.mjs` in `dist/electron/` and is EXCLUDED from the packaged artifact
+  // (electron-builder.yml), so a shipped app cannot load it even if the flag
+  // somehow leaked on. Callers gate on `isChatgptOauthEnabled()` first.
+  let chatgptOauth: Promise<ChatgptOauthMain> | undefined;
+  function loadChatgptOauth(): Promise<ChatgptOauthMain> {
+    const url = pathToFileURL(
+      join(dirname(fileURLToPath(import.meta.url)), 'chatgpt-oauth.mjs'),
+    ).href;
+    chatgptOauth ??= import(url) as Promise<ChatgptOauthMain>;
+    return chatgptOauth;
+  }
+
   // -- credentials (F1-04) -------------------------------------------------
   //
   // ORDER IS LOAD-BEARING (design §4.1). `boot()` is only ever called after
@@ -179,7 +207,30 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     getKey: (providerId: string) => vault.get(providerId),
     security: () => vault.security(),
   };
-  (await loadRuntime()).installCredentialBridge(bridge);
+  const runtimeMod = await loadRuntime();
+  runtimeMod.installCredentialBridge(bridge);
+
+  // -- CO-05: inject the vault-backed ChatGPT token SOURCE (dev seal only) --
+  //
+  // The subscription transport (registry.ts `createModel` for
+  // `openai-chatgpt-oauth`) pulls a fresh access token from a `ChatgptTokenSource`
+  // per request. That source is the safeStorage vault, which the runtime must
+  // not import — so, exactly like the credential bridge, the main process
+  // INSTALLS it here after boot. Gated on the runtime seal: with
+  // `NABY_ENABLE_CHATGPT_OAUTH` unset (the default, every official build), the
+  // OAuth module is never even loaded and no source is installed, so the
+  // provider has nothing to construct a turn from. (The live query still needs
+  // the owner's ChatGPT sign-in — CO-06 — which this only makes reachable.)
+  if (runtimeMod.isChatgptOauthEnabled()) {
+    try {
+      const chatgpt = await loadChatgptOauth();
+      runtimeMod.installChatgptTokenSource(chatgpt.makeVaultTokenSource(vault));
+      log('[chatgpt-oauth] DEV seal open — vault-backed token source installed');
+    } catch (err) {
+      // Never fatal: a broken dev-only path must not stop the app booting.
+      log(`[chatgpt-oauth] token source not installed: ${String(err)}`);
+    }
+  }
 
   const server = await startEmbeddedNextServer({
     shellDir,
@@ -222,6 +273,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     allowedOrigin: server.origin,
     loadRuntime,
     updater,
+    // CO-05, DEV-ONLY. The IPC channels gate on `isChatgptOauthEnabled()` before
+    // ever calling this, so passing it unconditionally is safe — with the seal
+    // closed the loader is never invoked.
+    loadChatgptOauth,
     log,
   });
 

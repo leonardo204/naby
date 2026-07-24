@@ -12,10 +12,15 @@
 // Claude sign-in the Agent SDK reuses. It talks to the UNOFFICIAL ChatGPT backend
 // (a ToS grey zone, spec §1/§2) and MUST NOT ship to end users.
 //
-// THE SEAL. This module is NOT an electron-builder entry point and is NOT
-// imported by `main.ts`, so it is never compiled into a packaged app — the same
-// "absent from the artifact" discipline the Agent SDK gets. Wiring it to IPC
-// (wave 2) must stay behind `isChatgptOauthEnabled()` AND the build-dist seal.
+// THE SEAL (wave 2 wiring). This module is compiled to its OWN dist entry
+// (`dist/electron/chatgpt-oauth.mjs`, scripts/build-electron.mjs) and is reached
+// only through a COMPUTED dynamic import in boot.ts — never a static import in
+// `main.ts`'s graph — so esbuild never inlines the unofficial-backend flow into
+// `main.mjs`. That dev entry is then EXCLUDED from the packaged artifact
+// (electron-builder.yml `!dist/electron/chatgpt-oauth.mjs`), preserving the
+// "absent from the shipped app" discipline the Agent SDK gets. Every call site
+// (boot injection + the IPC channels) stays behind `isChatgptOauthEnabled()`
+// AND the build-dist seal, so with the flag off the module is never even loaded.
 //
 // WHAT IT NEVER DOES. It never logs a token, never returns key material over IPC,
 // and never writes plaintext to disk — the token set is encrypted through the
@@ -38,6 +43,8 @@ import {
   CHATGPT_CALLBACK_PORT,
   CHATGPT_OAUTH_PROVIDER_ID,
   CHATGPT_TOKEN_URL,
+  extractAccountId,
+  extractEmail,
   generatePkce,
   generateState,
   isChatgptOauthEnabled,
@@ -107,6 +114,26 @@ export async function saveTokens(vault: CredentialVault, tokens: ChatgptOauthTok
 /** Logout — clear the stored token set. Idempotent. */
 export function clearTokens(vault: CredentialVault): void {
   vault.clear(CHATGPT_OAUTH_PROVIDER_ID);
+}
+
+/**
+ * The sign-in status the IPC `chatgpt-oauth:status` channel reports (CO-05).
+ *
+ * LABELS ONLY, NEVER TOKEN MATERIAL. `email`/`accountId` are read from the
+ * access-token JWT claims (`extractEmail`/`extractAccountId`) purely to show
+ * "signed in as …" in the UI; the access/refresh tokens themselves never leave
+ * this process. A machine with no stored token set reports `signedIn:false`.
+ */
+export async function readSignInStatus(
+  vault: CredentialVault,
+): Promise<{ signedIn: boolean; email: string | null; accountId: string | null }> {
+  const tokens = await loadTokens(vault);
+  if (!tokens) return { signedIn: false, email: null, accountId: null };
+  return {
+    signedIn: true,
+    email: extractEmail(tokens.access_token),
+    accountId: extractAccountId(tokens.access_token) || tokens.account_id || null,
+  };
 }
 
 // ---------------------------------------------------------------------------

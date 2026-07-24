@@ -33,11 +33,15 @@ import {
   isPermanentRefreshFailure,
   isChatgptOauthEnabled,
   tokensFromExchange,
+  installChatgptTokenSource,
+  getChatgptTokenSource,
   CHATGPT_CLIENT_ID,
   CHATGPT_OAUTH_ENABLE_FLAG,
+  CHATGPT_OAUTH_PROVIDER_ID,
   type ChatgptOauthTokens,
+  type ChatgptTokenSource,
 } from '../providers/chatgpt-oauth.js';
-import { isChatgptOauthAvailable } from '../engines/select.js';
+import { isChatgptOauthAvailable, selectEngine } from '../engines/select.js';
 import { describeProviders } from '../providers/registry.js';
 
 let passed = 0;
@@ -274,12 +278,61 @@ function makeJwt(payload: Record<string, unknown>): string {
   );
 }
 
-console.log('');
-const total = passed + failed;
-if (failed === 0) {
-  console.log(`SPIKE-CHATGPT-OAUTH: ALL PASS (${passed}/${total})`);
-  process.exit(0);
-} else {
-  console.log(`SPIKE-CHATGPT-OAUTH: ${failed} FAILED (${passed}/${total})`);
-  process.exit(1);
-}
+// -- (j) CO-05 token-source seam + selection routing ------------------------
+//
+// The vault-backed token source (electron/boot.ts) reaches the transport
+// through the injected `installChatgptTokenSource` seam; `selectEngine` routes a
+// selected chatgpt-oauth provider to `ai-sdk` ONLY when the dev seal is open.
+void (async () => {
+  const fakeSource: ChatgptTokenSource = {
+    ensureFreshToken: async () => ({ accessToken: 'A', accountId: 'acc' }),
+    refreshNow: async () => ({ accessToken: 'A', accountId: 'acc' }),
+  };
+
+  const beforeInstall = getChatgptTokenSource();
+  installChatgptTokenSource(fakeSource);
+  const afterInstall = getChatgptTokenSource();
+  installChatgptTokenSource(undefined);
+  const afterClear = getChatgptTokenSource();
+  check(
+    '(j) token-source seam — install/get/clear round-trips the injected source',
+    beforeInstall === undefined && afterInstall === fakeSource && afterClear === undefined,
+    `before=${String(beforeInstall)} after=${afterInstall === fakeSource} cleared=${String(afterClear)}`,
+  );
+
+  // Routing is seal-gated: flag off ⇒ the provider is NOT routed to an engine
+  // (selectEngine falls through to "no key / dev engine"); flag on ⇒ ai-sdk.
+  const prevFlag = process.env[CHATGPT_OAUTH_ENABLE_FLAG];
+  process.env[CHATGPT_OAUTH_ENABLE_FLAG] = '';
+  const sealedOff = await selectEngine({
+    providerId: CHATGPT_OAUTH_PROVIDER_ID,
+    forced: 'ai-sdk',
+    devEngineAvailable: () => false,
+  });
+  process.env[CHATGPT_OAUTH_ENABLE_FLAG] = '1';
+  const sealedOn = await selectEngine({
+    providerId: CHATGPT_OAUTH_PROVIDER_ID,
+    forced: 'ai-sdk',
+    devEngineAvailable: () => false,
+  });
+  if (prevFlag === undefined) delete process.env[CHATGPT_OAUTH_ENABLE_FLAG];
+  else process.env[CHATGPT_OAUTH_ENABLE_FLAG] = prevFlag;
+
+  const routedOn = sealedOn.ok && sealedOn.engine === 'ai-sdk';
+  const routedOff = sealedOff.ok === false; // no api-key ⇒ credential-unavailable
+  check(
+    '(j2) DEV-ONLY SEAL — selectEngine routes chatgpt-oauth to ai-sdk only when the flag is on',
+    routedOn && routedOff,
+    `on.ok=${sealedOn.ok} on.engine=${sealedOn.ok ? sealedOn.engine : '-'} off.ok=${sealedOff.ok}`,
+  );
+
+  console.log('');
+  const total = passed + failed;
+  if (failed === 0) {
+    console.log(`SPIKE-CHATGPT-OAUTH: ALL PASS (${passed}/${total})`);
+    process.exit(0);
+  } else {
+    console.log(`SPIKE-CHATGPT-OAUTH: ${failed} FAILED (${passed}/${total})`);
+    process.exit(1);
+  }
+})();

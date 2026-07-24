@@ -247,6 +247,8 @@ export {
   forceStoreFalse,
   generatePkce,
   generateState,
+  getChatgptTokenSource,
+  installChatgptTokenSource,
   isChatgptOauthEnabled,
   isPermanentRefreshFailure,
   isTokenExpired,

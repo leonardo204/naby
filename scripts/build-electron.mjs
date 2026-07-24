@@ -116,6 +116,18 @@ await Promise.all([
     entryPoints: [resolve(root, 'electron/updater-probe.ts')],
     outfile: resolve(outdir, 'updater-probe.mjs'),
   }),
+  // CO-05, DEV-ONLY (flag-sealed). Its OWN entry, never imported into main.ts's
+  // graph: boot.ts reaches it through a COMPUTED dynamic import so esbuild never
+  // inlines the unofficial-backend OAuth flow into main.mjs. It IS compiled here
+  // (so the dev flow can load it) but is EXCLUDED from the packaged artifact
+  // (electron-builder.yml `!dist/electron/chatgpt-oauth.mjs`) — the same
+  // "absent from the shipped app" discipline the Agent SDK gets. `electron` is
+  // external; the pure crypto/JWT core (src/providers/chatgpt-oauth.ts) inlines.
+  build({
+    ...esm,
+    entryPoints: [resolve(root, 'electron/chatgpt-oauth.ts')],
+    outfile: resolve(outdir, 'chatgpt-oauth.mjs'),
+  }),
   build({
     ...shared,
     entryPoints: [resolve(root, 'electron/preload.ts')],
@@ -125,5 +137,5 @@ await Promise.all([
 ]);
 
 console.log(
-  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, updater-probe.mjs, preload.cjs}',
+  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, updater-probe.mjs, chatgpt-oauth.mjs, preload.cjs}',
 );

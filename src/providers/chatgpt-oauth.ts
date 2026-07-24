@@ -446,6 +446,36 @@ export interface ChatgptTokenSource {
   refreshNow(): Promise<{ accessToken: string; accountId: string }>;
 }
 
+// ---------------------------------------------------------------------------
+// The token-source SEAM (CO-05 wave 2) — how the vault reaches the engine.
+// ---------------------------------------------------------------------------
+//
+// The transport above needs a live `ChatgptTokenSource`, but that source is the
+// Electron `safeStorage` vault (`makeVaultTokenSource`, electron/chatgpt-oauth.ts)
+// — which the runtime must NOT import (it would drag `electron` into the shell's
+// Next graph, exactly the coupling `installCredentialBridge` exists to avoid).
+//
+// So the source is INJECTED, the same shape the credential bridge uses: the
+// Electron main process installs a vault-backed source here after boot (see
+// electron/boot.ts, gated on `isChatgptOauthEnabled()`), and the engine reads it
+// when it constructs a subscription turn. It is a process-global, never crosses
+// contextBridge, and is `undefined` in any build that never installed one — so
+// with the dev seal closed there is simply nothing to construct a turn from.
+const TOKEN_SOURCE_KEY = '__nabyChatgptTokenSource';
+
+type TokenSourceHost = { [TOKEN_SOURCE_KEY]?: ChatgptTokenSource };
+
+/** Install the vault-backed token source (Electron main, dev seal open). */
+export function installChatgptTokenSource(source: ChatgptTokenSource | undefined): void {
+  if (source) (globalThis as TokenSourceHost)[TOKEN_SOURCE_KEY] = source;
+  else delete (globalThis as TokenSourceHost)[TOKEN_SOURCE_KEY];
+}
+
+/** The installed token source, or undefined when none was injected. */
+export function getChatgptTokenSource(): ChatgptTokenSource | undefined {
+  return (globalThis as TokenSourceHost)[TOKEN_SOURCE_KEY];
+}
+
 export type ChatgptFetchOptions = {
   /** The underlying fetch to wrap. Defaults to the global. Injectable for tests. */
   fetch?: typeof globalThis.fetch;

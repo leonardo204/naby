@@ -39,7 +39,7 @@ import {
   resolveProviderCredential,
   type ResolveOptions,
 } from '../providers/resolve.js';
-import { isChatgptOauthEnabled } from '../providers/chatgpt-oauth.js';
+import { CHATGPT_OAUTH_PROVIDER_ID, isChatgptOauthEnabled } from '../providers/chatgpt-oauth.js';
 
 // ---------------------------------------------------------------------------
 // Names + cost basis
@@ -157,6 +157,32 @@ export async function selectEngine(
   const forced = (opts.forced ?? process.env[ENGINE_ENV_VAR] ?? '').trim();
   const devAvailable = (opts.devEngineAvailable ?? isClaudeAgentSdkAvailable)();
   const devModel = process.env.NABY_DEV_MODEL || undefined;
+
+  // -- DEV-ONLY: the ChatGPT subscription-OAuth provider (CO-05) ------------
+  //
+  // It answers through the AiSdkEngine like the metered providers, but its
+  // credential is a live OAuth token SOURCE (not an api key), so
+  // `resolveProviderCredential` deliberately skips it — asking it "is a key
+  // stored" would always say no and block the turn. When the dev seal is open
+  // AND this is the provider the user selected, short-circuit to an `ai-sdk`
+  // selection here; the engine builds the subscription transport from the
+  // injected token source, and a missing sign-in surfaces as "sign in again"
+  // at turn time rather than a spurious "no key" up here. Gated on the seal, so
+  // an official build (flag off) never takes this branch.
+  if (
+    isChatgptOauthEnabled(process.env) &&
+    opts.providerId === CHATGPT_OAUTH_PROVIDER_ID &&
+    (forced === '' || forced === 'ai-sdk')
+  ) {
+    return {
+      ok: true,
+      engine: 'ai-sdk',
+      costBasis: 'metered',
+      summary:
+        `${CHATGPT_OAUTH_LABEL} will answer, on your signed-in ChatGPT subscription. ` +
+        'Dev-only, no per-message charge — uses the unofficial ChatGPT backend (a ToS grey zone).',
+    };
+  }
 
   const devSelection = (why: string): EngineSelection => ({
     ok: true,

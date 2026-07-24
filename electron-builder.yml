@@ -98,6 +98,17 @@ asar: true
 #     whole tree makes that structural rather than a glob nobody re-checks.
 files:
   - dist/electron/**
+  # ---------------------------------------------------------------------
+  # THE DEV-ONLY ChatGPT SUBSCRIPTION-OAUTH MODULE MUST NOT SHIP — spec §2
+  # ---------------------------------------------------------------------
+  # electron/chatgpt-oauth.ts is compiled to dist/electron/chatgpt-oauth.mjs so
+  # the DEV flow can load it (boot.ts reaches it through a computed dynamic
+  # import). It talks to the UNOFFICIAL ChatGPT backend — a ToS grey zone, the
+  # same risk class as the Agent SDK — so it is excluded from the packaged
+  # artifact here, giving the "absent from the shipped app" property the runtime
+  # flag seal (isChatgptOauthEnabled) already backs. Defense in depth: even with
+  # NABY_ENABLE_CHATGPT_OAUTH somehow set, a shipped build cannot load the module.
+  - '!dist/electron/chatgpt-oauth.mjs'
   - dist/naby-runtime.mjs
   - package.json
   - '!node_modules/**'

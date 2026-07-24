@@ -33,6 +33,33 @@ import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
 import type { Updater, UpdateStatus } from './updater.js';
 import type { ProviderDescription, ProviderProfile } from '../dist/naby-runtime.mjs';
+import { isChatgptOauthEnabled } from '../src/providers/chatgpt-oauth.js';
+
+/**
+ * The DEV-ONLY Electron ChatGPT-OAuth module (electron/chatgpt-oauth.ts),
+ * loaded lazily through a computed dynamic import so esbuild never inlines the
+ * unofficial-backend flow into `main.mjs`. Only the seam the IPC layer uses.
+ */
+export type ChatgptOauthMain = {
+  startChatgptLogin: (
+    vault: CredentialVault,
+    opts?: Record<string, unknown>,
+  ) => Promise<{ access_token: string; account_id: string }>;
+  clearTokens: (vault: CredentialVault) => void;
+  readSignInStatus: (
+    vault: CredentialVault,
+  ) => Promise<{ signedIn: boolean; email: string | null; accountId: string | null }>;
+};
+
+/** What `chatgpt-oauth:status`/`signin`/`signout` answer. Labels only — never a
+ *  token. `available` is the dev seal; `signedIn` is whether a token set is
+ *  stored; `email`/`accountId` label the account when signed in. */
+export type ChatgptOauthStatus = {
+  available: boolean;
+  signedIn: boolean;
+  email: string | null;
+  accountId: string | null;
+};
 
 // ---------------------------------------------------------------------------
 // Result envelope (contract §1.2)
@@ -92,6 +119,22 @@ export const CHANNELS = [
   'update:check',
   'update:install',
   'update:open-releases',
+  // -- CO-05 ChatGPT subscription-OAuth (DEV-ONLY, flag-sealed) -------------
+  //
+  // The renderer face of the dev sign-in. All three are INERT unless the dev
+  // seal is open (`isChatgptOauthEnabled()`): with the flag off, `status`
+  // answers `{available:false}`, and `signin`/`signout` refuse — so a shipped
+  // build (flag off, and the electron OAuth module excluded from the artifact)
+  // exposes the channels but they can never sign in or reach the backend.
+  //
+  //   chatgpt-oauth:status   — {available, signedIn, email?, accountId?}. Labels
+  //                            only; NEVER token material (rule 3).
+  //   chatgpt-oauth:signin   — run the browser PKCE flow, store the token set in
+  //                            the same safeStorage vault as the API keys.
+  //   chatgpt-oauth:signout  — clear the stored token set. Idempotent.
+  'chatgpt-oauth:status',
+  'chatgpt-oauth:signin',
+  'chatgpt-oauth:signout',
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
@@ -120,6 +163,13 @@ export type IpcDeps = {
    * than failing, which is the same shape the renderer already has to handle.
    */
   updater?: Updater;
+  /**
+   * CO-05, DEV-ONLY. Loads the flag-sealed Electron ChatGPT-OAuth module through
+   * a computed dynamic import (electron/boot.ts). Optional so the spike harness
+   * registers IPC without it — the channels then answer `{available:false}` /
+   * refuse, exactly as when the dev seal is closed.
+   */
+  loadChatgptOauth?: () => Promise<ChatgptOauthMain>;
   log?: (msg: string) => void;
 };
 
@@ -273,6 +323,51 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
   handle('onboarding:complete', () => {
     deps.profiles.markOnboarded();
     return ok(undefined as void);
+  });
+
+  // -- CO-05 ChatGPT subscription-OAuth (DEV-ONLY, flag-sealed) -------------
+  //
+  // THE SEAL IS CHECKED ON EVERY CALL, not once at registration: the channels
+  // always exist (so the renderer surface is uniform), but they do NOTHING
+  // unless `isChatgptOauthEnabled()` AND the electron OAuth module was wired in
+  // (`deps.loadChatgptOauth`). With the flag off, `status` reports `available:
+  // false` and the renderer never offers the choice; `signin`/`signout` refuse.
+  //
+  // NO TOKEN MATERIAL CROSSES (rule 3). `status`/`signin` answer identity LABELS
+  // (email, accountId) read from the JWT; the access/refresh tokens live only in
+  // the safeStorage vault and reach only the in-process transport.
+
+  const chatgptStatus = (
+    v: Partial<ChatgptOauthStatus> & Pick<ChatgptOauthStatus, 'available' | 'signedIn'>,
+  ): Result<ChatgptOauthStatus> =>
+    ok({ email: null, accountId: null, ...v });
+
+  handle<ChatgptOauthStatus>('chatgpt-oauth:status', async () => {
+    if (!isChatgptOauthEnabled() || !deps.loadChatgptOauth) {
+      return chatgptStatus({ available: false, signedIn: false });
+    }
+    const mod = await deps.loadChatgptOauth();
+    return chatgptStatus({ available: true, ...(await mod.readSignInStatus(deps.vault)) });
+  });
+
+  handle<ChatgptOauthStatus>('chatgpt-oauth:signin', async () => {
+    if (!isChatgptOauthEnabled() || !deps.loadChatgptOauth) {
+      return fail('INTERNAL', 'ChatGPT subscription sign-in is a dev-only, flag-sealed feature.');
+    }
+    const mod = await deps.loadChatgptOauth();
+    // Runs the browser PKCE flow + loopback callback + token exchange, and
+    // stores the token set in the vault. Only labels come back to the renderer.
+    await mod.startChatgptLogin(deps.vault);
+    return chatgptStatus({ available: true, ...(await mod.readSignInStatus(deps.vault)) });
+  });
+
+  handle<ChatgptOauthStatus>('chatgpt-oauth:signout', async () => {
+    if (!isChatgptOauthEnabled() || !deps.loadChatgptOauth) {
+      return chatgptStatus({ available: false, signedIn: false });
+    }
+    const mod = await deps.loadChatgptOauth();
+    mod.clearTokens(deps.vault);
+    return chatgptStatus({ available: true, signedIn: false });
   });
 
   // -- auto-update (F1-09) -------------------------------------------------
