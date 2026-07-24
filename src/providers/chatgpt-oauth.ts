@@ -476,6 +476,67 @@ export function getChatgptTokenSource(): ChatgptTokenSource | undefined {
   return (globalThis as TokenSourceHost)[TOKEN_SOURCE_KEY];
 }
 
+// ---------------------------------------------------------------------------
+// The OAuth ACCOUNT bridge SEAM (CO-06) — how the Next server reaches sign-in.
+// ---------------------------------------------------------------------------
+//
+// The token-source seam above answers "give me a token for the next request".
+// The chip in the chat bottom bar needs three DIFFERENT things — read the
+// current sign-in status, launch the browser sign-in, and sign out — and it must
+// get them the SAME way the Claude chip does: over the `/api/naby` HTTP route, so
+// it works inside the project IFRAME (where `window.naby` does not exist).
+//
+// That route runs in the embedded Next server, which is the SAME process as
+// Electron main — but the runtime must not import `electron` (it would drag it
+// into the shell's Next graph, exactly the coupling the credential bridge avoids).
+// So, IDENTICALLY to `installCredentialBridge`, the main process INSTALLS a
+// vault-backed bridge here after boot (electron/boot.ts, gated on the dev seal),
+// and the server calls `getChatgptOauthBridge()` to reach it. It is a
+// process-global, never crosses contextBridge, and is `undefined` in any build
+// that never installed one — so with the dev seal closed there is nothing to
+// sign into, and the chip renders nothing.
+//
+// LABELS ONLY, NEVER TOKEN MATERIAL. `status`/`signIn` resolve with
+// `{signedIn, email, accountId}` read from the access-token JWT claims; the
+// access/refresh tokens themselves never leave the main process.
+
+/** What the account bridge reports. Labels only — no token ever crosses. */
+export interface ChatgptOauthStatusLabels {
+  signedIn: boolean;
+  email: string | null;
+  accountId: string | null;
+}
+
+/**
+ * The in-process seam the `/api/naby` server calls to read status and to
+ * sign in/out. Implemented by the Electron main process over the safeStorage
+ * vault (electron/boot.ts); `undefined` when never installed (dev seal closed,
+ * or a build with no Electron main — e.g. the plain browser dev server).
+ */
+export interface ChatgptOauthBridge {
+  /** Read the current sign-in status from the vault. Labels only. */
+  status(): Promise<ChatgptOauthStatusLabels>;
+  /** Run the browser PKCE flow, store the tokens, resolve with the new status. */
+  signIn(): Promise<ChatgptOauthStatusLabels>;
+  /** Clear the stored token set. Idempotent. */
+  signOut(): Promise<void>;
+}
+
+const OAUTH_BRIDGE_KEY = '__nabyChatgptOauthBridge';
+
+type OauthBridgeHost = { [OAUTH_BRIDGE_KEY]?: ChatgptOauthBridge };
+
+/** Install the vault-backed account bridge (Electron main, dev seal open). */
+export function installChatgptOauthBridge(bridge: ChatgptOauthBridge | undefined): void {
+  if (bridge) (globalThis as OauthBridgeHost)[OAUTH_BRIDGE_KEY] = bridge;
+  else delete (globalThis as OauthBridgeHost)[OAUTH_BRIDGE_KEY];
+}
+
+/** The installed account bridge, or undefined when none was injected. */
+export function getChatgptOauthBridge(): ChatgptOauthBridge | undefined {
+  return (globalThis as OauthBridgeHost)[OAUTH_BRIDGE_KEY];
+}
+
 export type ChatgptFetchOptions = {
   /** The underlying fetch to wrap. Defaults to the global. Injectable for tests. */
   fetch?: typeof globalThis.fetch;

@@ -24,6 +24,7 @@ import { createUpdater, type Updater } from './updater.js';
 // `dist/naby-runtime.mjs` at run time instead of inlining ai@7 into the main
 // process bundle a second time.
 import type {
+  ChatgptOauthBridge,
   ChatgptTokenSource,
   CredentialBridge,
   installCredentialBridge as InstallCredentialBridgeType,
@@ -46,6 +47,9 @@ type NabyRuntime = {
   /** CO-05 dev seal + token-source seam (both dead unless the flag is set). */
   isChatgptOauthEnabled: (env?: NodeJS.ProcessEnv) => boolean;
   installChatgptTokenSource: (source: ChatgptTokenSource | undefined) => void;
+  /** CO-06 — the account bridge the `/api/naby` server reads to show the chat
+   *  bottom-bar ChatGPT chip and to run sign-in/out from inside the iframe. */
+  installChatgptOauthBridge: (bridge: ChatgptOauthBridge | undefined) => void;
 };
 
 /** The flag-sealed Electron ChatGPT-OAuth module, as loaded at runtime. */
@@ -225,7 +229,25 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     try {
       const chatgpt = await loadChatgptOauth();
       runtimeMod.installChatgptTokenSource(chatgpt.makeVaultTokenSource(vault));
-      log('[chatgpt-oauth] DEV seal open — vault-backed token source installed');
+      // CO-06 — the ACCOUNT bridge the `/api/naby` server reads. It is the exact
+      // sibling of the credential bridge above: the vault lives in this process,
+      // the Next server runs in this process, so the shell's ChatGPT chip reaches
+      // sign-in status + sign-in/out over HTTP (working inside the project iframe,
+      // where the preload `window.naby` bridge does not exist) instead of IPC.
+      // Labels only ever cross — the tokens stay in the vault.
+      runtimeMod.installChatgptOauthBridge({
+        status: () => chatgpt.readSignInStatus(vault),
+        signIn: async () => {
+          // Runs the browser PKCE flow + loopback callback + token exchange and
+          // stores the token set in the vault; resolves with labels only.
+          await chatgpt.startChatgptLogin(vault);
+          return chatgpt.readSignInStatus(vault);
+        },
+        signOut: async () => {
+          chatgpt.clearTokens(vault);
+        },
+      });
+      log('[chatgpt-oauth] DEV seal open — vault-backed token source + account bridge installed');
     } catch (err) {
       // Never fatal: a broken dev-only path must not stop the app booting.
       log(`[chatgpt-oauth] token source not installed: ${String(err)}`);
