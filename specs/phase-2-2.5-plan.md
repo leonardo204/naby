@@ -2,11 +2,11 @@
 id: phase-2-2.5-plan
 title: Phase 2 / 2.5 착수용 구현 계획 — 도구 실행 게이트와 하네스 실행
 type: impl
-version: 0.3.0
+version: 0.4.0
 status: review
 scope: Phase 2(정책 게이트·사람 승인 브리지)와 Phase 2.5(도구 보유 스킬·서브에이전트 오케스트레이션)의 착수 계획과 마일스톤 M1~M4. 진행 상황과 검증 근거를 함께 기록한다.
 related: [phase-3-persona-agent, phase-2-personalization-hitl, phase-1_6-harness-ownership, personalization-strategy]
-updated: 2026-07-25
+updated: 2026-07-26
 ---
 
 # Phase 2 / 2.5 착수용 구현 계획 — 도구 실행 게이트와 하네스 실행
@@ -19,7 +19,15 @@ updated: 2026-07-25
 - **M1 ✅** PolicyStore, realPolicy, 게이트 배선, 권한 설정 UI. (naby 45cc3b8 / cockpit f20cbf8)
 - **M2 ✅** 사람 승인 브리지 — ask에서 턴을 멈추고 인라인 프롬프트를 띄운다. globalThis 레지스트리를 쓰고 abort와 TTL도 처리한다. (naby 668bf3c / cockpit b78651d)
 - **M3 ✅** 스킬 자동 주입을 셸에 연결하고, 도구를 가진 스킬의 toolRef를 검증한다. (naby 61532b8 / cockpit e3d9e5f)
-- **M4 진행 중** 서브에이전트. **dev-claude는 네이티브 `agents` 매핑까지 끝냈다**(모델이 게이트를 통과하는 Task로 위임한다). **남은 것(M4b): ai-sdk 쪽 수동 `naby_delegate`**(중첩 세션)와 실제 위임 라이브 검증.
+- **M4 ✅** 서브에이전트. dev-claude는 네이티브 `agents` 매핑(모델이 게이트를 통과하는 Task로 위임), **ai-sdk는 `naby_delegate`로 중첩 턴을 돌린다**(2026-07-26). `npm run spike:delegate` **7/7** — 실제 엔진·게이트·실행기를 mock 모델로 구동해 위임이 정말 도는지 본다.
+
+  M4b가 필요했던 이유는 성능이 아니다. **같은 서브에이전트가 한 엔진에서는 닿고 다른 엔진에서는 보이지 않았다.** 어느 엔진이 선택됐는지가 앱의 능력을 조용히 바꾸는 것은 런타임이 막으려고 존재하는 프로바이더 의존이다.
+
+  안전 장치 넷, 모두 검증한다.
+  1. **중첩 턴은 부모의 게이트를 그대로 쓴다.** 복사도 새로 만들기도 아니고 같은 함수다. 서브에이전트의 Bash도 같은 정책이 판단하고 같은 사람 승인에서 멈춘다.
+  2. **`toolRefs`는 좁히기만 한다.** 부모의 도구 집합에 교집합을 걸므로 넓힐 방법이 없다.
+  3. **중첩 턴은 `naby_delegate`를 받지 않는다.** 첫 구현의 구멍이었다 — 중첩 턴이 부모의 실행기를 물려받고 그 실행기의 sink는 `depth: 0`이라, 서브에이전트가 부르면 깊이 검사를 영원히 통과해 무한 재귀한다. 도구를 떼면 실효 한계가 한 단계가 된다.
+  4. **중첩 대화는 자식 세션에 들어간다.** 부모 대화록에 사용자가 하지도 않은 말을 넣지 않는다(자율 루프가 continuation 프롬프트에 `[naby autonomy]`를 붙이는 것과 같은 규칙).
 - 별건(dormant): 메모리 자동 주입도 셸에 연결되지 않았다. 스킬과 같은 상태다.
 
 ---
