@@ -48,6 +48,16 @@ export {
   type ScriptRule,
 } from './runtime/gate.js';
 
+// Phase 2 (M1) — the real tool-execution decision policy. `realPolicy` resolves
+// the user's stored PolicyRules and falls back to a baseline; the shell swaps it
+// in for the interim `allowChanges ? allow-all : floor` ternary.
+export {
+  realPolicy,
+  resolvePolicyEffect,
+  matchToolPattern,
+  normalizeToolName,
+} from './runtime/policy.js';
+
 export {
   buildToolset,
   echoNote,
@@ -108,6 +118,11 @@ export type {
   HarnessImportDecision,
   HarnessSet,
   HarnessRemoveSelector,
+  // Tool-execution policy (Phase 2, M1) — the shell builds a permissions CRUD
+  // surface on these and gathers rules per turn for `realPolicy`.
+  PolicyEffect,
+  PolicyRule,
+  PolicyRuleInput,
 } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';

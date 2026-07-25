@@ -35,6 +35,8 @@ import type {
   MemoryStatus,
   MemoryWriteRequest,
   McpEntry,
+  PolicyRule,
+  PolicyRuleInput,
   Project,
   SessionRef,
   Store,
@@ -136,6 +138,10 @@ export class MemoryStore implements Store {
   // what makes the cascade EXEMPTION expressible — deleteSession never touches
   // it, removeProject drops only scope='project' rows for the cwd.
   private readonly harnessItems = new Map<string, HarnessItem>();
+  // Tool-execution policy rules (Phase 2, M1), keyed by id. Store-level, never
+  // per-session and never cascaded — like harness.
+  private readonly policyRules = new Map<string, PolicyRule>();
+  private policyIdCounter = 0;
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -560,6 +566,38 @@ export class MemoryStore implements Store {
   }
 
   // -- app settings (F1-08) ------------------------------------------------
+
+  // -- tool-execution policy (Phase 2, M1) ---------------------------------
+
+  listPolicyRules(scope: HarnessScope, scopeKey: string): PolicyRule[] {
+    return [...this.policyRules.values()]
+      .filter((r) => r.scope === scope && r.scopeKey === scopeKey)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  putPolicyRule(rule: PolicyRuleInput): PolicyRule {
+    const now = Date.now();
+    const existing = [...this.policyRules.values()].find(
+      (r) => r.scope === rule.scope && r.scopeKey === rule.scopeKey && r.toolPattern === rule.toolPattern,
+    );
+    const stored: PolicyRule = existing
+      ? { ...existing, effect: rule.effect, updatedAt: now }
+      : {
+          id: `p-mem-${(this.policyIdCounter += 1)}`,
+          scope: rule.scope,
+          scopeKey: rule.scopeKey,
+          toolPattern: rule.toolPattern,
+          effect: rule.effect,
+          createdAt: now,
+          updatedAt: now,
+        };
+    this.policyRules.set(stored.id, stored);
+    return { ...stored };
+  }
+
+  removePolicyRule(id: string): void {
+    this.policyRules.delete(id);
+  }
 
   getSetting(key: string): string | undefined {
     return this.settings.get(key);

@@ -468,6 +468,35 @@ export type HarnessSet = {
 export type HarnessRemoveSelector = { id: string } | { origin: string };
 
 // ---------------------------------------------------------------------------
+// Tool-execution policy (Phase 2, M1) — persistent per-scope rules the gate
+// consults BEFORE running a tool. A rule maps a tool pattern to an effect; the
+// runtime's `realPolicy` (policy.ts) resolves them, most-specific scope first
+// (project > user > org), and falls back to the turn's baseline when no rule
+// matches. Scopes reuse HarnessScope so rules key exactly like owned harness.
+// ---------------------------------------------------------------------------
+
+/** allow / deny outright, or 'ask' (defer to a human — the Phase 2 M2 approval
+ *  bridge; with no bridge present a rule of 'ask' is treated as the baseline). */
+export type PolicyEffect = 'allow' | 'deny' | 'ask';
+
+/** A stored policy rule. `toolPattern` matches the BARE tool name the gate sees
+ *  (after any `mcp__…__` namespacing is stripped): an exact name, or a trailing
+ *  `*` wildcard (e.g. `mcp__jira__*`), or `*` for all tools. */
+export type PolicyRule = {
+  id: string;
+  scope: HarnessScope;
+  scopeKey: string;
+  toolPattern: string;
+  effect: PolicyEffect;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** Upsert input: identity is (scope, scopeKey, toolPattern); id/timestamps are
+ *  store-assigned. */
+export type PolicyRuleInput = Omit<PolicyRule, 'id' | 'createdAt' | 'updatedAt'>;
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -626,6 +655,21 @@ export interface Store {
     into: { scope: HarnessScope; scopeKey: string },
     opts?: { ids?: string[] },
   ): HarnessItem[];
+
+  // -- tool-execution policy (Phase 2, M1) ---------------------------------
+  //
+  // Persistent per-scope rules the gate consults before running a tool. Keyed
+  // like harness (scope, scopeKey), addressable by id for removal. Ordering is
+  // createdAt asc; scope precedence is applied ABOVE the store (policy.ts).
+
+  /** Rules for one scope, oldest first. */
+  listPolicyRules(scope: HarnessScope, scopeKey: string): PolicyRule[];
+
+  /** Insert/update by (scope, scopeKey, toolPattern). Returns the stored row. */
+  putPolicyRule(rule: PolicyRuleInput): PolicyRule;
+
+  /** Delete one rule by id. No-op if absent. */
+  removePolicyRule(id: string): void;
 
   // -- usage (F1-07) -------------------------------------------------------
 

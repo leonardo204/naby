@@ -59,6 +59,8 @@ import type {
   MemoryType,
   MemoryWriteRequest,
   McpEntry,
+  PolicyRule,
+  PolicyRuleInput,
   Project,
   SessionRef,
   Store,
@@ -327,6 +329,22 @@ CREATE TABLE IF NOT EXISTS harness_items (
 
 CREATE INDEX IF NOT EXISTS harness_items_by_scope ON harness_items (scope, scope_key);
 CREATE INDEX IF NOT EXISTS harness_items_by_origin ON harness_items (prov_origin);
+
+-- Tool-execution policy rules (Phase 2, M1). Additive table: an existing DB
+-- picks it up on next open with NO data migration and NO loss. Keyed like
+-- harness (scope, scope_key); identity for upsert is (scope, scope_key,
+-- tool_pattern). Never session-keyed and never cascaded on session delete.
+CREATE TABLE IF NOT EXISTS policy_rules (
+  id           TEXT PRIMARY KEY,
+  scope        TEXT NOT NULL,   -- user | project | org
+  scope_key    TEXT NOT NULL,   -- userId | cwd | orgId
+  tool_pattern TEXT NOT NULL,   -- bare tool name, trailing-* wildcard, or '*'
+  effect       TEXT NOT NULL,   -- allow | deny | ask
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  UNIQUE (scope, scope_key, tool_pattern)
+);
+CREATE INDEX IF NOT EXISTS policy_rules_by_scope ON policy_rules (scope, scope_key);
 `;
 
 // ---------------------------------------------------------------------------
@@ -543,6 +561,36 @@ function mintHarnessId(): string {
   return `h-${Date.now().toString(36)}-${harnessIdCounter.toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
+}
+
+let policyIdCounter = 0;
+function mintPolicyId(): string {
+  policyIdCounter += 1;
+  return `p-${Date.now().toString(36)}-${policyIdCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+type PolicyRow = {
+  id: string;
+  scope: string;
+  scope_key: string;
+  tool_pattern: string;
+  effect: string;
+  created_at: number;
+  updated_at: number;
+};
+
+function toPolicyRule(row: PolicyRow): PolicyRule {
+  return {
+    id: row.id,
+    scope: row.scope as PolicyRule['scope'],
+    scopeKey: row.scope_key,
+    toolPattern: row.tool_pattern,
+    effect: row.effect as PolicyRule['effect'],
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
 }
 
 let uuidCounter = 0;
@@ -1350,6 +1398,54 @@ export class SqliteStore implements Store {
     const out: Record<string, string> = {};
     for (const r of rows) out[r.key] = r.value;
     return out;
+  }
+
+  // -- tool-execution policy (Phase 2, M1) ---------------------------------
+
+  listPolicyRules(scope: HarnessScope, scopeKey: string): PolicyRule[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM policy_rules WHERE scope = ? AND scope_key = ? ORDER BY created_at ASC`,
+      )
+      .all(scope, scopeKey) as PolicyRow[];
+    return rows.map(toPolicyRule);
+  }
+
+  putPolicyRule(rule: PolicyRuleInput): PolicyRule {
+    this.assertOpen();
+    const now = Date.now();
+    const existing = this.db
+      .prepare(
+        `SELECT * FROM policy_rules WHERE scope = ? AND scope_key = ? AND tool_pattern = ?`,
+      )
+      .get(rule.scope, rule.scopeKey, rule.toolPattern) as PolicyRow | undefined;
+    const id = existing ? existing.id : mintPolicyId();
+    this.db
+      .prepare(
+        `INSERT INTO policy_rules (id, scope, scope_key, tool_pattern, effect, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (scope, scope_key, tool_pattern)
+         DO UPDATE SET effect = excluded.effect, updated_at = excluded.updated_at`,
+      )
+      .run(
+        id,
+        rule.scope,
+        rule.scopeKey,
+        rule.toolPattern,
+        rule.effect,
+        existing ? Number(existing.created_at) : now,
+        now,
+      );
+    const row = this.db
+      .prepare(`SELECT * FROM policy_rules WHERE id = ?`)
+      .get(id) as PolicyRow;
+    return toPolicyRule(row);
+  }
+
+  removePolicyRule(id: string): void {
+    this.assertOpen();
+    this.db.prepare(`DELETE FROM policy_rules WHERE id = ?`).run(id);
   }
 
   // -- MCP registry --------------------------------------------------------

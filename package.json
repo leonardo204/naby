@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Personalized persona agent desktop app \u2014 spike harness (Phase 0)",
+  "description": "Personalized persona agent desktop app — spike harness (Phase 0)",
   "main": "dist/electron/main.mjs",
   "scripts": {
     "build:runtime": "node scripts/build-runtime.mjs",
@@ -45,7 +45,8 @@
     "verify:mac": "node scripts/verify-mac.mjs",
     "verify:update-feed": "node scripts/verify-update-feed.mjs",
     "verify:updater": "npm run build:electron && node scripts/verify-updater.mjs",
-    "spike:05": "node --env-file=.env --import tsx src/spikes/spike-05-live-providers.ts"
+    "spike:05": "node --env-file=.env --import tsx src/spikes/spike-05-live-providers.ts",
+    "spike:policy": "npm run build:runtime && tsx src/spikes/spike-policy.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",
