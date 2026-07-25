@@ -436,6 +436,22 @@ export {
   type LedgerKind,
 } from './runtime/growth.js';
 
+// -- cold start (Phase 1.5, P15-07) ------------------------------------------
+// The onboarding interview: four durable questions whose answers become CONFIRMED
+// user-tier memory, because the user typed them in answer to a direct question.
+// Path B of the strategy's three, chosen for coverage — C needs an org someone
+// curated and A needs artifacts, while a genuinely new user has neither.
+export {
+  BOOTSTRAP_QUESTIONS,
+  BOOTSTRAP_DONE_KEY,
+  BOOTSTRAP_ANSWER_MAX,
+  answersToMemory,
+  shouldOfferBootstrap,
+  type BootstrapQuestion,
+  type BootstrapWriteSet,
+  type BootstrapSkipReason,
+} from './runtime/bootstrap.js';
+
 // -- naby_delegate (Phase 2.5, M4b) ------------------------------------------
 // Subagents on an engine with no native ones: the AI-SDK path IGNORED
 // SubagentSpec, so which engine was selected silently changed what the app could
