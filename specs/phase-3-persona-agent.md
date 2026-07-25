@@ -1,31 +1,31 @@
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 
-> 상태: 설계 초안 (2026-07-25). 프로젝트의 궁극 목표를 구조로 옮기는 피벗.
-> 한 줄: naby를 "하네스(도구) 지원 환경"에서 → "사용자를 대리하는 **페르소나 에이전트**를 내장한 제품"으로.
+> 상태: 설계 초안(2026-07-25). 프로젝트의 최종 목표를 구조로 옮기는 전환점이다.
+> 한 줄 요약: naby를 "하네스(도구)를 지원하는 환경"에서 "사용자를 대리하는 **페르소나 에이전트**를 내장한 제품"으로 바꾼다.
 
 ## 1. 목표 (사용자 정의)
 
-- naby **자체**의 에이전트 레이어를 신설. **페르소나 에이전트**가 기본 내장, 사용자가 에이전트를 필요 시 하나씩 추가.
-- 페르소나 에이전트는 사용자의 판단·행위·행동을 **학습**해, 지시받으면 사용자를 **대리 수행**하고, 크리티컬한 상황만 위임(에스컬레이션), 중간 알림(텔레그램), 마지막에 보고.
+- naby **자체**의 에이전트 레이어를 새로 만든다. **페르소나 에이전트**는 기본으로 들어 있고, 사용자는 필요할 때 에이전트를 하나씩 추가한다.
+- 페르소나 에이전트는 사용자의 판단과 행동을 **학습**한다. 지시를 받으면 사용자를 **대리해 일을 처리하고**, 꼭 사람이 판단해야 하는 상황만 넘긴다(에스컬레이션). 일하는 중에는 텔레그램으로 알리고, 끝나면 결과를 보고한다.
 - 예: `@페르소나 이 테스트 90% 도달까지 처리하고, 크리티컬 아니면 알아서 해. 꼭 판단 필요하면 텔레그램으로 알리고 마무리 후 보고.`
 
 ## 2. 두 레이어 (재정의)
 
 | 레이어 | 소유 | 구성 | 호출 |
 |---|---|---|---|
-| **naby 에이전트 레이어** (신설) | naby 자체 | 내장 **페르소나 에이전트** + 사용자 추가 에이전트. **메모리는 여기로 이동**(에이전트의 학습 기억) | **`@`** — 파일 참조처럼, `@에이전트명 <지시>` 로 그 에이전트에게 위임 |
-| **하네스 레이어** (기존) | 사용자 naby-layer | **command / skill / subagent** (skill을 하네스 하부 카테고리로) | **`/`** — 하네스 스킬/서브에이전트/커맨드 호출 |
+| **naby 에이전트 레이어**(신설) | naby 자체 | 내장 **페르소나 에이전트**와 사용자가 추가한 에이전트. **메모리가 여기로 옮겨온다**(에이전트가 학습한 기억) | **`@`** — 파일을 참조할 때처럼 `@에이전트명 <지시>`로 그 에이전트에게 맡긴다 |
+| **하네스 레이어**(기존) | 사용자 naby-layer | **command / skill / subagent**(스킬을 하네스 하위 갈래로 둔다) | **`/`** — 하네스의 스킬·서브에이전트·커맨드를 부른다 |
 
-즉: `/` = 도구(하네스), `@` = 에이전트(+파일 참조). 메모리 = 에이전트 소속. 스킬 = 하네스 소속.
+정리하면 `/`는 도구(하네스)를, `@`는 에이전트를 부른다(`@`는 파일 참조도 겸한다). 메모리는 에이전트에 속하고 스킬은 하네스에 속한다.
 
-## 3. 기존 자산 매핑 (대부분 부품이 이미 있음)
+## 3. 기존 자산 매핑 (부품은 대부분 이미 있다)
 
-- **에이전트 실행** = M4 서브에이전트 오케스트레이션(runTurn + systemPrompt + toolRefs). 페르소나 에이전트 = **naby-소유 1급 에이전트**(사용자 하네스 subagent와 별개, 기본 시드).
-- **학습/기억** = 메모리 시스템(store `memory_items`, 쓰기 게이트 `decideMemoryWrite`, 주입 `retrieveMemories`). ⚠️ 주입이 셸에 **미배선**(스킬과 동일 dormant) → 페르소나 턴에 주입 배선 필요.
-- **에스컬레이션** = **M2 승인 브리지 재사용**. 인라인 프롬프트 대신(또는 병행) **텔레그램 out-of-band** 채널로 배달 + 답신으로 resolve. `approvalRegistry`는 이미 out-of-band resolve 지원.
-- **자율 실행(90%까지 알아서)** = 목표 주도 루프(ralph/`/loop`식 persist-until-done) + 기존 **scheduled tasks** 인프라.
-- **알림/보고** = 텔레그램(현재 dotclaude-messenger는 외부 커맨드 — naby 런타임엔 텔레그램 없음 → 통합 필요) + 최종 리포트 메시지.
-- **정책 게이트** = M1/M2 그대로 상속(에이전트 툴콜도 게이트 통과).
+- **에이전트 실행** — M4 서브에이전트 오케스트레이션(`runTurn` + systemPrompt + toolRefs)을 그대로 쓴다. 페르소나 에이전트는 **naby가 소유하는 1급 에이전트**다. 사용자 하네스 subagent와는 별개이며 처음부터 시드로 들어간다.
+- **학습과 기억** — 메모리 시스템(store `memory_items`, 쓰기 게이트 `decideMemoryWrite`, 주입 `retrieveMemories`)을 쓴다. ⚠️ 주입이 셸에 아직 연결되지 않았다(스킬과 같은 dormant 상태). 페르소나 턴에 주입을 연결해야 한다.
+- **에스컬레이션** — **M2 승인 브리지를 재사용한다.** 인라인 프롬프트 대신, 또는 인라인과 함께, **텔레그램으로 앱 밖에** 질문을 보내고 답신으로 승인을 해소한다. `approvalRegistry`는 이미 앱 밖 해소를 지원한다.
+- **자율 실행(90%까지 알아서)** — 목표를 좇는 루프(ralph나 `/loop`처럼 끝날 때까지 이어가는 방식)에 기존 **scheduled tasks** 인프라를 쓴다.
+- **알림과 보고** — 텔레그램으로 보낸다. 지금 dotclaude-messenger는 외부 커맨드여서 naby 런타임에는 텔레그램이 없으므로 통합해야 한다. 여기에 최종 리포트 메시지를 더한다.
+- **정책 게이트** — M1/M2를 그대로 물려받는다. 에이전트의 툴콜도 게이트를 통과한다.
 
 ## 4. 데이터 모델 (신설)
 
@@ -41,49 +41,63 @@ Agent {
   createdAt, updatedAt
 }
 ```
-- 최초 실행 시 **built-in 페르소나 에이전트 1개 시드**(삭제 불가, 편집 가능).
+- 최초 실행 때 **built-in 페르소나 에이전트 하나를 시드로 넣는다**. 삭제할 수 없고, 편집할 수 있다.
 
 ## 5. 호출 라우팅 (`@`)
 
-- `ChatInput`/디스패치에서 줄이 `@<agentName> ...` 로 시작하면 → 그 에이전트로 턴 라우팅.
-  - ⚠️ 현재 `@`는 (a) 서브에이전트 커맨드(`@verb`), (b) 파일 절대경로 삽입에 씀. **충돌 정리 필요**: `@에이전트명`(등록된 agent) > `@하네스subagent` > 파일. 등록 에이전트명 우선 매칭.
-- 라우팅 시 turn = 에이전트 systemPrompt + 주입 메모리 + 에이전트 toolRefs + autonomy 모드. `resolveCommandPrompt`/runTurn 확장.
+- `ChatInput`과 디스패치에서 줄이 `@<agentName> ...`으로 시작하면 그 에이전트로 턴을 라우팅한다.
+  - ⚠️ 지금 `@`는 두 가지로 쓰인다. 하나는 서브에이전트 커맨드(`@verb`), 하나는 파일 절대경로 삽입이다. **충돌을 정리해야 한다.** 우선순위는 `@에이전트명`(등록된 agent) > `@하네스subagent` > 파일이며, 등록된 에이전트 이름을 먼저 맞춰 본다.
+- 라우팅한 턴은 에이전트의 systemPrompt, 주입된 메모리, 에이전트 toolRefs, autonomy 모드로 구성된다. `resolveCommandPrompt`와 `runTurn`을 확장한다.
 
 ## 6. Settings 재편
 
-- 신설 **"에이전트"** 섹션: 내장 페르소나 + 추가/편집, **메모리를 이 아래로 이동**(NabyMemoryReview).
-- **하네스** 섹션에 **커맨드/스킬/서브에이전트 서브탭** 통합(현재 분리된 "커맨드" 섹션 흡수, skill은 이미 하네스 소속).
-- 결과 nav: theme·language·provider·**Agents(페르소나+메모리)**·**Harness(command/skill/subagent)**·Permissions·about.
+- **"에이전트"** 섹션을 새로 만든다. 내장 페르소나를 보여주고 추가·편집을 지원하며, **메모리(NabyMemoryReview)를 이 아래로 옮긴다**.
+- **하네스** 섹션에 **커맨드·스킬·서브에이전트 서브탭을 합친다.** 지금 따로 있는 "커맨드" 섹션을 흡수한다. 스킬은 이미 하네스에 속한다.
+- 정리된 nav: theme · language · provider · **Agents(페르소나+메모리)** · **Harness(command/skill/subagent)** · Permissions · about.
 
 ## 7. 마일스톤 (Phase 3)
 
-- **P3-M1** ✅ **구현 완료(2026-07-25, 커밋 대기)** — 데이터 모델(`agents` 스토어) + built-in 페르소나 시드 + Settings "에이전트" 섹션 + 메모리 이동 + 커맨드→하네스 흡수. (구조 재편, 실행 없음)
-  - 런타임: `store.ts` Agent/AgentInput/AgentKind/AgentEscalation/AgentAutonomy + `listAgents/getAgent/getAgentByName/putAgent/removeAgent`(양 드라이버), `agents.ts`(BUILTIN_PERSONA_ID/SEED/seedBuiltinPersona, 페르소나 undeletable=store 강제), runtime-entry export, `spike-agents`(30체크×2드라이버+재오픈 무중복 PASS).
-  - 셸: `getStore()` 합성루트에 `seedBuiltinPersona` 배선(멱등), `api/naby.ts` `agent.list/put/remove` 액션, `NabyAgentManager.tsx`(신규), Settings `agents` 섹션(메모리 이동)+`harness` 섹션(커맨드 흡수), i18n `agentManager.*`(en/ko).
-  - 검증: 타입체크 clean(양 트리, 베이스라인 노이즈만), `build:app` exit 0, 실서버 부팅 후 `/api/naby` agent.list=시드확인/put/삭제불가 페르소나/중복명 거부 전부 통과. **미검증: Settings UI 시각 렌더(라이브 창 필요).**
-  - 결정: 페르소나 kind='persona' 유일(사용자는 custom만 생성), name=@라우팅 핸들(UNIQUE, 공백 불가), memoryScope=학습 스코프(P3-M2 주입 배선 예정), escalation=inline(텔레그램 P3-M3).
-- **P3-M2** ✅ **구현 완료(2026-07-25, 커밋 대기)** — `@에이전트` 라우팅: 지정 에이전트로 턴 실행(systemPrompt+메모리 주입+toolRefs). 메모리 자동 주입 배선. (M3/M4 재사용)
-  - 런타임: `agents.ts` `parseAgentAddress(prompt)`(순수 파서, `@name`+task 분리) + runtime-entry export. `spike-agents`에 파서 7체크 추가.
-  - 셸 `naby.ts`: `parseAgentAddress`→`getAgentByName` 라우팅. 라우팅 시 (a) userText=주소 제거한 task, (b) system=agent.systemPrompt+cwd노트, (c) model=agent.model 우선, (d) **toolRefs allowlist를 게이트 최외곽 deny로 강제**(엔진 무관). **memoryInjection 배선**(dormant→active, 전 턴 일반 활성; no-op 불변).
-  - 셸 `slashCommands.ts`: **충돌 규칙** — `@등록에이전트명`은 하네스 `@verb` 확장 건너뜀(엔진 라우팅으로 통과). `CommandExpansionStore`에 `getAgentByName` 추가. `slashCommands.test` +3 케이스.
-  - 검증: 타입체크 clean(양 트리), slashCommands 유닛 13/13, spike-agents(파서 7 + 스토어 전부) PASS, `build:app` exit 0, 실서버 부팅 OK. **미검증: 실제 @라우팅 턴(system override/toolRefs deny/메모리 주입이 라이브 모델 턴에 반영되는지) — 라이브 모델 필요.**
-  - 남음(P3-M3로): autonomy(maxSteps 루프)·텔레그램 에스컬레이션. 메모리는 현재 전 스코프 일반 주입 — 에이전트 memoryScope 타깃팅은 P3-M4 학습에서 정교화.
-- **P3-M3** 🔶 **진행 중** — 자율 모드 + 에스컬레이션: 목표 루프 + M2 승인의 **텔레그램 채널** + 최종 리포트. (M2/scheduled/telegram)
-  - **결정(2026-07-25, 개정)**: 텔레그램 설정=naby 자체(store settings), **naby 전용 봇(@BotFather로 별도 생성)** — dotclaude 봇/`messenger.json`과 **완전 분리**(사용자 요청). chat_id는 `detectChatId`로 자동 감지(naby 봇에 메시지 1회 후 감지). 에스컬레이션=**양방향**(텔레그램 인라인버튼/답장으로 원격 승인 resolve).
-  - **M3a ✅ 완료(커밋 대기)** — 텔레그램 채널 기반: 셸 `lib/telegram.ts`(설정 read/write, `detectChatId` 자동감지, 순수헬퍼 buildApprovalKeyboard/parseCallbackData/classifyTextReply(en/ko), IO: sendTelegramMessage/pollTelegramUpdates/answerCallbackQuery). api `telegram.get/set/test/detectChat`(토큰 redact). `NabyTelegramSettings.tsx`(전용봇 안내+Detect 버튼)+Settings Agents섹션. i18n `telegramSettings.*`. **dotclaude 결합 제거**(seedTelegramFromDotclaude/readDotclaudeMessengerConfig 삭제, getStore 프리필 미배선). 검증: 유닛 9/9, 타입체크 clean, build:app exit0, 실봇 전송 성공(초기 공유봇으로 E2E 확인)+분리 후 빈설정/graceful 에러 확인.
-  - **M3b 남음** — 에스컬레이션 배선: escalation∈{telegram,both} 에이전트의 M2 `requestApproval`이 인라인버튼 텔레그램 발송 + getUpdates 폴링 루프가 callback/답장을 `resolveApproval(approvalId)`에 매핑(앱/텔레그램 양쪽 동일 승인 해소). + 턴 종료 시 최종 리포트 전송.
-  - **M3c 남음** — 자율 루프: `autonomy.maxSteps` 목표 주도 persist-until-done(scheduled tasks 인프라 재사용).
-- **P3-M4** — 학습: 페르소나 턴에서 사용자 판단/행위를 메모리로 캡처(쓰기 게이트) + 다음 턴 주입 강화.
+- **P3-M1** ✅ **구현 완료(2026-07-25, 커밋 대기)** — 데이터 모델(`agents` 스토어), built-in 페르소나 시드, Settings "에이전트" 섹션, 메모리 이동, 커맨드를 하네스로 흡수. 구조만 재편하고 실행은 없다.
+  - 런타임: `store.ts`에 Agent/AgentInput/AgentKind/AgentEscalation/AgentAutonomy와 `listAgents/getAgent/getAgentByName/putAgent/removeAgent`를 두 드라이버 모두에 넣었다. `agents.ts`(BUILTIN_PERSONA_ID/SEED/seedBuiltinPersona)에서 페르소나 삭제 금지를 store가 강제한다. runtime-entry로 내보내고, `spike-agents`가 30체크 × 2드라이버와 재오픈 시 중복 없음을 PASS로 확인했다.
+  - 셸: `getStore()` 합성 루트에 `seedBuiltinPersona`를 멱등으로 연결했다. `api/naby.ts`에 `agent.list/put/remove` 액션, `NabyAgentManager.tsx`(신규), Settings `agents` 섹션(메모리 이동)과 `harness` 섹션(커맨드 흡수), i18n `agentManager.*`(en/ko)를 추가했다.
+  - 검증: 타입체크 clean(두 트리, 베이스라인 노이즈만), `build:app` exit 0. 실서버를 띄우고 `/api/naby`로 agent.list 시드 확인, put, 페르소나 삭제 거부, 중복 이름 거부를 모두 통과했다. **미검증: Settings UI가 실제로 어떻게 보이는지(라이브 창이 필요하다).**
+  - 결정: 페르소나는 kind='persona' 하나뿐이고 사용자는 custom만 만든다. name은 `@` 라우팅 핸들이라 UNIQUE이고 공백을 쓸 수 없다. memoryScope는 학습 스코프이며 주입 연결은 P3-M2에서 한다. escalation은 inline으로 두고 텔레그램은 P3-M3에서 붙인다.
+- **P3-M2** ✅ **구현 완료(2026-07-25, 커밋 대기)** — `@에이전트` 라우팅. 지정한 에이전트로 턴을 실행하고(systemPrompt + 메모리 주입 + toolRefs), 메모리 자동 주입을 연결했다. M3와 M4가 이 배선을 재사용한다.
+  - 런타임: `agents.ts`에 `parseAgentAddress(prompt)`를 넣었다. `@name`과 task를 분리하는 순수 파서이며 runtime-entry로 내보낸다. `spike-agents`에 파서 7체크를 더했다.
+  - 셸 `naby.ts`: `parseAgentAddress` 결과를 `getAgentByName`으로 찾아 라우팅한다. 라우팅하면 (a) userText는 주소를 뗀 task, (b) system은 agent.systemPrompt + cwd 노트, (c) model은 agent.model을 먼저 쓰고, (d) **toolRefs allowlist를 게이트 가장 바깥의 deny로 강제한다**(엔진과 무관하게 걸린다). **memoryInjection을 연결해** dormant에서 active로 바꿨고, 모든 턴에 일반 주입이 걸리며 no-op 불변은 지켰다.
+  - 셸 `slashCommands.ts`: **충돌 규칙**을 넣었다. `@등록에이전트명`은 하네스 `@verb` 확장을 건너뛰고 엔진 라우팅으로 넘어간다. `CommandExpansionStore`에 `getAgentByName`을 추가하고 `slashCommands.test`에 3케이스를 더했다.
+  - 검증: 타입체크 clean(두 트리), slashCommands 유닛 13/13, spike-agents(파서 7 + 스토어 전부) PASS, `build:app` exit 0, 실서버 부팅 정상. **미검증: 실제 `@` 라우팅 턴 — system을 덮어쓰는지, toolRefs deny가 걸리는지, 메모리 주입이 라이브 모델 턴에 반영되는지. 라이브 모델이 필요하다.**
+  - P3-M3으로 넘긴 것: autonomy(maxSteps 루프)와 텔레그램 에스컬레이션. 메모리는 지금 모든 스코프를 일반 주입하며, 에이전트 memoryScope로 좁히는 일은 P3-M4 학습에서 다듬는다.
+- **P3-M3** ✅ **완료(M3a·M3b·M3c, 2026-07-25)** — 자율 모드와 에스컬레이션. 목표 루프, M2 승인의 **텔레그램 채널**, 최종 리포트를 붙였다(M2·scheduled·telegram 재사용).
+  - **결정(2026-07-25, 개정)**: 텔레그램 설정은 naby 자체(store settings)에 두고 **naby 전용 봇을 @BotFather로 따로 만든다.** dotclaude 봇과 `messenger.json`에서 **완전히 분리한다**(사용자 요청). chat_id는 `detectChatId`로 자동 감지한다(naby 봇에 메시지를 한 번 보낸 뒤 감지). 에스컬레이션은 **양방향**이다. 텔레그램 인라인 버튼이나 답장으로 원격에서 승인을 해소한다.
+  - **M3a ✅ 완료(커밋 대기)** — 텔레그램 채널의 기반을 셸에 만들었다. `lib/telegram.ts`에 설정 읽기·쓰기, `detectChatId` 자동 감지, 순수 헬퍼 buildApprovalKeyboard/parseCallbackData/classifyTextReply(en/ko), IO sendTelegramMessage/pollTelegramUpdates/answerCallbackQuery가 들어간다. api에 `telegram.get/set/test/detectChat`을 추가하고 토큰은 가린 채로만 내보낸다. `NabyTelegramSettings.tsx`(전용 봇 안내 + Detect 버튼)를 Settings Agents 섹션에 넣고 i18n `telegramSettings.*`를 추가했다. **dotclaude 결합은 제거했다**(seedTelegramFromDotclaude와 readDotclaudeMessengerConfig 삭제, getStore 프리필 연결 없음). 검증: 유닛 9/9, 타입체크 clean, `build:app` exit 0. 실제 봇 전송은 초기 공유 봇으로 한 번 성공했고, 분리 뒤에는 빈 설정 반환과 부드러운 실패를 확인했다.
+  - **M3b ✅ 완료(2026-07-25, 커밋 대기)** — 에스컬레이션 배선. 전부 셸에서 한다.
+    - 신규 `lib/telegramEscalation.ts`가 브리지다. 순수 함수는 `truncate`, `formatApprovalMessage`(툴과 입력 400자 미리보기, 평문으로 보낸다 — 툴 입력의 `_`나 `*`가 Markdown 파싱을 깨뜨린다), `formatFinalReport`(성공하면 답변 1200자, 실패하면 에러), `interpretUpdate`(callback·text·무시 판정에 watched 여부까지), `pickTextReplyTarget`(**가장 최근** escalatedAt), `telegramDecision`(deny 이유에 "from Telegram"을 남긴다)이다. IO는 `escalateApproval`(먼저 watch에 넣고 루프를 띄운 뒤 인라인 버튼을 보내며, 발송이 실패하면 watch에서 뺀다), `finishEscalation`(앱·abort·TTL이 먼저 해소하면 watch에서 빼고 채팅에 알린다. **watch에 없으면 아무것도 하지 않아** 중복 통지를 막는다), `sendFinalReport`, `ensureListener`(폴링 루프)다.
+    - **폴링 루프는 참조 카운트 방식이다**(상시 켜두지 않는다). 대기 중인 승인이 하나 이상일 때만 `getUpdates`를 25초 long-poll로 돌리고, 마지막 승인이 해소되면 끝낸다. 이유는 두 가지다. 봇 하나당 `getUpdates`는 한 개만 허용되므로 상시 폴링하면 Settings의 **Detect가 409로 깨진다.** 그리고 쓰지 않는 소켓을 붙잡고 있을 이유가 없다. 반복 사이에 최소 2초를 두어 오류가 났을 때 빈 폴링이 폭주하지 않게 하고, 매 반복마다 설정을 다시 읽어 텔레그램을 끄면 루프도 끝난다.
+    - **중복과 재전송을 막는 장치**는 두 겹이다. offset 워터마크를 store `telegram.updateOffset`에 저장하고, 프로세스당 한 번 **밀린 업데이트를 비운다.** 몇 시간 전에 보낸 "yes"가 새 승인을 해소하는 사고를 막는 장치다. watch map이 두 번째 방어선이라, 지켜보지 않는 id는 무시하고 버튼은 확인 응답만 보낸다. 상태는 `globalThis.__nabyTelegramBridge`에 둔다. approvalRegistry와 같은 realm 함정에 걸리기 때문이다.
+    - `engines/naby.ts` 배선: `escalation = routedAgent?.autonomy.escalation ?? 'inline'`으로 읽어 telegram이나 both면 `escalateToTelegram`이 참이 된다. `requestApproval`에서 `approval_request`를 emit한 **직후 기다리지 않고** 텔레그램으로 보낸다(await하면 턴이 늦어진다). 해소는 `settle`에서 `finishEscalation`이 맡고, 턴이 끝나면 `sendFinalReport`를 **await한다**(프로세스가 정리되며 발송을 놓치는 경쟁을 막는다). 라우팅이 없는 일반 턴은 설정을 읽지도 않는다(byte-for-byte no-op).
+    - 검증: 신규 유닛 15개에 기존 telegram 9개를 더해 lib 57/57, **셸 전체 261/261**, 타입체크 clean(두 트리, 베이스라인 노이즈만), `build:app` exit 0. `.next-prod`와 `dist` 번들에 브리지가 들어간 것을 확인했고, prod 서버를 띄워 `escalation:'both'` 에이전트 저장과 `telegram.get` 빈 설정을 확인했다. 브리지 전체 흐름(발송 → `getUpdates` → `resolveApproval(approvalId)` → 확인 응답과 확인 메시지 → offset 전진 → `finishEscalation`을 두 번 호출해도 한 번만 통지)은 fetch를 스텁으로 바꿔 검증했다. **미검증: 라이브 모델 턴에서 게이트가 실제로 에스컬레이션하는지, 실제 나비봇과 왕복하는지. 봇을 먼저 만들어야 한다.**
+  - **M3c ✅ 완료(2026-07-25, 커밋 대기)** — 자율 루프(`autonomy.maxSteps`). 전부 셸에서 한다.
+    - **정의**: 1 step은 모델 턴 하나다(`runTurn` 한 번 = `engine.run` 한 번과 그 안의 툴 루프). `maxSteps`는 사용자가 "계속"을 입력하지 않고 에이전트가 **스스로** 밟을 수 있는 턴 수다.
+    - **루프는 엔진 dispatch 안에 둔다**(`engines/naby.ts`에서 runTurn을 감싸는 do/while). `/api/chat`으로 다시 dispatch해서 이어붙이면 자기 자신의 살아 있는 run에 **concurrent-run 409**가 걸리고, run 레지스트리가 목표 하나를 여러 엔트리로 쪼갠다. 그래서 목표 하나 = run 하나 = step N개다. MCP 툴셋, 게이트, 에스컬레이션, store 핸들은 루프 **밖에서** 한 번만 만든다. step이 아니라 목표에 속하는 것들이다. 세션 히스토리를 공유하므로 step N은 1번부터 N-1번까지가 한 일을 다 본다.
+    - 신규 `lib/autonomy.ts`는 순수 함수만 담고 유닛 12개가 붙는다. `AUTONOMY_STEP_CAP=20`, `resolveMaxSteps`(undefined·0·1·NaN·∞은 1로, 20을 넘으면 20으로), `isAutonomous`, `DONE_MARKER='[[DONE]]'`와 `sawDoneMarker`, `autonomyInstruction`(system에 주입하는 프로토콜), `continuationPrompt`, `decideAutonomyStep`(우선순위는 aborted > error > done-marker > no-tool-use > max-steps), `stepMarker`.
+    - **안전 규칙 세 가지.** ① 켜야 돌고, 켜도 상한이 있다. maxSteps가 없거나 1이면 기존 단일 턴 그대로여서 주입도 continuation도 없다(byte-for-byte no-op). ② **스스로 멈춘다.** 툴을 쓰지 않은 step은 "일하는 중"이 아니라 "답변"이므로 런을 끝낸다. 자기끼리 이야기하며 상한까지 도는 것을 막는 장치다. `[[DONE]]`으로 명시적으로 끝낼 수도 있다. ③ **자율은 권한이 아니다.** 모든 step의 모든 툴콜이 같은 게이트·정책·toolRefs allowlist를 지나고, 'ask' 규칙은 그대로 사람 승인(M3b 텔레그램 포함)에서 멈춘다.
+    - **클라이언트 계약이 가장 중요하다.** 클라이언트는 `result`를 받으면 턴을 끝내므로 **중간 step의 result는 내보내지 않고** muted harness 바(`harness_subtype:'autonomy'`, `step k/N — continuing|stopped(reason)`)만 emit한다. result는 마지막 step에서 한 번만 나간다. 종료 판정은 `sawResult`가 아니라 새로 둔 `emittedResult`로 한다. step 사이에서 중단되면 fallback이 반드시 발동해야 턴이 영원히 도는 것을 막는다. 토큰과 비용은 run 전체를 합쳐 한 번 보고한다(step이 하나면 기존 값과 같다).
+    - continuation은 `[naby autonomy] Continue toward the goal — step k of N…`이라는 **실제 user 메시지로 저장한다.** 모델을 실제로 구동한 것이 이 문장이므로, 트랜스크립트가 이를 숨기지도 않고 사용자가 입력한 척하지도 않게 라벨을 붙였다.
+    - 최종 리포트(M3b)는 목표당 한 번 나가며 `steps`/`stepsMax`와 `stopReason`을 담는다(`done-marker`면 이유는 뺀다). 덕분에 "2/5 steps"와 "5/5 steps, max-steps"를 구분해 읽을 수 있다.
+    - API와 UI: `agent.put`이 `resolveMaxSteps`로 **저장할 때도 상한을 자른다**(999는 20으로, 1과 0은 필드를 빼서 끈다). UI에 보이는 값이 곧 실행되는 값이다. `NabyAgentManager` placeholder를 `no limit`에서 `off (1 turn)`으로 고쳐 오해를 없애고 `agentManager.stepsHint`(en/ko)를 추가했다.
+    - 검증: 신규 spike `spike:autonomy`가 **10/10 PASS**다. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌린다. 확인한 것은 다단계 실행, continuation 트랜스크립트, **result가 정확히 하나**, `[[DONE]]` 조기 종료, no-tool-use 종료, maxSteps 하드 스톱(모델 호출 4회 = 2 step이며 6회가 아니다), no-op 불변(바 0개, result 1개, 주입 없음)이다. 회귀는 `spike:02` 5/5, `spike:agents`와 `spike:policy` PASS, 셸 274/274, 타입체크 clean(두 트리), `build:app` exit 0, 실서버 상한 확인이다. **미검증: 라이브 모델이 실제로 얼마나 잘 이어가는지. 모델이 필요하다.**
+- **P3-M4** — 학습. 페르소나 턴에서 사용자의 판단과 행위를 메모리로 잡아 두고(쓰기 게이트), 다음 턴 주입을 강화한다.
 
 ## 8. 결정 사항 (2026-07-25 확정)
 
-- ✅ **페르소나 에이전트 = 별도 `agents` 스토어 1급 엔티티** (§4). 하네스 subagent 재사용 아님 — "에이전트 ≠ 하네스" 구분을 코드로 명확히. built-in persona 1개 시드(삭제 불가·편집 가능) + 사용자 custom 추가.
-- ✅ **구현은 새 세션에서** (컨텍스트 여유 확보). 이 문서가 착수 스펙.
+- ✅ **페르소나 에이전트는 별도 `agents` 스토어의 1급 엔티티다**(§4). 하네스 subagent를 재사용하지 않는다. "에이전트는 하네스가 아니다"라는 구분을 코드로 못박는다. built-in 페르소나 하나를 시드로 넣고(삭제 불가, 편집 가능) 사용자는 custom을 추가한다.
+- ✅ **구현은 새 세션에서 한다**(컨텍스트를 넉넉히 두려고). 이 문서가 착수 스펙이다.
 
 ### 착수 시 남은 세부 결정 (P3-M1에서 확정)
-1. `@` 충돌 정리 규칙: **등록 에이전트명 > 하네스 subagent(@verb) > 파일 참조**. 라인 시작 `@name`이 등록 agent면 라우팅, 아니면 기존 동작.
-2. 자율 실행 안전장치: `autonomy.maxSteps` 상한 + 전 툴콜 M1/M2 게이트 강제 + 텔레그램 필수-승인 도구 목록.
-3. 텔레그램 통합: naby 런타임 신규 채널 vs 기존 dotclaude-messenger 브리지 — 착수 시 조사.
+1. `@` 충돌 정리 규칙: **등록된 에이전트 이름 > 하네스 subagent(`@verb`) > 파일 참조**. 줄 맨 앞의 `@name`이 등록된 agent면 라우팅하고, 아니면 기존 동작을 따른다.
+2. 자율 실행 안전장치: `autonomy.maxSteps` 상한, 모든 툴콜에 M1/M2 게이트 강제, 텔레그램 승인이 반드시 필요한 도구 목록.
+3. 텔레그램 통합 방식: naby 런타임에 채널을 새로 만들지, 기존 dotclaude-messenger에 브리지를 놓을지 — 착수할 때 조사한다.
 
 ### 착수 순서
-**P3-M1부터**: `agents` 스토어(store.ts + 양 드라이버) → built-in persona 시드 → runtime-entry export → 셸 `/api/agents` CRUD → Settings "에이전트" 섹션(+메모리 이동, 커맨드→하네스 흡수) → spike-agents 검증. (M1~M4 각 세션 분량)
+**P3-M1부터 시작한다.** `agents` 스토어(store.ts와 두 드라이버) → built-in 페르소나 시드 → runtime-entry export → 셸 `/api/agents` CRUD → Settings "에이전트" 섹션(메모리 이동, 커맨드를 하네스로 흡수) → spike-agents 검증. M1부터 M4까지 각각 한 세션 분량이다.

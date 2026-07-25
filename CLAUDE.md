@@ -16,17 +16,39 @@
 
 ## PROJECT
 
-> 아래 섹션을 프로젝트에 맞게 작성하세요.
-
 ### 개요
 
-**프로젝트명** — 한 줄 설명
+**naby** — 나를 학습해 나를 대리하는 개인 페르소나 에이전트 데스크톱 앱. 기억과 하네스를 벤더 밖 내 자산으로 둔다.
 
 | 항목 | 값 |
 |------|-----|
-| 기술 스택 | (예: iOS 17+, SwiftUI, SwiftData) |
-| 빌드 방법 | (예: `cd src && xcodegen generate`) |
-| 상태 | (예: 개발 중 / 출시) |
+| 기술 스택 | TypeScript · Electron · Next.js 16 셸 · SQLite(`node:sqlite`) · Effect · ai-sdk와 Claude Agent SDK 두 엔진 |
+| 구조 | **런타임**(`src/`, 프로바이더 독립 코어)과 **셸**(`shell/`, cockpit submodule) 2레이어. 데이터는 `app.db` 하나 |
+| 빌드 | `npm run build:app`(runtime → shell → electron). 실행은 `npm run electron:dev` |
+| 검증 | 셸 테스트 `cd shell && npm test` · 타입체크 `npm run typecheck`(양 트리) · 스파이크 `npm run spike:<name>` |
+| DB 경로 | `NABY_DB_PATH` > `NABY_HOME` > `~/.naby/app.db` |
+| 상태 | 개발 중. Phase 3(페르소나 에이전트) P3-M3까지 완료, P3-M4(학습) 남음 |
+
+### 어느 레이어에 쓰는가
+
+판단 기준은 하나다. **프로바이더나 UI를 바꿔도 남아야 하는 것은 런타임(`src/`)에 쓴다.**
+
+- **런타임** — 스토어 스키마와 드라이버, 게이트와 정책, 메모리·스킬 주입, 에이전트 모델, 순수 파서. 검증은 `src/spikes/spike-*.ts`로 한다.
+- **셸**(`shell/`) — HTTP 액션(`api/naby.ts`), 엔진 어댑터(`engines/naby.ts`), 외부 채널(`lib/telegram*.ts`), React UI, i18n. 검증은 vitest로 한다.
+- 셸은 별도 저장소(cockpit) submodule이다. **양쪽을 각각 커밋하고**, naby 커밋이 셸 포인터를 함께 옮긴다.
+
+### 검증할 때 주의
+
+- 셸 API(`/api/naby`)는 **dev 서버에서 500이 난다.** turbopack이 `node:sqlite`를 외부화하지 못한다. 반드시 prod 빌드 서버(`node server.mjs`, distDir `.next-prod`)로 확인한다.
+- 엔진 턴 루프를 고쳤으면 `npm run spike:autonomy`와 `npm run spike:02`를 먼저 돌린다. mock 모델로 실제 엔진·게이트·실행기를 구동해 회귀를 잡는다.
+- 스파이크는 `NABY_DB_PATH`를 임시 디렉터리로 돌린다. 실제 `~/.naby/app.db`를 건드리지 않는다.
+
+### 스펙 문서 지도
+
+- `specs/` — 지금 진행 중인 착수 스펙. [Phase 3 페르소나 에이전트](specs/phase-3-persona-agent.md) · [Phase 2/2.5 게이트·하네스 실행](specs/phase-2-2.5-plan.md)
+- `ref-docs/specs/design/` — 전략과 설계. 개인화 전략, 하네스 이식성 전략, 제품 전반 설계, 셸 아키텍처
+- `ref-docs/specs/impl|interface|test/` — Phase별 구현 계획, 계약(스키마·이벤트), 테스트 계획
+- 새 스펙을 쓰거나 받았으면 `/spec-guard`로 기존 문서와 대조한다
 
 ### 문서 구조 (소유권 분리)
 
@@ -47,8 +69,10 @@
 
 ### 핵심 규칙
 
-- (프로젝트 고유의 코딩 규칙, 금지 사항 등)
+- **코드 안은 영어로 쓴다.** 커밋 메시지, 주석, 로그 출력 모두 영어다. 한국어는 UI 문구 같은 인용 리터럴에만 쓴다.
+- **한국어 문서는 `/plain-korean-doc` 스킬을 거쳐 낸다.** 어미는 `~한다` 평서형으로 통일한다(`specs/`, `ref-docs/specs/` 전체 기준).
+- 하네스 문서(`ref-docs/claude/`)는 dotclaude 소유라 수정하지 않는다. 프로젝트 스펙은 `specs/`에 쓴다.
 
 ---
 
-*최종 업데이트: 2026-07-19*
+*최종 업데이트: 2026-07-25*
