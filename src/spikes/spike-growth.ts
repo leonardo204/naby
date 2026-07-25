@@ -176,9 +176,14 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
     { at: 1_500, agentId: 'a1', kind: 'tripwire' },
   ]);
   record(
-    '(k) one safety refusal blocks butterfly no matter how good the hit rate is',
-    clean.stage === 'butterfly' && withTripwire.stage !== 'butterfly' && withTripwire.tripwires === 1,
-    `clean=${clean.stage}; with a tripwire=${withTripwire.stage} (bound unchanged at ${withTripwire.lowerBound.toFixed(3)}, tripwires=${withTripwire.tripwires})`,
+    '(k) one safety refusal blocks butterfly, and the gauge stops short of 100%',
+    clean.stage === 'butterfly' &&
+      clean.percent === 100 &&
+      withTripwire.stage !== 'butterfly' &&
+      withTripwire.percent === 99 &&
+      withTripwire.blockedByTripwire === true &&
+      withTripwire.tripwires === 1,
+    `clean=${clean.stage} ${clean.percent}%; with a tripwire=${withTripwire.stage} ${withTripwire.percent}% (bound unchanged at ${withTripwire.lowerBound.toFixed(3)}, blocked=${String(withTripwire.blockedByTripwire)})`,
   );
 }
 

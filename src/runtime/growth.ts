@@ -211,6 +211,9 @@ export type GrowthState = {
   excluded: number;
   /** Where the surviving window starts, if a pattern change was detected. */
   changePointAt?: number;
+  /** True when accuracy alone would have earned butterfly but a safety refusal in
+   *  the window blocks it. Lets the panel say WHY it stalled at 99%. */
+  blockedByTripwire?: boolean;
 };
 
 /** Sort newest-last, then take the recent window. */
@@ -264,8 +267,8 @@ export function computeGrowth(
 
   // A safety refusal is a HARD block, not a term in an average (§4.8).
   const accuracyStage = stageFor(lowerBound, trials);
-  const stage: GrowthStage =
-    tripwires > 0 && accuracyStage === 'butterfly' ? 'pupa' : accuracyStage;
+  const blockedByTripwire = tripwires > 0 && accuracyStage === 'butterfly';
+  const stage: GrowthStage = blockedByTripwire ? 'pupa' : accuracyStage;
   return {
     stage,
     // An unmeasurable sample reads 0, NOT the bound it happens to produce. A
@@ -273,10 +276,17 @@ export function computeGrowth(
     // an "egg — not measured yet" label: the number and the word would be telling
     // the user different things, and the number is the one they would believe.
     // While in the egg the panel shows `needsMoreSamples` instead.
+    // 100% must mean "butterfly". When a tripwire holds an otherwise-qualified
+    // agent back, the accuracy progress really is at the line — but printing
+    // "pupa 100%" would have the number and the label contradicting each other
+    // again (the same trap as the egg case above), and the number is the one a
+    // user believes. So a blocked agent reads 99%: nearly there, not there.
     percent:
       stage === 'egg'
         ? 0
-        : Math.min(100, Math.round((lowerBound / BUTTERFLY_THRESHOLD) * 100)),
+        : blockedByTripwire
+          ? Math.min(99, Math.round((lowerBound / BUTTERFLY_THRESHOLD) * 100))
+          : Math.min(100, Math.round((lowerBound / BUTTERFLY_THRESHOLD) * 100)),
     lowerBound,
     observedRate,
     hits,
@@ -289,6 +299,7 @@ export function computeGrowth(
     tripwires,
     excluded: spanRows.filter((r) => r.excludedFromScoring).length,
     ...(cut > 0 ? { changePointAt: cut } : {}),
+    ...(blockedByTripwire ? { blockedByTripwire: true } : {}),
   };
 }
 
