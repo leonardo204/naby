@@ -2,11 +2,11 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.6.0
+version: 0.7.0
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
 related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
-updated: 2026-07-25
+updated: 2026-07-26
 ---
 
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
@@ -112,8 +112,13 @@ Agent {
     평범한 턴은 페르소나의 턴이므로 페르소나가 배우고 체크인한다. **지목은 여전히 벌어야 한다** — 게이트가 지키려던 것이 그것이다. 커스텀 에이전트에게 맡긴 턴은 그 에이전트에 귀속된다(전문가가 한 일을 페르소나가 자기 실적으로 배우면 안 된다).
   - ✅ **체크인 배선** — `naby_checkin`(런타임), 일시정지 브리지(`checkinRegistry`, M2와 같은 기법), 게이트가 쓰는 `autonomous`/`tripwire` 행, 인라인 프롬프트 UI(추천은 답한 뒤 공개). 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) §9, 계약 → [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md).
   - ✅ **설정 성장 패널** — 단계 사다리·게이지·축·작업 유형별 분해·최근 결정 목록 + 후퇴 사유를 쉬운 한국어로. 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) §9.
-  - ⬜ 남은 것: P3-M6 내보내기, 2차 축(물음 판단 정밀도·재현율, Brier 보정).
-- **P3-M6** ⬜ — 학습된 에이전트를 Claude Code 표준 서브에이전트 `.md` + 무손실 사이드카로 내보내기. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md). 단계 표기는 권한이 아니라 이력이며, 재수입 시 원장으로 다시 계산한다.
+  - ⬜ 남은 것: 2차 축(물음 판단 정밀도·재현율, Brier 보정).
+- **P3-M6** ✅ **내보내기 구현 완료(2026-07-26)** — 학습된 에이전트를 Claude Code 표준 서브에이전트 `.md` + 무손실 사이드카(`.naby.json`)로 내보낸다. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md).
+  - `src/runtime/agent-export.ts`(순수): 무엇을 빼는지, YAML 스칼라 인용, 사이드카 형태. `npm run spike:export` **11/11**.
+  - 셸 `lib/agentExport.ts`: 어느 스코프를 모으는가(user 항상, project는 cwd 있을 때, session·org 절대 아님). `api/naby.ts` `agent.export`는 **읽기 전용**이라 아무것도 쓰지 않는다.
+  - `AgentExportButton.tsx`: 두 단계. 첫 클릭은 보고만, 두 번째 클릭에서 저장한다.
+  - 왕복을 **실제 임포터**(`parseSubagentArtifact`)로 검증한다. 형식을 추측하지 않았다는 주장이 테스트가 된다.
+  - ⬜ **임포트는 다음 마일스톤이다.** 사이드카 복원 + 단계 재계산 + 임포트한 에이전트를 신뢰하지 않는 처리(D6).
 - **P3-M4** 🔶 **M4a·M4b 구현 완료(2026-07-25, 커밋 대기)** — 학습. 페르소나 턴에서 배운 것을 메모리로 잡아 두고(쓰기 게이트) 다음 턴에 주입한다.
   - **진단**: Phase 1.5가 스토어·쓰기 게이트·주입을 다 만들고 P3-M2가 주입을 배선했는데, **행을 쓰는 코드가 하나도 없었다.** `decideMemoryWrite`는 런타임에 구현·export만 되어 있고 호출자가 없는 dormant 상태였다(M2 이전의 주입과 똑같다). 그래서 스토어는 영원히 비어 있고 검토 UI에도 재료가 없었다. 개인화 전략 §3.2가 "추출·검증 단계가 비었다"고 지적한 그 공백이다.
   - **M4a — 캡처 도구 `naby_remember`**(런타임 `tools.ts`). `naby_add_mcp`와 같은 선례를 따른다. 에이전트가 제안하고 사람이 승인한다.
