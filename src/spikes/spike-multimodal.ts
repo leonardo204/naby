@@ -57,9 +57,13 @@ const IMG = { media_type: 'image/png', data: 'AAAABBBB' };
 await (async () => {
   const p = buildAgentPrompt([{ role: 'user', content: 'describe', images: [IMG] }]);
   const isIterable = typeof p !== 'string' && typeof (p as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function';
-  let yielded: { type?: string; message?: { role?: string; content?: unknown } } | null = null;
+  // Named rather than `typeof yielded`: a type query on a let that TS has already
+  // narrowed to null yields AsyncIterable<null>, so every field read below
+  // collapsed to `never`.
+  type YieldedUserMessage = { type?: string; message?: { role?: string; content?: unknown } };
+  let yielded: YieldedUserMessage | null = null;
   if (isIterable) {
-    for await (const m of p as AsyncIterable<typeof yielded>) {
+    for await (const m of p as AsyncIterable<YieldedUserMessage>) {
       yielded = m;
       break;
     }
