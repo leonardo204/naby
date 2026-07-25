@@ -1,3 +1,14 @@
+---
+id: phase-3-persona-agent
+title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
+type: design
+version: 0.4.0
+status: review
+scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
+related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
+updated: 2026-07-25
+---
+
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 
 > 상태: 설계 초안(2026-07-25). 프로젝트의 최종 목표를 구조로 옮기는 전환점이다.
@@ -87,6 +98,12 @@ Agent {
     - 최종 리포트(M3b)는 목표당 한 번 나가며 `steps`/`stepsMax`와 `stopReason`을 담는다(`done-marker`면 이유는 뺀다). 덕분에 "2/5 steps"와 "5/5 steps, max-steps"를 구분해 읽을 수 있다.
     - API와 UI: `agent.put`이 `resolveMaxSteps`로 **저장할 때도 상한을 자른다**(999는 20으로, 1과 0은 필드를 빼서 끈다). UI에 보이는 값이 곧 실행되는 값이다. `NabyAgentManager` placeholder를 `no limit`에서 `off (1 turn)`으로 고쳐 오해를 없애고 `agentManager.stepsHint`(en/ko)를 추가했다.
     - 검증: 신규 spike `spike:autonomy`가 **10/10 PASS**다. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌린다. 확인한 것은 다단계 실행, continuation 트랜스크립트, **result가 정확히 하나**, `[[DONE]]` 조기 종료, no-tool-use 종료, maxSteps 하드 스톱(모델 호출 4회 = 2 step이며 6회가 아니다), no-op 불변(바 0개, result 1개, 주입 없음)이다. 회귀는 `spike:02` 5/5, `spike:agents`와 `spike:policy` PASS, 셸 274/274, 타입체크 clean(두 트리), `build:app` exit 0, 실서버 상한 확인이다. **미검증: 라이브 모델이 실제로 얼마나 잘 이어가는지. 모델이 필요하다.**
+- **P3-M5** 🔶 **알고리즘 확정·코어 1차 구현(2026-07-25)** — 나비 신뢰 지표. 페르소나를 얼마나 믿고 맡길 수 있는지를 **측정해** 알·애벌레·번데기·나비로 표시하고, 나비만 `@`로 부를 수 있게 한다. 개수 누적이 아니라 체크인 적중률의 Wilson 하한 + 커버리지 + 트립와이어 + 작업유형별 범위로 판정한다. 자체 설계 + 논문(PRELUDE·Wilson·risk-coverage·ADWIN·ConfidenceBench·Goodhart) + 업계 표준(Anthropic·LangChain·OpenAI·Google)을 대조해 확정했다.
+  - 알고리즘 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md). 원장 계약(P15-03 실체화) → [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md).
+  - 코어 1차: `src/runtime/growth.ts`, `npm run spike:growth` **14/14 PASS**. 남음: 원장 이원화·ADWIN·커버리지·작업유형별 범위, 체크인 배선, `@` 팔레트 노출·비활성, 설정 성장 패널.
+  - **알려진 결함(P3-M5에서 고친다)**: `@` 팔레트가 `/api/commands`만 읽어 **등록된 나비 에이전트가 목록에 안 뜬다.** P3-M2가 라우팅은 배선했지만 발견 경로를 만들지 않았다. 팔레트는 marker-agnostic이라 `@`와 `/`가 같은 목록을 보여주는 문제도 함께 고친다(에이전트는 `@`에만, 최우선 노출).
+  - **해소해야 할 데드락**: M4a는 학습 도구를 라우팅된 턴에만 붙이는데, 나비가 되기 전 멘션이 막히면 라우팅이 없어 학습도 못 하고 영원히 알 단계다. 페르소나는 **일반 대화에서도 배경 학습**하도록 완화한다(멘션 게이트는 라우팅 권한에만 적용).
+- **P3-M6** ⬜ — 학습된 에이전트를 Claude Code 표준 서브에이전트 `.md` + 무손실 사이드카로 내보내기. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md). 단계 표기는 권한이 아니라 이력이며, 재수입 시 원장으로 다시 계산한다.
 - **P3-M4** 🔶 **M4a·M4b 구현 완료(2026-07-25, 커밋 대기)** — 학습. 페르소나 턴에서 배운 것을 메모리로 잡아 두고(쓰기 게이트) 다음 턴에 주입한다.
   - **진단**: Phase 1.5가 스토어·쓰기 게이트·주입을 다 만들고 P3-M2가 주입을 배선했는데, **행을 쓰는 코드가 하나도 없었다.** `decideMemoryWrite`는 런타임에 구현·export만 되어 있고 호출자가 없는 dormant 상태였다(M2 이전의 주입과 똑같다). 그래서 스토어는 영원히 비어 있고 검토 UI에도 재료가 없었다. 개인화 전략 §3.2가 "추출·검증 단계가 비었다"고 지적한 그 공백이다.
   - **M4a — 캡처 도구 `naby_remember`**(런타임 `tools.ts`). `naby_add_mcp`와 같은 선례를 따른다. 에이전트가 제안하고 사람이 승인한다.

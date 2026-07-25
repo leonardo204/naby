@@ -2,11 +2,11 @@
 id: phase-1_5-personalization-data-layer
 title: Phase 1.5 — Personalization Data Layer (scoped memory, injection hook, event schema, golden set)
 type: impl
-version: 0.2.0
+version: 0.3.0
 status: draft
 scope: The four-task Phase 1.5 that turns Naby's store from a session-scoped key-value bag into a personalization substrate — scoped (user/project/session/org) memory with provenance, a turn-time memory retrieval+injection hook under a token budget, an eval-event schema extended for task-type/domain/edit-diff, and a per-user golden-set holdout — plus the seven memory-architecture decisions and the memory-poisoning write gate. Establishes tasks and acceptance; the on-disk contract lives in phase-1_5-memory-contracts.
-related: [personalization-strategy, personalized-agent-desktop-app, phase-1-contracts, phase-1_5-memory-contracts, phase-2-personalization-hitl]
-updated: 2026-07-23
+related: [personalization-strategy, personalized-agent-desktop-app, phase-1-contracts, phase-1_5-memory-contracts, phase-2-personalization-hitl, phase-3-checkin-contracts, phase-3-butterfly-trust-meter]
+updated: 2026-07-25
 ---
 
 # Phase 1.5 — Personalization Data Layer
@@ -50,7 +50,7 @@ The strategy defines a six-stage loop (strategy §3.2). Phase 1.5 is not the who
 
 The completion criteria below are the acceptance for this phase. Priorities: **Must** = Phase 1.5 is not done without it; **Should** = strongly wanted this phase; **Could** = seed now, complete later.
 
-> **Implementation status (2026-07-23).** ✅ **Done + verified**: P15-01 (scoped memory + provenance + lossless v3→v4 migration + cascade exemption), P15-02 (injection hook, token budget, confirmed-only, no-op), P15-05 (write gate, 4 invariants), P15-04 (golden-set holdout, consent, excluded-from-learning, v5), P15-06 (memory review/delete UI — `/api/memory` list/confirm/delete/delete-by-source + Settings "Memory" section). Evidence: parent `spike:p15` 11/11, `spike:golden` 11/11, regressions green; shell tsc baseline-only, vitest 139/139 (15 new), build ok. ⏸️ **Deferred to Phase 2**: **P15-03** — the eval-event schema is only meaningful once Phase 2a's F2-04 logger writes to it, so it lands **with F2-04** (phase-2 §5) rather than as an empty table now. ⬜ **Later**: P15-07 (cold-start bootstrap, Could).
+> **Implementation status (2026-07-23).** ✅ **Done + verified**: P15-01 (scoped memory + provenance + lossless v3→v4 migration + cascade exemption), P15-02 (injection hook, token budget, confirmed-only, no-op), P15-05 (write gate, 4 invariants), P15-04 (golden-set holdout, consent, excluded-from-learning, v5), P15-06 (memory review/delete UI — `/api/memory` list/confirm/delete/delete-by-source + Settings "Memory" section). Evidence: parent `spike:p15` 11/11, `spike:golden` 11/11, regressions green; shell tsc baseline-only, vitest 139/139 (15 new), build ok. ⏸️ **Deferred to Phase 2**: **P15-03** — the eval-event schema is only meaningful once Phase 2a's F2-04 logger writes to it, so it lands **with F2-04** (phase-2 §5) rather than as an empty table now. **Superseded by Phase 3 (2026-07-25):** P3-M5's butterfly trust meter needs a writer for exactly this stream, so P15-03 is now realized there as a DISCRIMINATED event ledger (`kind: 'checkin' | 'autonomous' | 'tripwire'`) keeping `task_type` and `domain`, with the check-in's offered options / chosen option standing in for the edit diff. A later F2-04 draft/final/edit-diff event adds a `kind` rather than a second table, so `MemoryProvenance.createdFrom` stays unambiguous. Contract: [`phase-3-checkin-contracts`](../../../specs/phase-3-checkin-contracts.md); algorithm: [`phase-3-butterfly-trust-meter`](../../../specs/phase-3-butterfly-trust-meter.md). ⬜ **Later**: P15-07 (cold-start bootstrap, Could).
 
 | ID | Feature | Description | Priority | Completion criteria |
 |------|------|------|------|------|

@@ -2,11 +2,11 @@
 id: personalization-strategy
 title: Naby 개인화 전략 — 제품의 심장을 다시 정의한다
 type: design
-version: 1.1.0
+version: 1.2.0
 status: review
 scope: 개인화를 제품의 상위 축으로 다시 정의하는 전략. 개인화 3층 모델, 북극성 지표(편집률 감소 곡선), 개인화 루프에서 비어 있는 단계 진단, 메모리 아키텍처 결정 일곱 가지, Phase 1.5를 새로 두는 근거, 콜드스타트와 골든셋 평가, 메모리 오염 위험을 다룬다. Phase 1.5 태스크와 메모리 계약은 별도 문서로 내려간다.
-related: [personalized-agent-desktop-app, harness-portability-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
-updated: 2026-07-23
+related: [personalized-agent-desktop-app, harness-portability-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl, phase-3-butterfly-trust-meter, phase-3-checkin-contracts]
+updated: 2026-07-25
 ---
 
 # Naby 개인화 전략 기획서 — 제품의 심장을 다시 정의한다
@@ -225,6 +225,8 @@ flowchart LR
 
 - 메모리 평가의 표준으로 통용되는 LoCoMo·LongMemEval·BEAM은 여러 세션에 걸친 회상을 다룬다 [5]. 그런데 최근 연구는 **LoCoMo 문항의 94%, LongMemEval 문항의 85%가 직전 두 세션 안의 근거만으로 답이 된다**고 지적한다. 결국 대부분의 평가가 "쌓인 정보를 종합하는 일"이 아니라 "이전 세션의 특정 정보를 떠올리는 일"로 좁아진다 [4].
 - 이 벤치마크들은 **"오래 쓸수록 나에게 맞춰지는가"를 측정하지 못한다.** 원래 계획서가 "학술 메모리 벤치마크는 '나답게'를 못 잰다"고 판단한 것은 옳았고 [2], 실제로는 그보다 더 근본적인 한계가 있다.
+
+> **갱신(2026-07-25, v1.2) — 북극성의 주 측정 수단이 바뀌었다.** 아래 골든셋은 여전히 유효한 통제 장치이지만, Phase 3에서 **주 신호는 체크인 적중률**로 옮겼다. 에이전트가 되돌릴 수 없는 단계 앞에서 자기 추천안을 제시해 묻고, 사용자가 그대로 받아들이는 비율을 재는 방식이다. 같은 PRELUDE 지표 계열(무편집 비율)이면서 **홀드아웃 코퍼스도, 산출물 사용 동의도, 별도 채점 모델도 필요 없다** — §4.3의 콜드스타트 부담과 §9의 동의 미결정을 우회한다. 골든셋은 난이도 통제용 보조 수단으로 남고, 나비 단계 판정에는 쓰지 않는다. 알고리즘은 [`phase-3-butterfly-trust-meter`](../../../specs/phase-3-butterfly-trust-meter.md), 원장 계약은 [`phase-3-checkin-contracts`](../../../specs/phase-3-checkin-contracts.md)에 있다.
 
 **대안 — 사용자별 골든셋.**
 

@@ -1,3 +1,14 @@
+---
+id: phase-2-2.5-plan
+title: Phase 2 / 2.5 착수용 구현 계획 — 도구 실행 게이트와 하네스 실행
+type: impl
+version: 0.3.0
+status: review
+scope: Phase 2(정책 게이트·사람 승인 브리지)와 Phase 2.5(도구 보유 스킬·서브에이전트 오케스트레이션)의 착수 계획과 마일스톤 M1~M4. 진행 상황과 검증 근거를 함께 기록한다.
+related: [phase-3-persona-agent, phase-2-personalization-hitl, phase-1_6-harness-ownership, personalization-strategy]
+updated: 2026-07-25
+---
+
 # Phase 2 / 2.5 착수용 구현 계획 — 도구 실행 게이트와 하네스 실행
 
 > 상태: 초안(2026-07-25). Phase 1.6까지 끝낸 시점에 썼다.

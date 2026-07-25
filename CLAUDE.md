@@ -45,10 +45,12 @@
 
 ### 스펙 문서 지도
 
-- `specs/` — 지금 진행 중인 착수 스펙. [Phase 3 페르소나 에이전트](specs/phase-3-persona-agent.md) · [Phase 2/2.5 게이트·하네스 실행](specs/phase-2-2.5-plan.md)
-- `ref-docs/specs/design/` — 전략과 설계. 개인화 전략, 하네스 이식성 전략, 제품 전반 설계, 셸 아키텍처
-- `ref-docs/specs/impl|interface|test/` — Phase별 구현 계획, 계약(스키마·이벤트), 테스트 계획
-- 새 스펙을 쓰거나 받았으면 `/spec-guard`로 기존 문서와 대조한다
+스펙 트리가 **둘**이다. 의도된 분리이며 규칙은 이렇다.
+
+- `ref-docs/specs/` — **정본.** `sdd.md`의 `{DOC_ROOT}`가 `ref-docs/`이므로 형식상 기준이다. `design|impl|interface|test` 계층을 지킨다. 전략·계약·완료된 Phase가 여기 있다.
+- `specs/` — **진행 중 착수 스펙.** 평면 구조를 허용하되 **frontmatter는 필수**다(id/type/version/status/scope/related/updated). 영향도 추적이 끊기면 트리를 나눈 이점이 사라진다. 안정되면 `ref-docs/specs/<type>/`으로 승격한다.
+- 현재 `specs/`: [페르소나 에이전트](specs/phase-3-persona-agent.md) · [나비 신뢰 지표](specs/phase-3-butterfly-trust-meter.md) · [체크인 원장 계약](specs/phase-3-checkin-contracts.md) · [에이전트 내보내기](specs/phase-3-agent-export.md) · [Phase 2/2.5 계획](specs/phase-2-2.5-plan.md)
+- 새 스펙을 쓰거나 받았으면 `/spec-guard`로 기존 문서와 대조한다. **스펙을 저장하는 행위 자체가 발동 조건이다.**
 
 ### 문서 구조 (소유권 분리)
 
