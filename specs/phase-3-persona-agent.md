@@ -62,7 +62,12 @@ Agent {
   - 셸: `getStore()` 합성루트에 `seedBuiltinPersona` 배선(멱등), `api/naby.ts` `agent.list/put/remove` 액션, `NabyAgentManager.tsx`(신규), Settings `agents` 섹션(메모리 이동)+`harness` 섹션(커맨드 흡수), i18n `agentManager.*`(en/ko).
   - 검증: 타입체크 clean(양 트리, 베이스라인 노이즈만), `build:app` exit 0, 실서버 부팅 후 `/api/naby` agent.list=시드확인/put/삭제불가 페르소나/중복명 거부 전부 통과. **미검증: Settings UI 시각 렌더(라이브 창 필요).**
   - 결정: 페르소나 kind='persona' 유일(사용자는 custom만 생성), name=@라우팅 핸들(UNIQUE, 공백 불가), memoryScope=학습 스코프(P3-M2 주입 배선 예정), escalation=inline(텔레그램 P3-M3).
-- **P3-M2** — `@에이전트` 라우팅: 지정 에이전트로 턴 실행(systemPrompt+메모리 주입+toolRefs). 메모리 자동 주입 배선. (M3/M4 재사용)
+- **P3-M2** ✅ **구현 완료(2026-07-25, 커밋 대기)** — `@에이전트` 라우팅: 지정 에이전트로 턴 실행(systemPrompt+메모리 주입+toolRefs). 메모리 자동 주입 배선. (M3/M4 재사용)
+  - 런타임: `agents.ts` `parseAgentAddress(prompt)`(순수 파서, `@name`+task 분리) + runtime-entry export. `spike-agents`에 파서 7체크 추가.
+  - 셸 `naby.ts`: `parseAgentAddress`→`getAgentByName` 라우팅. 라우팅 시 (a) userText=주소 제거한 task, (b) system=agent.systemPrompt+cwd노트, (c) model=agent.model 우선, (d) **toolRefs allowlist를 게이트 최외곽 deny로 강제**(엔진 무관). **memoryInjection 배선**(dormant→active, 전 턴 일반 활성; no-op 불변).
+  - 셸 `slashCommands.ts`: **충돌 규칙** — `@등록에이전트명`은 하네스 `@verb` 확장 건너뜀(엔진 라우팅으로 통과). `CommandExpansionStore`에 `getAgentByName` 추가. `slashCommands.test` +3 케이스.
+  - 검증: 타입체크 clean(양 트리), slashCommands 유닛 13/13, spike-agents(파서 7 + 스토어 전부) PASS, `build:app` exit 0, 실서버 부팅 OK. **미검증: 실제 @라우팅 턴(system override/toolRefs deny/메모리 주입이 라이브 모델 턴에 반영되는지) — 라이브 모델 필요.**
+  - 남음(P3-M3로): autonomy(maxSteps 루프)·텔레그램 에스컬레이션. 메모리는 현재 전 스코프 일반 주입 — 에이전트 memoryScope 타깃팅은 P3-M4 학습에서 정교화.
 - **P3-M3** — 자율 모드 + 에스컬레이션: 목표 루프 + M2 승인의 **텔레그램 채널** + 최종 리포트. (M2/scheduled/telegram)
 - **P3-M4** — 학습: 페르소나 턴에서 사용자 판단/행위를 메모리로 캡처(쓰기 게이트) + 다음 턴 주입 강화.
 

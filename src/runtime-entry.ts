@@ -146,6 +146,7 @@ export {
   BUILTIN_PERSONA_NAME,
   BUILTIN_PERSONA_SEED,
   isBuiltinPersona,
+  parseAgentAddress,
   seedBuiltinPersona,
 } from './runtime/agents.js';
 

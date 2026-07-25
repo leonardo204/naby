@@ -13,6 +13,7 @@ import {
   SqliteStore,
   BUILTIN_PERSONA_ID,
   BUILTIN_PERSONA_NAME,
+  parseAgentAddress,
   seedBuiltinPersona,
   type AgentInput,
   type Store,
@@ -122,8 +123,24 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
   check('memoryScope=project round-trip', back.memoryScope === 'project');
 }
 
+function exerciseAddressParser(): void {
+  console.log('\n[parse] parseAgentAddress (P3-M2 routing)');
+  const p1 = parseAgentAddress('@persona fix the tests');
+  check('parses @name + task', p1?.name === 'persona' && p1?.taskText === 'fix the tests');
+  const p2 = parseAgentAddress('@persona');
+  check('name-only → empty task', p2?.name === 'persona' && p2?.taskText === '');
+  const p3 = parseAgentAddress('  @scout   go  ');
+  check('tolerates leading/inner whitespace', p3?.name === 'scout' && p3?.taskText === 'go');
+  const p4 = parseAgentAddress('@persona do this\nand that');
+  check('multi-line task preserved', p4?.name === 'persona' && p4?.taskText === 'do this\nand that');
+  check('no leading @ → undefined', parseAgentAddress('hello @persona') === undefined);
+  check('bare text → undefined', parseAgentAddress('just a message') === undefined);
+  check('lone @ → undefined', parseAgentAddress('@ hi') === undefined);
+}
+
 async function main(): Promise<void> {
   await exerciseStore('memory', new MemoryStore());
+  exerciseAddressParser();
 
   const dir = mkdtempSync(join(tmpdir(), 'naby-agents-'));
   const sqlite = new SqliteStore({ path: join(dir, 'app.db') });

@@ -71,3 +71,34 @@ export function seedBuiltinPersona(store: Store): Agent {
 export function isBuiltinPersona(agent: Agent): boolean {
   return agent.kind === 'persona';
 }
+
+// ---------------------------------------------------------------------------
+// `@name` addressing (Phase 3, P3-M2).
+// ---------------------------------------------------------------------------
+//
+// A turn is ROUTED to a naby agent when its prompt begins with `@<name>` and
+// <name> resolves to a registered agent (via store.getAgentByName). This pure
+// parser only splits the address from the task text — the store lookup and the
+// turn composition happen at the shell's engine boundary. It is pure and
+// spike-testable so the routing contract does not depend on a live model.
+//
+// COLLISION RULE (spec §5): a registered agent name wins over a harness subagent
+// `@verb` and over a file reference. The shell's command expander defers to this
+// by leaving an `@<registeredAgent>` line unexpanded so it reaches routing here.
+//
+// The name token is whitespace-delimited (`[^\s]+`), matching the store's
+// name rule (putAgent rejects a name containing whitespace) — so any valid agent
+// name is addressable, and a stray `@` in prose (not at line start, or followed
+// by whitespace) never routes.
+
+/** Parse a leading `@<name> <task>` address off a prompt. Returns the bare name
+ *  and the remaining task text (trimmed), or undefined when the prompt does not
+ *  start with an `@name` token. Does NOT consult the store — the caller resolves
+ *  the name to an agent and decides whether to route. */
+export function parseAgentAddress(
+  prompt: string,
+): { name: string; taskText: string } | undefined {
+  const m = prompt.match(/^\s*@([^\s]+)(?:\s+([\s\S]*))?$/);
+  if (!m) return undefined;
+  return { name: m[1]!, taskText: (m[2] ?? '').trim() };
+}
