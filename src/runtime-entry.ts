@@ -143,6 +143,13 @@ export type {
   AgentKind,
   AgentEscalation,
   AgentAutonomy,
+  // The eval-event ledger (Phase 3, P3-M5) — realizes the stream P15-03 reserved.
+  // The shell appends check-in / autonomous / tripwire observations here and the
+  // trust meter reads them. NEVER exposed to the agent itself.
+  EvalEvent,
+  EvalEventInput,
+  EvalEventKind,
+  EvalEventDeleteSelector,
 } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
@@ -395,3 +402,26 @@ export {
   type ProviderResolution,
   type ResolvedProvider,
 } from './providers/resolve.js';
+
+// -- the butterfly trust meter (Phase 3, P3-M5) ------------------------------
+// Pure arithmetic: Wilson bound, stage thresholds, ADWIN-style change detection,
+// coverage, and the deterministic regression diagnosis. Reason codes are
+// structured so the shell renders them per locale.
+export {
+  wilsonLowerBound,
+  stageFor,
+  canBeAddressed,
+  computeGrowth,
+  detectChangePoint,
+  diagnoseChange,
+  GROWTH_MIN_SAMPLE,
+  GROWTH_WINDOW,
+  PUPA_THRESHOLD,
+  BUTTERFLY_THRESHOLD,
+  type GrowthStage,
+  type GrowthState,
+  type GrowthChange,
+  type GrowthReasonCode,
+  type CheckinRecord,
+  type LedgerKind,
+} from './runtime/growth.js';

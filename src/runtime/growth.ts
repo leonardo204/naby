@@ -253,6 +253,11 @@ export function computeGrowth(
   const since = recent.length > 0 ? recent[0]!.at : 0;
   const spanRows = ordered.filter((r) => r.at >= since);
   const autonomous = spanRows.filter((r) => r.kind === 'autonomous');
+  // NOTE the asymmetry, and it is deliberate: a DEGENERATE check-in is excluded
+  // from accuracy (it would inflate the hit rate) but still counts here. It asked,
+  // so it did not act on its own. Leaving it out would make padding questions
+  // free — an agent could ask a hundred meaningless things at no cost to coverage,
+  // which is the very hole the exclusion exists to close.
   const checkins = spanRows.filter((r) => (r.kind ?? 'checkin') === 'checkin');
   const tripwires = spanRows.filter((r) => r.kind === 'tripwire').length;
   const decisions = autonomous.length + checkins.length;

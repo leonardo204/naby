@@ -21,6 +21,10 @@ import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
   AgentInput,
+  EvalEvent,
+  EvalEventDeleteSelector,
+  EvalEventInput,
+  EvalEventKind,
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
@@ -80,6 +84,14 @@ let harnessCounter = 0;
 function mintHarnessId(): string {
   harnessCounter += 1;
   return `h-${Date.now().toString(36)}-${harnessCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+let evalCounter = 0;
+function mintEvalEventId(): string {
+  evalCounter += 1;
+  return `ev-${Date.now().toString(36)}-${evalCounter.toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
 }
@@ -147,6 +159,9 @@ export class MemoryStore implements Store {
   // naby agents (Phase 3, P3-M1), keyed by id. Store-level, global (no scope),
   // never per-session and never cascaded — like harness/policy.
   private readonly agents = new Map<string, Agent>();
+  /** The eval-event ledger (P3-M5). A flat list: the meter always reads an
+   *  agent's rows in time order, so an array beats a keyed map here. */
+  private readonly evalEvents: EvalEvent[] = [];
   private agentIdCounter = 0;
   private closed = false;
 
@@ -659,6 +674,39 @@ export class MemoryStore implements Store {
     const a = this.agents.get(id);
     if (!a || a.kind === 'persona') return;
     this.agents.delete(id);
+  }
+
+  // -- eval-event ledger (P3-M5) --------------------------------------------
+
+  appendEvalEvent(event: EvalEventInput): EvalEvent {
+    const row: EvalEvent = {
+      ...event,
+      id: event.id ?? mintEvalEventId(),
+      at: event.at ?? Date.now(),
+    };
+    this.evalEvents.push(row);
+    return row;
+  }
+
+  listEvalEvents(
+    agentId: string,
+    opts?: { kind?: EvalEventKind; taskType?: string; limit?: number },
+  ): EvalEvent[] {
+    let rows = this.evalEvents.filter((e) => e.agentId === agentId);
+    if (opts?.kind) rows = rows.filter((e) => e.kind === opts.kind);
+    if (opts?.taskType) rows = rows.filter((e) => e.taskType === opts.taskType);
+    // Oldest first, then take the newest `limit` — so the caller can window and
+    // run change detection without re-sorting.
+    rows.sort((a, b) => a.at - b.at);
+    return opts?.limit != null ? rows.slice(-Math.max(0, opts.limit)) : rows;
+  }
+
+  deleteEvalEvents(selector: EvalEventDeleteSelector): void {
+    const keep = (e: EvalEvent): boolean =>
+      'agentId' in selector ? e.agentId !== selector.agentId : e.sessionId !== selector.sessionId;
+    const kept = this.evalEvents.filter(keep);
+    this.evalEvents.length = 0;
+    this.evalEvents.push(...kept);
   }
 
   getSetting(key: string): string | undefined {

@@ -517,6 +517,83 @@ export type PolicyRuleInput = Omit<PolicyRule, 'id' | 'createdAt' | 'updatedAt'>
 // create kind='custom' agents, so kind='persona' uniquely identifies the built-in.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The eval-event ledger (Phase 3, P3-M5) — specs/phase-3-checkin-contracts.md
+// ---------------------------------------------------------------------------
+//
+// The stream P15-03 reserved (task_type, domain, and an observation of what the
+// user actually wanted), given a writer at last. ONE discriminated stream rather
+// than a table per observation kind: `MemoryProvenance.createdFrom` already
+// documents itself as "eval_event id", and a second table for the same purpose
+// would make that pointer ambiguous. A later F2-04 draft/final/edit-diff event
+// adds a `kind`, not a table.
+//
+// Rows are keyed by `agentId` (growth is per agent) with `sessionId` as a LINK —
+// deleting a conversation must not erase what the agent proved, exactly as
+// user-scoped memory survives a session delete (§6 keying invariant).
+
+/** What kind of observation a row is. */
+export type EvalEventKind = 'checkin' | 'autonomous' | 'tripwire';
+
+/** One observation. The kind-specific fields are all optional at this level; the
+ *  invariants that tie them to a `kind` live in the contract doc §4 and are
+ *  enforced by the writer, not the type. */
+export type EvalEvent = {
+  /** UUID — what `MemoryProvenance.createdFrom` points at. */
+  id: string;
+  kind: EvalEventKind;
+  /** epoch ms — ordering, window cuts, drift detection. */
+  at: number;
+  agentId: string;
+  sessionId: string;
+  /** P15-03's task_type — the per-scope trust axis and what a regression names. */
+  taskType?: string;
+  /** P15-03's domain tag. Reserved; unused in M5 so no later migration is needed. */
+  domain?: string;
+
+  // -- kind: 'checkin' — the agent asked before an irreversible step --------
+  /** Options offered, in the order shown. */
+  options?: string[];
+  /** Index of the option the agent RECOMMENDED — its prediction. */
+  recommended?: number;
+  /** Index the user chose, or -1 when they answered freely. */
+  chosen?: number;
+  /** True iff the user took the recommendation unchanged. STORED, not derived:
+   *  recomputing it later would let a reordered options list rewrite history. */
+  hit?: boolean;
+  /** The agent's own stated confidence, 0–1. Recorded but NOT trusted — the
+   *  calibration axis measures whether it means anything. */
+  confidence?: number;
+  /** Free-text correction when `chosen` is -1 — the edit-diff analogue. */
+  correction?: string;
+
+  // -- kind: 'autonomous' — it acted without asking -------------------------
+  /** Whether the action could be undone. */
+  reversible?: boolean;
+  /** Set when the user later fixed the result: the miss signal for the covered
+   *  region, without which coverage would inflate for free. */
+  correctedAfter?: boolean;
+
+  // -- kind: 'tripwire' — the gate refused a safety-relevant call ------------
+  toolName?: string;
+  reason?: string;
+
+  /** Excluded from scoring as degenerate (near-duplicate question, one real
+   *  option). Kept and counted so the exclusion is visible, never silent. */
+  excludedFromScoring?: boolean;
+};
+
+/** What a caller supplies. `id` and `at` are store-owned when omitted. */
+export type EvalEventInput = Omit<EvalEvent, 'id' | 'at'> & {
+  id?: string;
+  at?: number;
+};
+
+/** Exactly-one-selector for deleteEvalEvents. Growth history is the user's own
+ *  behavioural record, so it has to be erasable — the same principle as memory's
+ *  delete-by-source. */
+export type EvalEventDeleteSelector = { agentId: string } | { sessionId: string };
+
 /** built-in persona (learns the user, seeded once) | user-added custom agent. */
 export type AgentKind = 'persona' | 'custom';
 
@@ -767,6 +844,21 @@ export interface Store {
   /** Delete one agent by id. NO-OP for the built-in persona (kind='persona' is
    *  undeletable, spec §4) and no-op if absent. */
   removeAgent(id: string): void;
+
+  // -- eval-event ledger (Phase 3 P3-M5, realizing P15-03) -----------------
+
+  /** Append one observation. `id`/`at` are store-owned when omitted. */
+  appendEvalEvent(event: EvalEventInput): EvalEvent;
+
+  /** An agent's observations, OLDEST FIRST so the caller can window and run
+   *  change detection without re-sorting. `limit` takes the newest N. */
+  listEvalEvents(
+    agentId: string,
+    opts?: { kind?: EvalEventKind; taskType?: string; limit?: number },
+  ): EvalEvent[];
+
+  /** Erase growth history for an agent or a session. */
+  deleteEvalEvents(selector: EvalEventDeleteSelector): void;
 
   // -- usage (F1-07) -------------------------------------------------------
 

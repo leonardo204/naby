@@ -15,6 +15,7 @@ import {
   BUILTIN_PERSONA_NAME,
   parseAgentAddress,
   seedBuiltinPersona,
+  computeGrowth,
   type AgentInput,
   type Store,
 } from '../runtime-entry.js';
@@ -121,6 +122,41 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
   check('model round-trip', back.model === 'claude-sonnet-5');
   check('description round-trip', back.description === 'read-only');
   check('memoryScope=project round-trip', back.memoryScope === 'project');
+
+  // -- the eval-event ledger (P3-M5) ---------------------------------------
+  // The trust meter reads this, so both drivers must agree on ordering, the
+  // limit window, the kind/taskType filters, and delete-by-session.
+  // A literal id on purpose: the ledger has NO foreign key to agents (a
+  // conversation or an agent row may be gone while its record stands), so the
+  // slice must work without one existing.
+  const aid = 'agent-under-test';
+  store.appendEvalEvent({ kind: 'checkin', agentId: aid, sessionId: 's1', taskType: 'writing', hit: true, at: 1000, options: ['a', 'b'], recommended: 0, chosen: 0, confidence: 0.7 });
+  store.appendEvalEvent({ kind: 'checkin', agentId: aid, sessionId: 's1', taskType: 'writing', hit: false, at: 2000, options: ['a', 'b'], recommended: 0, chosen: 1 });
+  store.appendEvalEvent({ kind: 'autonomous', agentId: aid, sessionId: 's2', at: 3000, reversible: true, correctedAfter: true });
+  store.appendEvalEvent({ kind: 'tripwire', agentId: aid, sessionId: 's2', at: 4000, toolName: 'Bash', reason: 'destructive' });
+  store.appendEvalEvent({ kind: 'checkin', agentId: aid, sessionId: 's3', taskType: 'sql', hit: true, at: 5000, options: ['x', 'y'], recommended: 1, chosen: 1, excludedFromScoring: true });
+
+  const all = store.listEvalEvents(aid);
+  check(`${label}: ledger returns all rows OLDEST first`, all.length === 5 && all[0]!.at === 1000 && all[4]!.at === 5000);
+  check(`${label}: ledger round-trips the kind-specific payload`, all[0]!.options?.length === 2 && all[0]!.recommended === 0 && all[0]!.confidence === 0.7 && all[0]!.hit === true);
+  check(`${label}: ledger preserves hit=false (not conflated with absent)`, all[1]!.hit === false);
+  check(`${label}: ledger round-trips the autonomous + tripwire fields`, all[2]!.correctedAfter === true && all[3]!.toolName === 'Bash');
+  check(`${label}: excludedFromScoring survives the round trip`, all[4]!.excludedFromScoring === true);
+  check(`${label}: kind filter`, store.listEvalEvents(aid, { kind: 'checkin' }).length === 3);
+  check(`${label}: taskType filter`, store.listEvalEvents(aid, { taskType: 'writing' }).length === 2);
+  check(`${label}: limit takes the NEWEST rows`, (() => { const r = store.listEvalEvents(aid, { limit: 2 }); return r.length === 2 && r[0]!.at === 4000 && r[1]!.at === 5000; })());
+  check(`${label}: another agent's ledger is separate`, store.listEvalEvents('no-such-agent').length === 0);
+
+  // The meter must read the same numbers off either driver.
+  const g = computeGrowth(store.listEvalEvents(aid));
+  // coverage is 1 autonomous of 4 decisions: the DEGENERATE check-in still counts
+  // as an ask (else padding questions would be free), though it is excluded from accuracy.
+  check(`${label}: meter reads the ledger — 1 scored hit of 2, 1 tripwire, 1 excluded, coverage 1/4`, g.hits === 1 && g.trials === 2 && g.tripwires === 1 && g.excluded === 1 && Math.abs(g.coverage - 0.25) < 1e-9);
+
+  store.deleteEvalEvents({ sessionId: 's2' });
+  check(`${label}: delete-by-session removes only that session's rows`, store.listEvalEvents(aid).length === 3);
+  store.deleteEvalEvents({ agentId: aid });
+  check(`${label}: delete-by-agent clears the ledger`, store.listEvalEvents(aid).length === 0);
 }
 
 function exerciseAddressParser(): void {

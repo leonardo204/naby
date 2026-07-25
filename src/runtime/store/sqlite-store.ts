@@ -41,6 +41,10 @@ import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
   AgentInput,
+  EvalEvent,
+  EvalEventDeleteSelector,
+  EvalEventInput,
+  EvalEventKind,
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
@@ -347,6 +351,34 @@ CREATE TABLE IF NOT EXISTS policy_rules (
   UNIQUE (scope, scope_key, tool_pattern)
 );
 CREATE INDEX IF NOT EXISTS policy_rules_by_scope ON policy_rules (scope, scope_key);
+
+-- The eval-event ledger (Phase 3, P3-M5) — the stream P15-03 RESERVED, finally
+-- given a writer. Additive table: an existing DB picks it up on next open with NO
+-- data migration and NO loss.
+--
+-- ONE stream, discriminated by kind, deliberately: memory provenance already
+-- points here (MemoryProvenance.createdFrom = "eval_event id"), and a second
+-- table for the same purpose would make that pointer ambiguous. A later F2-04
+-- draft/final/edit-diff observation adds a kind, not a table.
+--
+-- Keyed by its own id and indexed by agent_id, because the trust meter reads
+-- "this agent's recent rows". session_id is a LINK, not a key — deleting a
+-- conversation must not erase what the agent proved (the same reasoning as the
+-- memory keying invariant, phase-1-contracts §6). The agent NEVER reads this
+-- table: no tool and no injection exposes it, or it would optimize its own score.
+CREATE TABLE IF NOT EXISTS eval_events (
+  id           TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,          -- checkin | autonomous | tripwire
+  at           INTEGER NOT NULL,
+  agent_id     TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  task_type    TEXT,                   -- P15-03 task_type — the per-scope trust axis
+  domain       TEXT,                   -- P15-03 domain tag (reserved; unused in M5)
+  payload      TEXT NOT NULL,          -- JSON: kind-specific fields (options, hit, …)
+  excluded     INTEGER NOT NULL DEFAULT 0  -- 1 = degenerate, kept but not scored
+);
+CREATE INDEX IF NOT EXISTS eval_events_by_agent ON eval_events (agent_id, at);
+CREATE INDEX IF NOT EXISTS eval_events_by_session ON eval_events (session_id);
 
 -- naby agents (Phase 3, P3-M1). Additive table: an existing DB picks it up on
 -- next open with NO data migration and NO loss. The naby-OWNED agent layer
@@ -660,6 +692,15 @@ function mintSessionId(): string {
   // one call and is still collision-safe for our single-process use.
   uuidCounter += 1;
   return `s-${Date.now().toString(36)}-${uuidCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+let evalEventCounter = 0;
+function mintEvalEventId(): string {
+  // Same reasoning as mintSessionId: no node:crypto import for one call.
+  evalEventCounter += 1;
+  return `ev-${Date.now().toString(36)}-${evalEventCounter.toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
 }
@@ -1598,6 +1639,108 @@ export class SqliteStore implements Store {
       | undefined;
     if (!row || row.kind === 'persona') return;
     this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(id);
+  }
+
+  // -- eval-event ledger (Phase 3 P3-M5, realizing P15-03) ------------------
+  //
+  // The kind-specific fields ride in a JSON `payload` column rather than twenty
+  // sparse columns: only the meter's hot filters (agent, time, kind, task type)
+  // need to be queryable, and a JSON blob means a later F2-04 observation kind
+  // adds no migration. Same trick the harness rows use for their kind payload.
+
+  appendEvalEvent(event: EvalEventInput): EvalEvent {
+    this.assertOpen();
+    const { id, at, kind, agentId, sessionId, taskType, domain, excludedFromScoring, ...rest } =
+      event;
+    const row: EvalEvent = {
+      ...event,
+      id: id ?? mintEvalEventId(),
+      at: at ?? Date.now(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO eval_events (id, kind, at, agent_id, session_id, task_type, domain, payload, excluded)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        kind,
+        row.at,
+        agentId,
+        sessionId,
+        taskType ?? null,
+        domain ?? null,
+        JSON.stringify(rest),
+        excludedFromScoring ? 1 : 0,
+      );
+    return row;
+  }
+
+  listEvalEvents(
+    agentId: string,
+    opts?: { kind?: EvalEventKind; taskType?: string; limit?: number },
+  ): EvalEvent[] {
+    this.assertOpen();
+    const where: string[] = ['agent_id = ?'];
+    const args: unknown[] = [agentId];
+    if (opts?.kind) {
+      where.push('kind = ?');
+      args.push(opts.kind);
+    }
+    if (opts?.taskType) {
+      where.push('task_type = ?');
+      args.push(opts.taskType);
+    }
+    // Newest-first in SQL so `limit` takes the most RECENT rows, then reversed so
+    // the caller gets oldest-first (what windowing and change detection expect).
+    const limit = opts?.limit != null ? ` LIMIT ${Math.max(0, Math.floor(opts.limit))}` : '';
+    const rows = this.db
+      .prepare(
+        `SELECT id, kind, at, agent_id, session_id, task_type, domain, payload, excluded
+           FROM eval_events WHERE ${where.join(' AND ')} ORDER BY at DESC, id DESC${limit}`,
+      )
+      .all(...(args as never[])) as Array<{
+      id: string;
+      kind: string;
+      at: number;
+      agent_id: string;
+      session_id: string;
+      task_type: string | null;
+      domain: string | null;
+      payload: string;
+      excluded: number;
+    }>;
+    return rows.reverse().map((r) => {
+      let payload: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(r.payload) as unknown;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          payload = parsed as Record<string, unknown>;
+        }
+      } catch {
+        /* a corrupt payload must not break the meter — treat it as an empty row */
+      }
+      return {
+        ...payload,
+        id: r.id,
+        kind: r.kind as EvalEventKind,
+        at: Number(r.at),
+        agentId: r.agent_id,
+        sessionId: r.session_id,
+        ...(r.task_type != null ? { taskType: r.task_type } : {}),
+        ...(r.domain != null ? { domain: r.domain } : {}),
+        ...(r.excluded ? { excludedFromScoring: true } : {}),
+      } as EvalEvent;
+    });
+  }
+
+  deleteEvalEvents(selector: EvalEventDeleteSelector): void {
+    this.assertOpen();
+    if ('agentId' in selector) {
+      this.db.prepare(`DELETE FROM eval_events WHERE agent_id = ?`).run(selector.agentId);
+    } else {
+      this.db.prepare(`DELETE FROM eval_events WHERE session_id = ?`).run(selector.sessionId);
+    }
   }
 
   // -- MCP registry --------------------------------------------------------
