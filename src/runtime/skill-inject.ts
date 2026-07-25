@@ -45,6 +45,13 @@ export type SkillInjectionQuery = {
   tokenBudget: number;
   /** project scopeKey — only when the session is projected. */
   cwd?: string;
+  /** The bare names of every tool THIS turn can actually run (runtime tools + MCP
+   *  + the engine's built-ins). A tool-bearing skill is injected only when EVERY
+   *  `toolRef` it declares is in this set — otherwise it is excluded and counted,
+   *  so a skill never half-runs against a tool the turn cannot call (Phase 2.5).
+   *  Omitted ⇒ no tool is considered available ⇒ every tool-bearing skill is
+   *  excluded (the pre-2.5 behaviour, preserved for callers that don't pass it). */
+  availableTools?: string[];
 };
 
 /** What was selected for a turn. `skills` are the injected instruction-only
@@ -66,11 +73,26 @@ const SCOPE_RANK: Record<HarnessScope, number> = {
 };
 
 /** A skill is INSTRUCTION-ONLY when it has a skill payload and no (or empty)
- * toolRefs. Tool-bearing skills are Phase 2.5 and never injected here. */
+ * toolRefs. Such a skill is always injectable — it needs no tool present. */
 export function isInstructionOnly(item: HarnessItem): boolean {
   const skill = item.skill;
   if (!skill) return false;
   return skill.toolRefs === undefined || skill.toolRefs.length === 0;
+}
+
+/** Whether a skill's declared tools are ALL available this turn (Phase 2.5). An
+ * instruction-only skill is trivially satisfied; a tool-bearing skill needs every
+ * `toolRef` present in `availableTools`. With no `availableTools` set, a
+ * tool-bearing skill is NOT satisfied — the safe default that keeps it excluded
+ * (and counted) rather than half-running against absent tools. */
+export function skillToolsSatisfied(
+  item: HarnessItem,
+  availableTools: ReadonlySet<string> | undefined,
+): boolean {
+  const refs = item.skill?.toolRefs;
+  if (refs === undefined || refs.length === 0) return true;
+  if (!availableTools) return false;
+  return refs.every((r) => availableTools.has(r));
 }
 
 /** Whether a skill is relevant to this turn: a skill with no triggers is
@@ -102,15 +124,18 @@ export function renderSkillBlock(item: HarnessItem): string {
 
 /**
  * Select, rank, and budget candidate skills for one turn. PURE. Filters to
- * enabled + relevant, splits off tool-bearing skills (counted, not injected),
- * ranks the instruction-only remainder by precedence, then greedily fills up to
- * `tokenBudget` — every candidate that would push the total over the cap is
- * dropped and counted. `tokensUsed` is ALWAYS ≤ tokenBudget.
+ * enabled + relevant; a skill PARTICIPATES when it is instruction-only OR every
+ * tool it declares is available this turn (`availableTools`) — a tool-bearing
+ * skill whose tools are absent is held back and COUNTED (`excludedForTools`), so
+ * it never half-runs (Phase 2.5). Participants are ranked by precedence and
+ * greedily filled up to `tokenBudget`; anything over the cap is dropped and
+ * counted. `tokensUsed` is ALWAYS ≤ tokenBudget.
  */
 export function selectSkillsForInjection(
   candidates: readonly HarnessItem[],
   userText: string,
   tokenBudget: number,
+  availableTools?: ReadonlySet<string>,
 ): InjectedSkills {
   const budget = Math.max(0, Math.floor(tokenBudget));
 
@@ -123,11 +148,13 @@ export function selectSkillsForInjection(
       skillMatchesTurn(c, userText),
   );
 
-  // Tool-bearing relevant skills are held back for Phase 2.5 — counted so the
-  // omission is observable (impl §6 "no silent half-working skills").
-  const excludedForTools = relevant.filter((c) => !isInstructionOnly(c)).length;
+  // A tool-bearing skill participates only when its tools are all present this
+  // turn; otherwise it is held back and counted so the omission is observable
+  // (impl §6 "no silent half-working skills").
+  const participates = (c: HarnessItem) => skillToolsSatisfied(c, availableTools);
+  const excludedForTools = relevant.filter((c) => !participates(c)).length;
 
-  const ranked = rankSkills(relevant.filter(isInstructionOnly));
+  const ranked = rankSkills(relevant.filter(participates));
 
   const skills: HarnessItem[] = [];
   let tokensUsed = 0;
@@ -190,6 +217,7 @@ export function retrieveSkillsForInjection(
     gatherSkillCandidates(store, query, opts),
     query.userText,
     query.tokenBudget,
+    query.availableTools ? new Set(query.availableTools) : undefined,
   );
 }
 

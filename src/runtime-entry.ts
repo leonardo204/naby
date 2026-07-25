@@ -161,6 +161,7 @@ export {
   retrieveSkillsForInjection,
   selectSkillsForInjection,
   skillMatchesTurn,
+  skillToolsSatisfied,
   type InjectedSkills,
   type SkillInjectionQuery,
 } from './runtime/skill-inject.js';

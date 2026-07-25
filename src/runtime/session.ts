@@ -129,6 +129,9 @@ export type RunTurnOptions = {
     userId?: string;
     /** org-scope key — omit unless in-house org harness is in play. */
     orgId?: string;
+    /** Bare names of every tool this turn can run — a tool-bearing skill injects
+     *  only when all its toolRefs are here, else it is excluded + counted (2.5). */
+    availableTools?: string[];
   };
   /** Called once with what was injected (skills, tokensUsed, droppedForBudget,
    * excludedForTools) so the caller can log/inspect the per-turn skill selection.
@@ -193,6 +196,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       userText,
       tokenBudget: opts.skillInjection.tokenBudget,
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts.skillInjection.availableTools !== undefined
+        ? { availableTools: opts.skillInjection.availableTools }
+        : {}),
     };
     const skillOpts: { userId?: string; orgId?: string } = {};
     if (opts.skillInjection.userId !== undefined)
