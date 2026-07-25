@@ -11,6 +11,7 @@
 
 import { app, BrowserWindow } from 'electron';
 import { existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CredentialVault, type SafeStorageLike } from './credentials.js';
@@ -138,16 +139,21 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
   const userDataDir = app.getPath('userData');
   mkdirSync(userDataDir, { recursive: true });
 
-  // The runtime's SQLite file lives under userData (contract §6). Both the
-  // shell-side store (opened inside the Next server graph by
+  // The runtime's SQLite file lives at the LAUNCH-MODE-INDEPENDENT home
+  // ~/.naby/app.db, so the SAME store is used whether this runs as the packaged
+  // Electron build, `npm run electron:dev`, or the plain `cockpit` CLI — harness /
+  // skills / commands / MCP configured in one are visible in all. (Credentials and
+  // provider profiles stay under userData; only the shared DB is unified — it is
+  // the piece that must not diverge across launch modes.) Both the shell-side
+  // store (opened inside the Next server graph by
   // `packages/feature/agent/src/server/engines/naby.ts`) and our main-process
   // store resolve to this one path, because the shell reads NABY_DB_PATH first.
-  // Setting it here rather than compiling a path into the shell is what keeps
-  // the submodule diff at zero.
-  const dbPath = join(userDataDir, 'naby', 'app.db');
-  mkdirSync(dirname(dbPath), { recursive: true });
+  // NABY_DB_PATH/NABY_HOME still win when already set, so tests can override.
+  const nabyHome = join(homedir(), '.naby');
+  const dbPath = join(nabyHome, 'app.db');
+  mkdirSync(nabyHome, { recursive: true });
   process.env.NABY_DB_PATH ??= dbPath;
-  process.env.NABY_HOME ??= join(userDataDir, 'naby');
+  process.env.NABY_HOME ??= nabyHome;
 
   const token = mintSessionToken();
 
@@ -374,6 +380,14 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
       sandbox: true,
       nodeIntegration: false,
       nodeIntegrationInWorker: false,
+      // Load the preload in the /project SUBFRAME too, so the chat UI (which
+      // renders inside that same-origin iframe) can reach `window.naby`. The only
+      // capability this actually unlocks there is `getPathForFile` — resolving an
+      // OS-dropped file to its absolute path (Feature: Finder drag-drop). Node stays
+      // OFF (nodeIntegration:false) and contextIsolation/sandbox remain ON, so the
+      // subframe gets the same guarded bridge the main frame has, nothing more, and
+      // only our own loopback UI is ever loaded in it (will-navigate + webSecurity).
+      nodeIntegrationInSubFrames: true,
       webSecurity: true,
       additionalArguments: [
         `--naby-session-token=${bootResult.token}`,

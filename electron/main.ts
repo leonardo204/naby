@@ -16,6 +16,7 @@
 
 import { app, BrowserWindow, dialog } from 'electron';
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
@@ -36,51 +37,60 @@ import { boot, createMainWindow, type BootResult } from './boot.js';
 app.setName('Naby');
 
 /**
- * Move data written under the old development directory to the unified one.
+ * Move a legacy database into the unified ~/.naby home (the launch-mode-
+ * independent location boot() now points every store at).
  *
- * Runs once and only when the destination does not exist, so it can never
- * overwrite real data, and a failure is logged rather than thrown — an
+ * Runs once and only when the unified home has no real database yet, so it can
+ * never overwrite live data, and a failure is logged rather than thrown — an
  * un-migratable old profile must not stop the app from starting. Without this,
  * unifying the path would silently orphan every session recorded before it.
  */
 function migrateLegacyUserData(): void {
-  const current = join(app.getPath('userData'), 'naby');
-  const legacy = join(dirname(app.getPath('userData')), 'Electron', 'naby');
-  if (legacy === current || !existsSync(legacy)) return;
+  const target = join(homedir(), '.naby');
+  const targetDb = join(target, 'app.db');
 
-  // Two things this has to get right, both learned the hard way.
-  //
-  // Gate on the DATABASE, not on the directory: boot creates the directory (for
-  // credentials) before this runs, so a directory check is permanently true and
-  // the old sessions stay orphaned forever.
-  //
-  // And move the set ATOMICALLY. A -wal/-shm pair belongs to one specific
-  // database file; migrating them independently can pair a WAL with a different
-  // database, which is a corruption risk rather than an inconvenience. So the
-  // sidecars move only alongside the db they belong to, and only when the
-  // destination has no real database to lose.
-  const fromDb = join(legacy, 'app.db');
-  const toDb = join(current, 'app.db');
-  if (!existsSync(fromDb)) return;
+  // If the unified home already holds a real database, keep it — never clobber.
+  // (A 0-byte placeholder counts as absent; see the note below.)
+  if (existsSync(targetDb) && statSync(targetDb).size > 0) return;
 
-  // An empty file counts as absent: boot creates a 0-byte app.db before the
-  // schema is applied, and refusing to migrate because of that placeholder is
-  // how the real data gets stranded.
-  const destHasData = existsSync(toDb) && statSync(toDb).size > 0;
-  if (destHasData) return;
+  // Legacy homes the DB may have lived in before it was unified, newest-intent
+  // first: the packaged/dev userData dir ("<userData>/naby") and the pre-setName
+  // development dir ("<Application Support>/Electron/naby").
+  const candidates = [
+    join(app.getPath('userData'), 'naby'),
+    join(dirname(app.getPath('userData')), 'Electron', 'naby'),
+  ];
 
-  try {
-    mkdirSync(current, { recursive: true });
-    for (const name of ['app.db', 'app.db-wal', 'app.db-shm']) {
-      const from = join(legacy, name);
-      if (!existsSync(from)) continue;
-      rmSync(join(current, name), { force: true }); // clears the empty placeholder
-      renameSync(from, join(current, name));
+  for (const src of candidates) {
+    if (src === target) continue;
+
+    // Two things this has to get right, both learned the hard way.
+    //
+    // Gate on the DATABASE, not on the directory: boot creates directories (for
+    // credentials) before this runs, so a directory check is permanently true.
+    // And an empty file counts as absent — a 0-byte placeholder must not be
+    // mistaken for real data (in either direction).
+    const fromDb = join(src, 'app.db');
+    if (!existsSync(fromDb) || statSync(fromDb).size === 0) continue;
+
+    try {
+      mkdirSync(target, { recursive: true });
+      // Move the set ATOMICALLY. A -wal/-shm pair belongs to one specific
+      // database file; migrating them independently can pair a WAL with a
+      // different database, a corruption risk rather than an inconvenience. So
+      // the sidecars move only alongside the db they belong to.
+      for (const name of ['app.db', 'app.db-wal', 'app.db-shm']) {
+        const from = join(src, name);
+        if (!existsSync(from)) continue;
+        rmSync(join(target, name), { force: true }); // clears any empty placeholder
+        renameSync(from, join(target, name));
+      }
+      console.log(`[naby-home] migrated the database to the unified ~/.naby home from ${src}`);
+    } catch (err) {
+      // Never fatal: an un-migratable old profile must not stop the app.
+      console.warn(`[naby-home] could not migrate the legacy database from ${src}: ${String(err)}`);
     }
-    console.log(`[userData] migrated the database from the legacy dev directory`);
-  } catch (err) {
-    // Never fatal: an un-migratable old profile must not stop the app.
-    console.warn(`[userData] could not migrate the legacy database: ${String(err)}`);
+    return; // first candidate with real data wins
   }
 }
 

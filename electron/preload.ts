@@ -27,7 +27,7 @@
 // arrives with only its `.message`. Anything that must survive the trip travels
 // as plain data — which is why the error taxonomy is data, not exception types.
 
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 const TOKEN_HEADER = 'x-naby-session-token';
 const TOKEN_PREFIX = '--naby-session-token=';
@@ -278,4 +278,11 @@ contextBridge.exposeInMainWorld('naby', {
   /** CO-05 — DEV-ONLY ChatGPT subscription sign-in. `available:false` unless the
    *  dev seal is open; no read path to the stored tokens. */
   chatgptOauth,
+  /** Resolve a File dropped from the OS (Finder/Explorer) to its absolute path.
+   *  `File.path` was removed in Electron 32, so this is the only supported way to
+   *  recover the on-disk path of a dragged file — used to insert an absolute path
+   *  into the chat input and to copy dropped files into the project. Pure passthrough
+   *  to `webUtils.getPathForFile`; it reveals only the path of a file the user just
+   *  chose to drop, nothing it can enumerate on its own. */
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
 });
