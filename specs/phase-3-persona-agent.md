@@ -68,7 +68,11 @@ Agent {
   - 셸 `slashCommands.ts`: **충돌 규칙** — `@등록에이전트명`은 하네스 `@verb` 확장 건너뜀(엔진 라우팅으로 통과). `CommandExpansionStore`에 `getAgentByName` 추가. `slashCommands.test` +3 케이스.
   - 검증: 타입체크 clean(양 트리), slashCommands 유닛 13/13, spike-agents(파서 7 + 스토어 전부) PASS, `build:app` exit 0, 실서버 부팅 OK. **미검증: 실제 @라우팅 턴(system override/toolRefs deny/메모리 주입이 라이브 모델 턴에 반영되는지) — 라이브 모델 필요.**
   - 남음(P3-M3로): autonomy(maxSteps 루프)·텔레그램 에스컬레이션. 메모리는 현재 전 스코프 일반 주입 — 에이전트 memoryScope 타깃팅은 P3-M4 학습에서 정교화.
-- **P3-M3** — 자율 모드 + 에스컬레이션: 목표 루프 + M2 승인의 **텔레그램 채널** + 최종 리포트. (M2/scheduled/telegram)
+- **P3-M3** 🔶 **진행 중** — 자율 모드 + 에스컬레이션: 목표 루프 + M2 승인의 **텔레그램 채널** + 최종 리포트. (M2/scheduled/telegram)
+  - **결정(2026-07-25)**: 텔레그램 설정=naby 자체(store settings)+dotclaude `messenger.json` 자동 프리필. 에스컬레이션=**양방향**(텔레그램 인라인버튼/답장으로 원격 승인 resolve). 전용 나비봇 불필요(기존 봇 토큰 재사용 가능).
+  - **M3a ✅ 완료(커밋 대기)** — 텔레그램 채널 기반: 셸 `lib/telegram.ts`(설정 read/write, `seedTelegramFromDotclaude` 프리필, 순수헬퍼 buildApprovalKeyboard/parseCallbackData/classifyTextReply(en/ko), IO: sendTelegramMessage/pollTelegramUpdates/answerCallbackQuery). `getStore()` 프리필 배선. api `telegram.get/set/test`(토큰 redact). `NabyTelegramSettings.tsx`+Settings Agents섹션. i18n `telegramSettings.*`. 검증: 유닛 9/9, 타입체크 clean, build:shell exit0, **실봇 전송 성공(prefill→enable→test 실배달 확인)**.
+  - **M3b 남음** — 에스컬레이션 배선: escalation∈{telegram,both} 에이전트의 M2 `requestApproval`이 인라인버튼 텔레그램 발송 + getUpdates 폴링 루프가 callback/답장을 `resolveApproval(approvalId)`에 매핑(앱/텔레그램 양쪽 동일 승인 해소). + 턴 종료 시 최종 리포트 전송.
+  - **M3c 남음** — 자율 루프: `autonomy.maxSteps` 목표 주도 persist-until-done(scheduled tasks 인프라 재사용).
 - **P3-M4** — 학습: 페르소나 턴에서 사용자 판단/행위를 메모리로 캡처(쓰기 게이트) + 다음 턴 주입 강화.
 
 ## 8. 결정 사항 (2026-07-25 확정)
