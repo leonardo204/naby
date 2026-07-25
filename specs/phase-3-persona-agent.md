@@ -87,7 +87,19 @@ Agent {
     - 최종 리포트(M3b)는 목표당 한 번 나가며 `steps`/`stepsMax`와 `stopReason`을 담는다(`done-marker`면 이유는 뺀다). 덕분에 "2/5 steps"와 "5/5 steps, max-steps"를 구분해 읽을 수 있다.
     - API와 UI: `agent.put`이 `resolveMaxSteps`로 **저장할 때도 상한을 자른다**(999는 20으로, 1과 0은 필드를 빼서 끈다). UI에 보이는 값이 곧 실행되는 값이다. `NabyAgentManager` placeholder를 `no limit`에서 `off (1 turn)`으로 고쳐 오해를 없애고 `agentManager.stepsHint`(en/ko)를 추가했다.
     - 검증: 신규 spike `spike:autonomy`가 **10/10 PASS**다. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌린다. 확인한 것은 다단계 실행, continuation 트랜스크립트, **result가 정확히 하나**, `[[DONE]]` 조기 종료, no-tool-use 종료, maxSteps 하드 스톱(모델 호출 4회 = 2 step이며 6회가 아니다), no-op 불변(바 0개, result 1개, 주입 없음)이다. 회귀는 `spike:02` 5/5, `spike:agents`와 `spike:policy` PASS, 셸 274/274, 타입체크 clean(두 트리), `build:app` exit 0, 실서버 상한 확인이다. **미검증: 라이브 모델이 실제로 얼마나 잘 이어가는지. 모델이 필요하다.**
-- **P3-M4** — 학습. 페르소나 턴에서 사용자의 판단과 행위를 메모리로 잡아 두고(쓰기 게이트), 다음 턴 주입을 강화한다.
+- **P3-M4** 🔶 **M4a·M4b 구현 완료(2026-07-25, 커밋 대기)** — 학습. 페르소나 턴에서 배운 것을 메모리로 잡아 두고(쓰기 게이트) 다음 턴에 주입한다.
+  - **진단**: Phase 1.5가 스토어·쓰기 게이트·주입을 다 만들고 P3-M2가 주입을 배선했는데, **행을 쓰는 코드가 하나도 없었다.** `decideMemoryWrite`는 런타임에 구현·export만 되어 있고 호출자가 없는 dormant 상태였다(M2 이전의 주입과 똑같다). 그래서 스토어는 영원히 비어 있고 검토 UI에도 재료가 없었다. 개인화 전략 §3.2가 "추출·검증 단계가 비었다"고 지적한 그 공백이다.
+  - **M4a — 캡처 도구 `naby_remember`**(런타임 `tools.ts`). `naby_add_mcp`와 같은 선례를 따른다. 에이전트가 제안하고 사람이 승인한다.
+    - **왜 도구인가**: 턴이 끝난 뒤 별도 모델 호출로 뽑는 방식과 달리, 에이전트는 이미 대화 중에 "지금 배웠다"를 안다. 추가 왕복이 없고, 트랜스크립트에 보이고, 무엇보다 **다른 툴콜과 똑같은 게이트를 지난다** — 정책 규칙으로 `naby_remember`를 deny하거나 승인 대상으로 만들 수 있다.
+    - **게이트 두 겹**: ① 툴콜 게이트(Phase 2 정책) ② 쓰기 게이트(`decideMemoryWrite`, `store.putMemory` 내부에서 적용).
+    - **오염 방어 3가지**: ① 모든 쓰기가 `requestedStatus:'proposed'`다. 주입은 `confirmed`만 되므로(계약 §5) **사람이 확인하기 전에는 어떤 답변도 바꾸지 못한다** — 전략 §2.3 "완전 자동 메모리는 만들지 않는다"를 코드로 강제한다. ② provenance는 `artifact` 등급이다. 모델이 "사용자가 X를 좋아한다"고 말하는 것은 사용자가 직접 말한 것과 다르므로 `user` 등급을 주지 않는다. ③ 시크릿 모양 값은 결정론적으로 거부한다(`looksLikeSecret` — sk-/Bearer/JWT/봇토큰/PEM/`password=`). `app.db` 암호화가 아직 미결(전략 §7.2)이라 토큰을 넣으면 평문 자격증명이 디스크에 남는다.
+    - 순수 함수(스파이크 검증): `normalizeMemoryKey`(슬러그화 — "Prefers Dark Mode"와 "prefers-dark-mode"가 한 행으로 upsert되게, 한글 유지), `looksLikeSecret`, `resolveMemoryScopeKey`(scope→key는 계약 §2 사실이라 런타임에 둔다), `validateRememberInput`(값 400자 상한, type/scope 검증). `org` 스코프는 **에이전트에게 쓰기를 허용하지 않는다** — 팀 자산은 사람이 큐레이션한다.
+    - `buildToolset(outbox, mcp?, memory?)`에 학습 sink를 더했다. **라우팅된 에이전트 턴에만** 도구가 붙는다. 일반 턴의 도구 목록은 M4 이전과 byte-for-byte 같다.
+  - **M4b — 학습 지시 주입**(셸 `lib/learning.ts`, 유닛 7). 도구만 주고 지시를 안 하면 모델이 들쭉날쭉 부른다. 지시는 모델이 그냥 두면 틀리는 세 가지를 박는다. 캡처는 제안이라 "이제부터 적용됩니다"라고 말하면 안 되고, 기준은 "다음 주에도 참인가"이고, 시크릿은 메모리가 아니다.
+    - **`canLearn` 게이트**: `toolRefs`로 제한된 에이전트가 `naby_remember`를 못 부르면 지시를 **주입하지 않는다.** 부를 수 없는 도구를 부르라고 지시하면 스킬 주입이 `availableTools`로 막는 "반쪽 실행"과 같은 문제가 된다. 비교 규칙은 P3-M2 게이트와 동일(현재 `normalizeToolName`은 항등이라 유사 이름 MCP 도구는 다른 도구다).
+    - 도구의 기본 스코프는 `agent.memoryScope`다. **읽기(주입)는 계속 전 스코프 합집합으로 둔다** — 좁히면 품질만 떨어진다. `memoryScope`는 "어디에 쓰는가"를 정한다.
+  - 검증: 신규 스파이크 `spike:learn` **10/10 PASS**. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌려 **루프를 닫는 것까지** 확인한다. 캡처가 `proposed`+`artifact`로 안착 → **proposed는 다음 턴에 주입되지 않음** → 사용자 confirm → **같은 사실이 다음 턴 시스템 프롬프트에 등장**. 여기에 라우팅 없는 턴은 도구·지시 모두 없음, 시크릿 거부 후 미기록, `org` 거부, cwd 없는 턴의 `project` 거부까지 본다. 회귀: `spike:02` 5/5, `spike:autonomy` 10/10, `spike:agents`·`spike:p15`(11/11) PASS, 셸 281/281, 타입체크 clean(양 트리), `build:app` exit 0. **미검증: 라이브 모델이 무엇을 기억할 만하다고 판단하는지의 품질(모델 필요), Settings 검토 UI 시각 렌더.**
+  - 남음(M4c): 모델 판단이 아니라 **편집·승인 신호에서 선호를 추출**하는 루프. 전략 문서가 Phase 2b(추출·검증)에 배치했고, 북극성 지표(편집률 감소 곡선)를 실제로 움직이는 부분이다.
 
 ## 8. 결정 사항 (2026-07-25 확정)
 
