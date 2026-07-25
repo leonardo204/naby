@@ -27,7 +27,7 @@
 | 빌드 | `npm run build:app`(runtime → shell → electron). 실행은 `npm run electron:dev` |
 | 검증 | 셸 테스트 `cd shell && npm test` · 타입체크 `npm run typecheck`(양 트리) · 스파이크 `npm run spike:<name>` |
 | DB 경로 | `NABY_DB_PATH` > `NABY_HOME` > `~/.naby/app.db` |
-| 상태 | 개발 중. Phase 3(페르소나 에이전트) **P3-M6까지 완료** — 신뢰 지표·원장·체크인·성장 패널·내보내기. 임포트와 2차 축 남음 |
+| 상태 | 개발 중. Phase 3(페르소나 에이전트) **P3-M7까지 완료** — 신뢰 지표·원장·체크인·성장 패널·내보내기·임포트 |
 
 ### 어느 레이어에 쓰는가
 

@@ -2,7 +2,7 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.7.0
+version: 0.8.0
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
 related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
@@ -118,7 +118,10 @@ Agent {
   - 셸 `lib/agentExport.ts`: 어느 스코프를 모으는가(user 항상, project는 cwd 있을 때, session·org 절대 아님). `api/naby.ts` `agent.export`는 **읽기 전용**이라 아무것도 쓰지 않는다.
   - `AgentExportButton.tsx`: 두 단계. 첫 클릭은 보고만, 두 번째 클릭에서 저장한다.
   - 왕복을 **실제 임포터**(`parseSubagentArtifact`)로 검증한다. 형식을 추측하지 않았다는 주장이 테스트가 된다.
-  - ⬜ **임포트는 다음 마일스톤이다.** 사이드카 복원 + 단계 재계산 + 임포트한 에이전트를 신뢰하지 않는 처리(D6).
+- **P3-M7** ✅ **임포트 구현 완료(2026-07-26)** — 사이드카를 읽어 에이전트를 복원하되, **파일은 신뢰를 선언할 수 없다.** 상세 → [`phase-3-agent-export`](phase-3-agent-export.md) §7.
+  - 스펙의 §1(단계 재계산)과 §4(기본 비활성)가 충돌했고, **사용자에게 물어서** 풀었다. "내가 내보낸 파일입니까?"가 원장을 세는지 결정한다. 아니면 `imported` 플래그가 붙고 모든 성장 축이 무시한다 — 알은 `@`로 부를 수 없으니 "기본 비활성"이 지표에서 저절로 나온다.
+  - **라이브에서 결함을 잡았다.** 임포트한 학습 내용을 메모리로 제안했더니 전부 거부됐다(불변식 3: external은 `user` 스코프를 못 쓴다). 옳은 거부이므로 설계를 고쳐 **그 에이전트의 지시문**에 넣는다. 순정 `.md`가 하는 것과 같다.
+  - `npm run spike:import` **11/11**(대부분 적대적), 셸 `agentImport.test.ts` 6건.
 - **P3-M4** 🔶 **M4a·M4b 구현 완료(2026-07-25, 커밋 대기)** — 학습. 페르소나 턴에서 배운 것을 메모리로 잡아 두고(쓰기 게이트) 다음 턴에 주입한다.
   - **진단**: Phase 1.5가 스토어·쓰기 게이트·주입을 다 만들고 P3-M2가 주입을 배선했는데, **행을 쓰는 코드가 하나도 없었다.** `decideMemoryWrite`는 런타임에 구현·export만 되어 있고 호출자가 없는 dormant 상태였다(M2 이전의 주입과 똑같다). 그래서 스토어는 영원히 비어 있고 검토 UI에도 재료가 없었다. 개인화 전략 §3.2가 "추출·검증 단계가 비었다"고 지적한 그 공백이다.
   - **M4a — 캡처 도구 `naby_remember`**(런타임 `tools.ts`). `naby_add_mcp`와 같은 선례를 따른다. 에이전트가 제안하고 사람이 승인한다.
