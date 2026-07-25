@@ -268,12 +268,19 @@ async function main(): Promise<void> {
     `prompts carrying the confirmed fact: ${s3.prompts.filter((p) => p.includes('Wants distances')).length}/${s3.prompts.length}`,
   );
 
-  // ==== A plain (unrouted) turn is untouched by M4 =========================
+  // ==== A plain (unrouted) turn belongs to the PERSONA (changed in P3-M5) ===
+  //
+  // M4a attached learning only to a routed turn, and this check asserted that. It
+  // was reversed on purpose: combined with M5's mention gate it deadlocked — the
+  // persona cannot be `@`-addressed until it is a butterfly, and it could not
+  // learn or check in unless it was addressed, so it could never become one.
+  // Observation now follows the persona onto ordinary turns (`growthSubject`);
+  // ADDRESSING it is still what has to be earned.
   const { s: s4 } = await runOnce('what units do I use?', [text('Metric.')], { cwd: TMP_DIR });
   record(
     checks,
-    '(a2) a plain turn is NOT offered the tool and gets no learning instruction',
-    !s4.offeredTools.includes('naby_remember') && s4.prompts.every((p) => !p.includes('LEARNING:')),
+    '(a2) a plain turn IS the persona\'s turn: it gets the tool and the instruction',
+    s4.offeredTools.includes('naby_remember') && s4.prompts.some((p) => p.includes('LEARNING:')),
     `tools: ${JSON.stringify(s4.offeredTools)}; instruction present: ${s4.prompts.some((p) => p.includes('LEARNING:'))}`,
   );
 

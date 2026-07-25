@@ -20,6 +20,17 @@ import type {
   MemoryWriteRequest,
 } from './store/store.js';
 import { validateMcpEntry } from './mcp.js';
+import {
+  CHECKIN_TOOL_NAME,
+  CHECKIN_MAX_OPTIONS,
+  CHECKIN_MIN_OPTIONS,
+  degenerateReason,
+  scoreCheckin,
+  shouldRecord,
+  validateCheckinInput,
+  type CheckinAnswer,
+  type CheckinQuestion,
+} from './checkin.js';
 
 // ---------------------------------------------------------------------------
 // send_message outbox — in-memory record of everything actually sent. A test
@@ -505,9 +516,203 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
 }
 
 // ---------------------------------------------------------------------------
+// naby_checkin — HOW THE TRUST METER GETS ITS LABELS (Phase 3, P3-M5)
+//
+// P3-M5 built `growth.ts` (the meter) and the `eval_events` ledger, but nothing
+// wrote a row, so every agent read "egg 0%" no matter how well it worked. This
+// tool is the writer, and the exchange it performs is the measurement:
+//
+//   the agent proposes → the user picks → hit or miss → the ledger → the stage
+//
+// WHY A TOOL AND NOT A PROMPT CONVENTION. A "please ask before you act" line in
+// the system prompt produces prose the app cannot score: no options, no recorded
+// recommendation, no label. A tool call has a schema, so the recommendation is
+// pinned BEFORE the user answers — which is the whole reason the answer means
+// something. It also pauses the turn properly (the shell suspends on the sink's
+// promise) and passes the same gate as every other call.
+//
+// WHAT THIS TOOL CANNOT DO. It cannot decide when a check-in was owed. The
+// obligation is a property of the action class and is enforced on the gate path
+// (`isConsequentialTool`), where a consequential call with no check-in is
+// recorded as `autonomous`. Otherwise the agent would ask only where it felt
+// safe and the hit rate would measure its taste in questions, not its knowledge
+// of its user.
+//
+// AND IT CANNOT SEE ITS OWN SCORE. Nothing in the return value mentions hits,
+// stages or percentages, and the ledger is not readable by any tool (contract §4,
+// invariant 5). An agent that could read the metric would optimize the metric.
+// ---------------------------------------------------------------------------
+
+/** One scored check-in, ready for the ledger. The shell maps this onto an
+ *  `eval_events` row — the runtime does not know the store's column names. */
+export interface CheckinLedgerRow {
+  question: string;
+  options: string[];
+  recommended: number;
+  /** Index the user chose, or -1 when they answered in their own words. */
+  chosen: number;
+  /** The label. Decided here, stored as-is, never recomputed (contract §4.1). */
+  hit: boolean;
+  confidence?: number;
+  correction?: string;
+  taskType?: string;
+  /** Set when the question was degenerate: kept, marked, out of the hit rate. */
+  excludedFromScoring?: boolean;
+  /** Why it was excluded, in plain words, so the panel can say so. */
+  reason?: string;
+}
+
+/** What the check-in executor needs from the shell: a way to interrupt the user,
+ *  a place to write the outcome, and enough history to spot a repeat. */
+export interface CheckinSink {
+  /** Suspend the turn and put the question in front of the user. Resolves with
+   *  their choice, or `{unanswered: true}` on stop/timeout.
+   *
+   *  `meta.toolCallId` is passed through so the shell can key the pending prompt
+   *  the same way M2 keys an approval (`sessionId:toolCallId`) — a stable id the
+   *  resolving request and the UI can both name. */
+  ask(question: CheckinQuestion, meta: { toolCallId: string }): Promise<CheckinAnswer>;
+  /** Append the scored row. Separate from `ask` so a failed ledger write can
+   *  never swallow an answer the user already gave. */
+  record(row: CheckinLedgerRow): void;
+  /** The agent's recent check-in questions, newest first — the duplicate check
+   *  reads these. Absent is fine (a first check-in has no history). */
+  recentQuestions?: readonly string[];
+}
+
+/** Build the check-in executor bound to a turn's sink. */
+export function makeCheckin(sink: CheckinSink): Executor {
+  return async (input, ctx): Promise<ToolOutput> => {
+    const rec = asRecord(input);
+    const question = String(rec.question ?? '');
+    const rawOptions = rec.options;
+    const recommended = rec.recommended;
+
+    const problems = validateCheckinInput({
+      question,
+      options: rawOptions,
+      recommended,
+      confidence: rec.confidence,
+    });
+    if (problems.length) {
+      // A malformed check-in fails as a TOOL ERROR and the user is never
+      // interrupted: a prompt with one option or an out-of-range recommendation
+      // is not something they could answer.
+      return {
+        content: `The check-in was not shown: ${problems.join('; ')}.`,
+        isError: true,
+      };
+    }
+
+    const options = (rawOptions as unknown[]).map((o) => String(o).trim());
+    const recIndex = recommended as number;
+    const confidence = typeof rec.confidence === 'number' ? rec.confidence : undefined;
+    const taskType = typeof rec.taskType === 'string' && rec.taskType.trim() ? rec.taskType.trim() : undefined;
+
+    const answer = await sink.ask(
+      {
+        question: question.trim(),
+        options,
+        recommended: recIndex,
+        ...(confidence !== undefined ? { confidence } : {}),
+        ...(taskType ? { taskType } : {}),
+      },
+      { toolCallId: ctx.toolCall.toolCallId },
+    );
+
+    if (!shouldRecord(answer)) {
+      // Nobody answered. No row, and the model is told to stop rather than pick
+      // for the user — the whole point of asking was that it did not know.
+      return {
+        content:
+          'Nobody answered the check-in (the turn was stopped or the prompt expired). ' +
+          'Do not guess and do not proceed with the consequential step; say it is still waiting on a decision.',
+        isError: true,
+      };
+    }
+
+    const excluded = degenerateReason({ question, options, recentQuestions: sink.recentQuestions });
+    const hit = scoreCheckin(recIndex, answer);
+    try {
+      sink.record({
+        question: question.trim(),
+        options,
+        recommended: recIndex,
+        chosen: answer.chosen,
+        hit,
+        ...(confidence !== undefined ? { confidence } : {}),
+        ...(answer.correction ? { correction: answer.correction } : {}),
+        ...(taskType ? { taskType } : {}),
+        ...(excluded ? { excludedFromScoring: true, reason: excluded } : {}),
+      });
+    } catch {
+      // The answer is what the turn needs; a ledger hiccup must not lose it.
+    }
+
+    // WHAT THE MODEL IS TOLD: the decision, and nothing about how it scored.
+    if (answer.chosen < 0) {
+      return {
+        content:
+          `The user did not pick any option. In their words: "${answer.correction ?? ''}". ` +
+          'Follow that instead of your recommendation, and do not ask this again.',
+        data: { chosen: -1, correction: answer.correction ?? '' },
+      };
+    }
+    const picked = options[answer.chosen] ?? '';
+    return {
+      content:
+        `The user chose option ${answer.chosen + 1}: "${picked}". Proceed exactly that way ` +
+        'and do not ask this again.',
+      data: { chosen: answer.chosen, option: picked },
+    };
+  };
+}
+
+// ---------------------------------------------------------------------------
 // JSON-schema tool definitions (NO execute). The engine converts these to
 // whatever its SDK needs; the runtime supplies the executors separately.
 // ---------------------------------------------------------------------------
+
+export const checkinSchema: ToolSchema = {
+  name: CHECKIN_TOOL_NAME,
+  description:
+    'Ask the user how to proceed, RIGHT BEFORE a step that changes something they cannot easily undo — ' +
+    'writing or editing files, running a command, sending anything outward — when there is a real choice ' +
+    'about HOW to do it. State the decision as a question, offer the genuinely different ways to proceed, ' +
+    'and mark the one you believe they want. The turn pauses until they answer, and their answer overrides ' +
+    'your recommendation. Do NOT use it for read-only steps, for questions with only one real answer, or to ' +
+    're-ask something already decided in this conversation — and never pad the options.',
+  parameters: {
+    type: 'object',
+    properties: {
+      question: {
+        type: 'string',
+        description:
+          'The decision, as one question the user can answer by picking — e.g. "Rename the column in place, or add a new one and migrate?"',
+      },
+      options: {
+        type: 'array',
+        items: { type: 'string' },
+        description: `The genuinely different ways to proceed, ${CHECKIN_MIN_OPTIONS}–${CHECKIN_MAX_OPTIONS} of them, each a short concrete action.`,
+      },
+      recommended: {
+        type: 'number',
+        description:
+          'Zero-based index of the option you believe this user wants. Commit to your real best guess — a deliberately safe guess teaches nothing.',
+      },
+      confidence: {
+        type: 'number',
+        description: 'How sure you are of that recommendation, 0–1. Report it honestly; it is not used to decide anything.',
+      },
+      taskType: {
+        type: 'string',
+        description:
+          'Short slug for the kind of work this decision belongs to, e.g. "code-refactor", "email-draft". Reuse the same slug for the same kind of work.',
+      },
+    },
+    required: ['question', 'options', 'recommended'],
+  },
+};
 
 export const rememberSchema: ToolSchema = {
   name: REMEMBER_TOOL_NAME,
@@ -623,11 +828,16 @@ export const sendMessageSchema: ToolSchema = {
  *
  * When a `memory` sink is supplied, `naby_remember` is included so the agent can
  * capture what it learns about the user (also as a proposal — see makeRemember).
- * It carries THIS turn's scope keys, so it is built per turn rather than once. */
+ * It carries THIS turn's scope keys, so it is built per turn rather than once.
+ *
+ * When a `checkin` sink is supplied, `naby_checkin` is included so the agent can
+ * pause and ask how to proceed — the exchange the trust meter scores (P3-M5).
+ * Also per turn: the sink holds this turn's suspend/resume plumbing. */
 export function buildToolset(
   outbox: Outbox,
   mcp?: McpProposalSink,
   memory?: MemoryLearningSink,
+  checkin?: CheckinSink,
 ): {
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
@@ -645,6 +855,10 @@ export function buildToolset(
   if (memory) {
     toolSchemas.push(rememberSchema);
     executors[REMEMBER_TOOL_NAME] = makeRemember(memory);
+  }
+  if (checkin) {
+    toolSchemas.push(checkinSchema);
+    executors[CHECKIN_TOOL_NAME] = makeCheckin(checkin);
   }
   return { toolSchemas, executors };
 }

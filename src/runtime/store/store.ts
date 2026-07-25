@@ -552,6 +552,12 @@ export type EvalEvent = {
   domain?: string;
 
   // -- kind: 'checkin' — the agent asked before an irreversible step --------
+  /** What was asked, verbatim. Stored for two reasons: the growth panel shows the
+   *  user the decisions their agent actually put to them, and the degenerate-check
+   *  (`degenerateReason`) compares a new question against these to catch the same
+   *  thing being asked twice for two free hits. Lives in the payload JSON, so it
+   *  needed no schema migration. */
+  question?: string;
   /** Options offered, in the order shown. */
   options?: string[];
   /** Index of the option the agent RECOMMENDED — its prediction. */

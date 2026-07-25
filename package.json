@@ -50,7 +50,8 @@
     "spike:agents": "npm run build:runtime && tsx src/spikes/spike-agents.ts",
     "spike:autonomy": "npm run build:runtime && tsx src/spikes/spike-autonomy.ts",
     "spike:learn": "npm run build:runtime && tsx src/spikes/spike-learn.ts",
-    "spike:growth": "tsx src/spikes/spike-growth.ts"
+    "spike:growth": "tsx src/spikes/spike-growth.ts",
+    "spike:checkin": "tsx src/spikes/spike-checkin.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",
