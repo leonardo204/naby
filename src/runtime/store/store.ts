@@ -497,6 +497,78 @@ export type PolicyRule = {
 export type PolicyRuleInput = Omit<PolicyRule, 'id' | 'createdAt' | 'updatedAt'>;
 
 // ---------------------------------------------------------------------------
+// naby agents (Phase 3, P3-M1) — the naby-OWNED agent layer, addressed by `@`.
+//
+// This is a NEW key space, deliberately separate from owned harness above. An
+// `Agent` is a naby-owned actor (the built-in PERSONA that learns the user, plus
+// any custom agents the user adds) — NOT a harness subagent (which is a
+// user-authored capability under the `/` harness). The two are kept distinct in
+// the data model on purpose: "an agent ≠ a harness item" is the Phase 3 pivot.
+//
+// Agents are GLOBAL (naby-owned, single-user machine) — they carry no
+// scope/scopeKey. `memoryScope` records which memory scope an agent reads and
+// writes as its learned memory; that is a LINK into scoped memory, not a key for
+// the agent row (the keying invariant at the top of this file is intact — agent
+// rows are keyed by their own id, and `name` is a unique addressing handle).
+//
+// THE BUILT-IN PERSONA (spec §4): exactly one row of kind='persona' is seeded on
+// first run (seedBuiltinPersona, agents.ts). It is UNDELETABLE (removeAgent
+// no-ops a persona row) but fully EDITABLE (putAgent updates it). Users only ever
+// create kind='custom' agents, so kind='persona' uniquely identifies the built-in.
+// ---------------------------------------------------------------------------
+
+/** built-in persona (learns the user, seeded once) | user-added custom agent. */
+export type AgentKind = 'persona' | 'custom';
+
+/** Where a critical decision is escalated to a human when the agent runs
+ *  autonomously (Phase 3 P3-M3 wires the telegram channel; inline reuses the M2
+ *  approval bridge). */
+export type AgentEscalation = 'inline' | 'telegram' | 'both';
+
+/** How far an agent may act on its own before it must stop and report, and how
+ *  it escalates a decision it judges critical (spec §4). */
+export type AgentAutonomy = {
+  /** Hard cap on autonomous steps before the agent must stop/report. Undefined
+   *  = no explicit cap (the turn's own limits still apply). */
+  maxSteps?: number;
+  /** Channel a critical decision is escalated on. */
+  escalation: AgentEscalation;
+};
+
+/** One naby-owned agent (spec §4). Keyed by `id`; `name` is a UNIQUE addressing
+ *  handle (the `@name` that routes a turn — P3-M2). */
+export type Agent = {
+  /** UUID — the row's own key and the delete/update handle. */
+  id: string;
+  /** Unique addressing name — the `@name` used to route a turn to this agent. */
+  name: string;
+  kind: AgentKind;
+  description?: string;
+  /** The agent's standing instruction / persona. Learned context is INJECTED at
+   *  turn time (scoped memory), never stored inline here. */
+  systemPrompt: string;
+  /** Preferred model; undefined = inherit the turn's engine default. */
+  model?: string;
+  /** Allowed tool names; undefined = inherit the turn's toolset. */
+  toolRefs?: string[];
+  /** Which memory scope this agent reads and writes as its learned memory. */
+  memoryScope: MemoryScope;
+  autonomy: AgentAutonomy;
+  /** epoch ms */
+  createdAt: number;
+  /** epoch ms */
+  updatedAt: number;
+};
+
+/** Upsert input. `id` is OPTIONAL: omit to mint a new agent, or supply an
+ *  existing id to update that row. createdAt/updatedAt are store-owned. Name
+ *  uniqueness is enforced by the store (a different row with the same name is
+ *  rejected). */
+export type AgentInput = Omit<Agent, 'id' | 'createdAt' | 'updatedAt'> & {
+  id?: string;
+};
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -670,6 +742,31 @@ export interface Store {
 
   /** Delete one rule by id. No-op if absent. */
   removePolicyRule(id: string): void;
+
+  // -- naby agents (Phase 3, P3-M1) ----------------------------------------
+  //
+  // The naby-owned agent layer (built-in persona + custom agents), addressed by
+  // `@`. Global (no scope); keyed by id; `name` is a UNIQUE addressing handle.
+  // See the type block above for the built-in-persona invariant.
+
+  /** All agents. The built-in persona (kind='persona') sorts FIRST; the rest
+   *  follow by createdAt asc. */
+  listAgents(): Agent[];
+
+  getAgent(id: string): Agent | undefined;
+
+  /** Look an agent up by its unique `name` — the `@name` routing path (P3-M2).
+   *  Undefined if no agent has that name. */
+  getAgentByName(name: string): Agent | undefined;
+
+  /** Insert (no `id`) or update (existing `id`) an agent. THROWS if `name`
+   *  collides with a DIFFERENT agent (names are unique — they address turns).
+   *  Returns the stored row. */
+  putAgent(input: AgentInput): Agent;
+
+  /** Delete one agent by id. NO-OP for the built-in persona (kind='persona' is
+   *  undeletable, spec §4) and no-op if absent. */
+  removeAgent(id: string): void;
 
   // -- usage (F1-07) -------------------------------------------------------
 

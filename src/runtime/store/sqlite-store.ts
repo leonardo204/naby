@@ -39,6 +39,8 @@ import { decideHarnessImport } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
+  Agent,
+  AgentInput,
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
@@ -345,6 +347,26 @@ CREATE TABLE IF NOT EXISTS policy_rules (
   UNIQUE (scope, scope_key, tool_pattern)
 );
 CREATE INDEX IF NOT EXISTS policy_rules_by_scope ON policy_rules (scope, scope_key);
+
+-- naby agents (Phase 3, P3-M1). Additive table: an existing DB picks it up on
+-- next open with NO data migration and NO loss. The naby-OWNED agent layer
+-- (built-in persona + custom agents), addressed by the @ prefix. Global — NO
+-- scope; keyed by id, with name UNIQUE (it is the @-routing handle). Never
+-- session-keyed and never cascaded on session/project delete.
+CREATE TABLE IF NOT EXISTS agents (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL UNIQUE,   -- @-routing handle, unique across agents
+  kind          TEXT NOT NULL,          -- persona | custom
+  description   TEXT,
+  system_prompt TEXT NOT NULL,
+  model         TEXT,
+  tool_refs     TEXT,                   -- JSON string[] | null (inherit toolset)
+  memory_scope  TEXT NOT NULL,          -- session | project | user | org
+  autonomy      TEXT NOT NULL,          -- JSON AgentAutonomy
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agents_by_kind ON agents (kind);
 `;
 
 // ---------------------------------------------------------------------------
@@ -591,6 +613,45 @@ function toPolicyRule(row: PolicyRow): PolicyRule {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
+}
+
+let agentIdCounter = 0;
+function mintAgentId(): string {
+  agentIdCounter += 1;
+  return `a-${Date.now().toString(36)}-${agentIdCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+type AgentRow = {
+  id: string;
+  name: string;
+  kind: string;
+  description: string | null;
+  system_prompt: string;
+  model: string | null;
+  tool_refs: string | null;
+  memory_scope: string;
+  autonomy: string;
+  created_at: number;
+  updated_at: number;
+};
+
+function toAgent(row: AgentRow): Agent {
+  const agent: Agent = {
+    id: row.id,
+    name: row.name,
+    kind: row.kind as Agent['kind'],
+    systemPrompt: row.system_prompt,
+    memoryScope: row.memory_scope as Agent['memoryScope'],
+    autonomy: JSON.parse(row.autonomy) as Agent['autonomy'],
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+  if (row.description != null) agent.description = row.description;
+  if (row.model != null) agent.model = row.model;
+  if (row.tool_refs != null) agent.toolRefs = JSON.parse(row.tool_refs) as string[];
+  return agent;
 }
 
 let uuidCounter = 0;
@@ -1446,6 +1507,97 @@ export class SqliteStore implements Store {
   removePolicyRule(id: string): void {
     this.assertOpen();
     this.db.prepare(`DELETE FROM policy_rules WHERE id = ?`).run(id);
+  }
+
+  // -- naby agents (Phase 3, P3-M1) ----------------------------------------
+
+  listAgents(): Agent[] {
+    this.assertOpen();
+    // Built-in persona first (kind='persona' sorts before 'custom'), then oldest
+    // first within a kind.
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM agents
+         ORDER BY CASE kind WHEN 'persona' THEN 0 ELSE 1 END ASC, created_at ASC`,
+      )
+      .all() as AgentRow[];
+    return rows.map(toAgent);
+  }
+
+  getAgent(id: string): Agent | undefined {
+    this.assertOpen();
+    const row = this.db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id) as
+      | AgentRow
+      | undefined;
+    return row ? toAgent(row) : undefined;
+  }
+
+  getAgentByName(name: string): Agent | undefined {
+    this.assertOpen();
+    const row = this.db.prepare(`SELECT * FROM agents WHERE name = ?`).get(name) as
+      | AgentRow
+      | undefined;
+    return row ? toAgent(row) : undefined;
+  }
+
+  putAgent(input: AgentInput): Agent {
+    this.assertOpen();
+    const now = Date.now();
+    const existing = input.id
+      ? (this.db.prepare(`SELECT * FROM agents WHERE id = ?`).get(input.id) as
+          | AgentRow
+          | undefined)
+      : undefined;
+    // Names are the @-routing handle and must be unique. Reject a name already
+    // held by a DIFFERENT agent (same-row rename is fine).
+    const nameHolder = this.db
+      .prepare(`SELECT id FROM agents WHERE name = ?`)
+      .get(input.name) as { id: string } | undefined;
+    if (nameHolder && nameHolder.id !== (existing?.id ?? '')) {
+      throw new Error(`agent name '${input.name}' is already in use`);
+    }
+    const id = existing ? existing.id : input.id ?? mintAgentId();
+    this.db
+      .prepare(
+        `INSERT INTO agents
+           (id, name, kind, description, system_prompt, model, tool_refs, memory_scope, autonomy, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           name = excluded.name,
+           kind = excluded.kind,
+           description = excluded.description,
+           system_prompt = excluded.system_prompt,
+           model = excluded.model,
+           tool_refs = excluded.tool_refs,
+           memory_scope = excluded.memory_scope,
+           autonomy = excluded.autonomy,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        id,
+        input.name,
+        input.kind,
+        input.description ?? null,
+        input.systemPrompt,
+        input.model ?? null,
+        input.toolRefs ? JSON.stringify(input.toolRefs) : null,
+        input.memoryScope,
+        JSON.stringify(input.autonomy),
+        existing ? Number(existing.created_at) : now,
+        now,
+      );
+    const row = this.db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id) as AgentRow;
+    return toAgent(row);
+  }
+
+  removeAgent(id: string): void {
+    this.assertOpen();
+    // The built-in persona (kind='persona') is UNDELETABLE (spec §4) — no-op it.
+    const row = this.db.prepare(`SELECT kind FROM agents WHERE id = ?`).get(id) as
+      | { kind: string }
+      | undefined;
+    if (!row || row.kind === 'persona') return;
+    this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(id);
   }
 
   // -- MCP registry --------------------------------------------------------

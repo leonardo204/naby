@@ -57,7 +57,11 @@ Agent {
 
 ## 7. 마일스톤 (Phase 3)
 
-- **P3-M1** — 데이터 모델(`agents` 스토어) + built-in 페르소나 시드 + Settings "에이전트" 섹션 + 메모리 이동 + 커맨드→하네스 흡수. (구조 재편, 실행 없음)
+- **P3-M1** ✅ **구현 완료(2026-07-25, 커밋 대기)** — 데이터 모델(`agents` 스토어) + built-in 페르소나 시드 + Settings "에이전트" 섹션 + 메모리 이동 + 커맨드→하네스 흡수. (구조 재편, 실행 없음)
+  - 런타임: `store.ts` Agent/AgentInput/AgentKind/AgentEscalation/AgentAutonomy + `listAgents/getAgent/getAgentByName/putAgent/removeAgent`(양 드라이버), `agents.ts`(BUILTIN_PERSONA_ID/SEED/seedBuiltinPersona, 페르소나 undeletable=store 강제), runtime-entry export, `spike-agents`(30체크×2드라이버+재오픈 무중복 PASS).
+  - 셸: `getStore()` 합성루트에 `seedBuiltinPersona` 배선(멱등), `api/naby.ts` `agent.list/put/remove` 액션, `NabyAgentManager.tsx`(신규), Settings `agents` 섹션(메모리 이동)+`harness` 섹션(커맨드 흡수), i18n `agentManager.*`(en/ko).
+  - 검증: 타입체크 clean(양 트리, 베이스라인 노이즈만), `build:app` exit 0, 실서버 부팅 후 `/api/naby` agent.list=시드확인/put/삭제불가 페르소나/중복명 거부 전부 통과. **미검증: Settings UI 시각 렌더(라이브 창 필요).**
+  - 결정: 페르소나 kind='persona' 유일(사용자는 custom만 생성), name=@라우팅 핸들(UNIQUE, 공백 불가), memoryScope=학습 스코프(P3-M2 주입 배선 예정), escalation=inline(텔레그램 P3-M3).
 - **P3-M2** — `@에이전트` 라우팅: 지정 에이전트로 턴 실행(systemPrompt+메모리 주입+toolRefs). 메모리 자동 주입 배선. (M3/M4 재사용)
 - **P3-M3** — 자율 모드 + 에스컬레이션: 목표 루프 + M2 승인의 **텔레그램 채널** + 최종 리포트. (M2/scheduled/telegram)
 - **P3-M4** — 학습: 페르소나 턴에서 사용자 판단/행위를 메모리로 캡처(쓰기 게이트) + 다음 턴 주입 강화.

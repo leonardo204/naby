@@ -46,7 +46,8 @@
     "verify:update-feed": "node scripts/verify-update-feed.mjs",
     "verify:updater": "npm run build:electron && node scripts/verify-updater.mjs",
     "spike:05": "node --env-file=.env --import tsx src/spikes/spike-05-live-providers.ts",
-    "spike:policy": "npm run build:runtime && tsx src/spikes/spike-policy.ts"
+    "spike:policy": "npm run build:runtime && tsx src/spikes/spike-policy.ts",
+    "spike:agents": "npm run build:runtime && tsx src/spikes/spike-agents.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",

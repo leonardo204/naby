@@ -124,11 +124,30 @@ export type {
   PolicyEffect,
   PolicyRule,
   PolicyRuleInput,
+  // naby agents (Phase 3, P3-M1) — the naby-owned agent layer (built-in persona
+  // + custom agents), addressed by `@`. The shell builds an "Agents" Settings
+  // section and `/api/agents` CRUD on these.
+  Agent,
+  AgentInput,
+  AgentKind,
+  AgentEscalation,
+  AgentAutonomy,
 } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
 export { runTurn, type RunTurnOptions } from './runtime/session.js';
+
+// Phase 3 P3-M1 — the naby agent layer's built-in PERSONA seed + helpers. The
+// shell seeds the persona at its composition root (idempotent) so a fresh install
+// always has exactly one persona to address with `@`.
+export {
+  BUILTIN_PERSONA_ID,
+  BUILTIN_PERSONA_NAME,
+  BUILTIN_PERSONA_SEED,
+  isBuiltinPersona,
+  seedBuiltinPersona,
+} from './runtime/agents.js';
 
 // Phase 1.5 — the deterministic memory write gate (P15-05) and the turn-time
 // retrieval/injection helpers (P15-02). The gate is pure; the store's putMemory

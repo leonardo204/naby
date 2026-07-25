@@ -19,6 +19,8 @@ import { decideHarnessImport } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
+  Agent,
+  AgentInput,
   GoldenConsent,
   GoldenItem,
   GoldenItemInput,
@@ -142,6 +144,10 @@ export class MemoryStore implements Store {
   // per-session and never cascaded — like harness.
   private readonly policyRules = new Map<string, PolicyRule>();
   private policyIdCounter = 0;
+  // naby agents (Phase 3, P3-M1), keyed by id. Store-level, global (no scope),
+  // never per-session and never cascaded — like harness/policy.
+  private readonly agents = new Map<string, Agent>();
+  private agentIdCounter = 0;
   private closed = false;
 
   /** Get (creating if absent) the state for a session. The same object identity
@@ -597,6 +603,62 @@ export class MemoryStore implements Store {
 
   removePolicyRule(id: string): void {
     this.policyRules.delete(id);
+  }
+
+  // -- naby agents (Phase 3, P3-M1) ----------------------------------------
+
+  listAgents(): Agent[] {
+    return [...this.agents.values()]
+      .map((a) => ({ ...a }))
+      .sort((a, b) => {
+        // Built-in persona first, then oldest first within a kind.
+        const ka = a.kind === 'persona' ? 0 : 1;
+        const kb = b.kind === 'persona' ? 0 : 1;
+        return ka !== kb ? ka - kb : a.createdAt - b.createdAt;
+      });
+  }
+
+  getAgent(id: string): Agent | undefined {
+    const a = this.agents.get(id);
+    return a ? { ...a } : undefined;
+  }
+
+  getAgentByName(name: string): Agent | undefined {
+    const a = [...this.agents.values()].find((x) => x.name === name);
+    return a ? { ...a } : undefined;
+  }
+
+  putAgent(input: AgentInput): Agent {
+    const now = Date.now();
+    const existing = input.id ? this.agents.get(input.id) : undefined;
+    // Names are the @-routing handle and must be unique across agents.
+    const nameHolder = [...this.agents.values()].find((x) => x.name === input.name);
+    if (nameHolder && nameHolder.id !== (existing?.id ?? '')) {
+      throw new Error(`agent name '${input.name}' is already in use`);
+    }
+    const id = existing ? existing.id : input.id ?? `a-mem-${(this.agentIdCounter += 1)}`;
+    const stored: Agent = {
+      id,
+      name: input.name,
+      kind: input.kind,
+      systemPrompt: input.systemPrompt,
+      memoryScope: input.memoryScope,
+      autonomy: { ...input.autonomy },
+      createdAt: existing ? existing.createdAt : now,
+      updatedAt: now,
+    };
+    if (input.description !== undefined) stored.description = input.description;
+    if (input.model !== undefined) stored.model = input.model;
+    if (input.toolRefs !== undefined) stored.toolRefs = [...input.toolRefs];
+    this.agents.set(id, stored);
+    return { ...stored };
+  }
+
+  removeAgent(id: string): void {
+    // The built-in persona (kind='persona') is UNDELETABLE (spec §4).
+    const a = this.agents.get(id);
+    if (!a || a.kind === 'persona') return;
+    this.agents.delete(id);
   }
 
   getSetting(key: string): string | undefined {
