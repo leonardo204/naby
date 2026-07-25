@@ -71,7 +71,29 @@ export type CheckinRecord = {
   /** Excluded from scoring as degenerate (near-duplicate question, one real
    *  option). Kept and counted, never silently dropped (§7 anti-gaming). */
   excludedFromScoring?: boolean;
+  /** This row arrived with an IMPORTED agent rather than being observed here
+   *  (P3-M6/M7). Kept for the record and ignored by every axis — see
+   *  `withoutImported`. */
+  imported?: boolean;
 };
+
+/**
+ * Drop rows that were imported rather than observed on this machine.
+ *
+ * WHY THE METER IGNORES THEM BY DEFAULT. A ledger measures how well an agent
+ * predicts ONE person. A colleague's ledger is their history with their patterns
+ * and says nothing about whether the agent knows *you*, and nothing in a file can
+ * prove whose history it is. So an imported row is provenance, not evidence: the
+ * stage has to be earned again here, which is what "권한은 늘 그 기기의 원장에서
+ * 다시 나온다" means in practice.
+ *
+ * The user can say "this is my own export" at import time, and then the rows come
+ * in WITHOUT this flag and count normally. That is a question only they can
+ * answer, so it is asked rather than guessed.
+ */
+function withoutImported(records: readonly CheckinRecord[]): CheckinRecord[] {
+  return records.filter((r) => !r.imported);
+}
 
 /** Rows that count toward accuracy: real check-ins that were not excluded. */
 function scorable(records: readonly CheckinRecord[]): CheckinRecord[] {
@@ -226,10 +248,11 @@ function recentWindow(records: readonly CheckinRecord[], window: number): Checki
  * always give the same stage, so the meter is reproducible and explainable.
  */
 export function computeGrowth(
-  records: readonly CheckinRecord[],
+  allRecords: readonly CheckinRecord[],
   opts?: { window?: number; taskType?: string },
 ): GrowthState {
   const window = opts?.window ?? GROWTH_WINDOW;
+  const records = withoutImported(allRecords);
   // Per-task-type scoping (§4.9): trust is graduated, the way Claude Code grants
   // it per tool and per directory. A new kind of work starts in its own egg
   // instead of dragging the global number down.
@@ -348,7 +371,7 @@ export type GrowthChange = {
  * as the agent improving.
  */
 export function diagnoseChange(records: readonly CheckinRecord[]): GrowthChange {
-  const all = [...records].sort((a, b) => a.at - b.at);
+  const all = withoutImported(records).sort((a, b) => a.at - b.at);
   if (all.length < GROWTH_MIN_SAMPLE) {
     return { direction: 'flat', code: 'not-measured', boundDeltaPoints: 0 };
   }

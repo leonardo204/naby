@@ -442,12 +442,27 @@ export {
   memoryDropReason,
   yamlScalar,
   AGENT_EXPORT_FORMAT_VERSION,
+  LEARNED_HEADING,
   REDACTED,
   type AgentExportInput,
   type AgentExportReport,
   type AgentExportResult,
   type MemoryDropReason,
 } from './runtime/agent-export.js';
+
+// -- bringing an agent in (Phase 3, P3-M7) -----------------------------------
+// The other half of the export, and the place its central claim is enforced: a
+// file cannot declare trust. An imported ledger lands flagged `imported` (which
+// every growth axis ignores) unless the user says the file is their own export.
+// Memory always arrives external-tier and proposed, whatever the file says.
+export {
+  parseAgentSidecar,
+  freeAgentName,
+  type AgentImportOptions,
+  type AgentImportPlan,
+  type AgentImportReport,
+  type AgentImportResult,
+} from './runtime/agent-import.js';
 
 // -- the check-in itself (Phase 3, P3-M5) ------------------------------------
 // What the meter measures: the agent's own proposal, the user's pick, and the

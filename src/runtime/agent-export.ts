@@ -172,8 +172,9 @@ function toolsScalar(toolRefs: readonly string[]): string | undefined {
 /** Section heading the learned facts go under, in the `.md` body. English on
  *  purpose: the artifact is read by other tooling and by a model in an unknown
  *  locale, while the facts themselves stay in whatever language they were
- *  written. */
-const LEARNED_HEADING = '## What naby has learned about this user';
+ *  written. Exported because IMPORT reuses it — an imported fact goes into the
+ *  agent's instructions under the same heading, so the two paths cannot drift. */
+export const LEARNED_HEADING = '## What naby has learned about this user';
 
 /** Filesystem-safe basename for the pair. */
 export function exportBasename(agentName: string): string {

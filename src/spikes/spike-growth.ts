@@ -19,6 +19,8 @@
 //   (g) Only a butterfly may be addressed with `@`.
 //   (h) The window is recent-weighted: an old perfect streak cannot hold the
 //       stage up once recent work misses.
+//   (j) An IMPORTED ledger grants no stage — a file cannot declare trust — and
+//       does not disturb the rows actually observed here.
 //
 // Pure arithmetic, no store and no engine — runs in milliseconds.
 
@@ -284,6 +286,33 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
       canBeAddressed('butterfly') &&
       stageFor(0.99, 2) === 'egg',
     `${gate.join(' ')}; a 0.99 bound on 2 samples still reads ${stageFor(0.99, 2)}`,
+  );
+}
+
+// -- (j) an imported ledger cannot hand an agent a stage --------------------
+{
+  // 20 perfect rows that came in with an imported agent. If they counted, this
+  // would read butterfly 100% the moment the file landed — a stage declared by a
+  // file rather than earned here, which is exactly what the export format refuses
+  // to let an artifact do.
+  const imported = runOf(20, 20).map((r) => ({ ...r, imported: true }));
+  const cold = computeGrowth(imported);
+  // The same rows, declared by the user to be their OWN export, do count.
+  const mine = computeGrowth(runOf(20, 20));
+  // And imported rows sitting alongside real ones neither help nor hurt.
+  const mixed = computeGrowth([...imported, ...runOf(4, 6, { t0: 900_000 })]);
+  const alone = computeGrowth(runOf(4, 6, { t0: 900_000 }));
+  record(
+    '(j) an imported ledger grants no stage, and does not disturb a real one',
+    cold.stage === 'egg' &&
+      cold.percent === 0 &&
+      cold.trials === 0 &&
+      mine.stage === 'butterfly' &&
+      mixed.stage === alone.stage &&
+      mixed.hits === alone.hits &&
+      mixed.trials === alone.trials &&
+      diagnoseChange(imported).code === 'not-measured',
+    `imported-only=${cold.stage} ${cold.percent}% (${cold.trials} trials); same rows as mine=${mine.stage}; mixed=${mixed.stage} ${mixed.hits}/${mixed.trials} vs real-only ${alone.stage} ${alone.hits}/${alone.trials}`,
   );
 }
 

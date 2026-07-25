@@ -587,6 +587,11 @@ export type EvalEvent = {
   /** Excluded from scoring as degenerate (near-duplicate question, one real
    *  option). Kept and counted so the exclusion is visible, never silent. */
   excludedFromScoring?: boolean;
+  /** This row came in with an IMPORTED agent (P3-M7) rather than being observed
+   *  on this machine. Kept for the record; every growth axis ignores it unless
+   *  the user declared the file to be their own export. Lives in the payload
+   *  JSON, so it needed no schema migration. */
+  imported?: boolean;
 };
 
 /** What a caller supplies. `id` and `at` are store-owned when omitted. */
