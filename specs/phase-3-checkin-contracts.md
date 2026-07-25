@@ -2,8 +2,8 @@
 id: phase-3-checkin-contracts
 title: Phase 3 P3-M5 — 체크인 원장 계약 (eval_events 실체화)
 type: interface
-version: 0.1.0
-status: review
+version: 0.2.0
+status: active
 scope: 나비 신뢰 지표가 읽고 쓰는 이벤트 원장의 계약. P15-03이 예약해 둔 `eval_events` 스키마를 체크인·자율행동·트립와이어 세 종류 이벤트로 실체화하고, 스토어 메서드와 불변식을 정의한다. 지표 계산 알고리즘 자체는 butterfly-trust-meter가 다룬다.
 related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
 updated: 2026-07-25
@@ -43,6 +43,9 @@ type EvalEvent = {
   domain?: string;            // P15-03's domain tag (reserved; unused in M5)
 
   // -- kind: 'checkin' -----------------------------------------------------
+  /** What was asked, verbatim. The panel shows it, and the degenerate check
+   *  compares a new question against recent ones to catch the same ask twice. */
+  question?: string;
   /** The options the agent offered, in the order shown. */
   options?: string[];
   /** Index into `options` the agent RECOMMENDED. Its prediction. */
@@ -96,6 +99,8 @@ deleteEvalEvents(selector: { agentId: string } | { sessionId: string }): void;
 3. **`tripwire`는 점수에 섞이지 않는다.** 적중률 계산에서 제외되고, 창 안에 하나라도 있으면 나비 판정을 막는 하드 게이트로만 쓰인다.
 4. **세션 삭제가 성장 기록을 연쇄 삭제하지 않는다.** 원장은 `agentId`로 키잉되고 `sessionId`는 링크다 — 메모리의 키잉 불변식(`phase-1-contracts` §6)과 같은 이유다. 대화를 지웠다고 배운 것이 사라지면 안 된다.
 5. **에이전트는 이 테이블을 읽을 수 없다.** 도구로도, 주입으로도 노출하지 않는다. 자기 점수를 보면 그것을 최적화한다(§7).
+6. **아무도 답하지 않은 체크인은 행이 되지 않는다.** 턴이 중단되거나 프롬프트가 만료된 것은 관측이 아니다. 빗나감으로 적으면 사용자가 자리를 비운 것을 에이전트 탓으로 돌리고, 제외 행으로 적어도 커버리지를 같은 이유로 끌어내린다. "모두 남긴다"가 틀리는 유일한 경우다 — 남기는 사건 자체가 지어낸 것이기 때문이다.
+7. **`autonomous`와 `tripwire`는 에이전트가 아니라 게이트가 쓴다.** 결과적 행동(`isConsequentialTool`)이 통과하면 `autonomous`, 거부되면 `tripwire`다. 에이전트는 묻지 않기를 고를 수 있어도 **집계되지 않기를 고를 수는 없다**(지표 §4.5).
 
 ## 5. API
 
@@ -103,12 +108,17 @@ deleteEvalEvents(selector: { agentId: string } | { sessionId: string }): void;
 
 | 액션 | 용도 |
 |---|---|
-| `growth.get` | 에이전트의 현재 단계·퍼센티지·적중률·커버리지·후퇴 사유 코드. 설정 패널과 `@` 팔레트가 읽는다 |
-| `checkin.resolve` | 인라인 프롬프트에서 사용자가 고른 선택지를 확정한다. M2 승인 브리지의 `approval.resolve`와 같은 모양 |
+| `growth.get` | `{agentId?}` — 생략하면 내장 페르소나. 단계·퍼센티지·적중률·커버리지·후퇴 사유 코드·작업 유형별 분해·최근 결정 목록을 낸다. 설정 패널이 읽는다 |
+| `checkin.resolve` | `{checkinId, chosen, correction?}` — 멈춘 체크인을 확정한다. `chosen: -1`은 자유 서술이며 `correction`이 **필수**다. M2 `approval.resolve`와 같은 모양 |
 
 `growth.get`은 **작업 유형별 분해**를 함께 낸다. 멘션 게이트는 전역 단계를 쓰고 패널이 분해를 보여준다.
+
+`@` 팔레트는 `growth.get`이 아니라 `/api/commands`가 같은 읽기 함수(`growthRead`)를 호출해 배지를 붙인다. **두 표면이 한 함수를 공유하는 것이 계약이다** — 팔레트가 "나비"라 하고 패널이 "번데기"라 하면 지표의 신뢰가 숫자가 틀린 것보다 빨리 무너진다.
 
 ## 6. 미결정
 
 - `taskType`을 누가 정하는가. 모델이 붙이면 게이밍 표면이 늘고, 도구 조합에서 유도하면 거칠다. 1차는 **모델이 제시하되 원장에 그대로 기록하고**, 유형별 질문율 상한으로 남용을 잡는다.
 - `domain` 태그는 P15-03이 예약했으나 M5에서 쓰지 않는다. 필드만 두고 비워 둔다(나중에 마이그레이션이 필요 없게).
+- **커버리지는 호출 단위로 센다.** 체크인 한 번 뒤에 쓰기 세 번이면 `autonomous` 세 행이다. 지금은 커버리지를 **보고만 하고 게이트로 쓰지 않으므로** 성립하지만, 커버리지 하한을 실제로 걸려면 "체크인이 자기 결정을 수행하는 호출들을 어떻게 자기 것으로 주장하는가"를 먼저 정해야 한다.
+- **MCP 도구는 분류되지 않는다.** `isConsequentialTool`은 하네스 내장 도구와 우리 도구만 안다. 메일을 보내는 서드파티 MCP 도구는 실제로 결과적이지만 행을 남기지 않는다. 도구 이름으로 위험을 추측하는 것이 더 나쁘다 — 선언된 주석이나 사용자 정책 규칙 같은 실제 신호가 필요하다.
+- 체크인을 **텔레그램으로 에스컬레이션**하는 것은 아직 하지 않는다. M3b의 `escalateApproval`은 허용/거부 두 갈래라서 선택지 N개짜리 인라인 키보드와 별도 콜백 접두사가 필요하다.

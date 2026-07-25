@@ -2,7 +2,7 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.4.0
+version: 0.5.0
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
 related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
@@ -101,8 +101,17 @@ Agent {
 - **P3-M5** 🔶 **알고리즘 확정·코어 1차 구현(2026-07-25)** — 나비 신뢰 지표. 페르소나를 얼마나 믿고 맡길 수 있는지를 **측정해** 알·애벌레·번데기·나비로 표시하고, 나비만 `@`로 부를 수 있게 한다. 개수 누적이 아니라 체크인 적중률의 Wilson 하한 + 커버리지 + 트립와이어 + 작업유형별 범위로 판정한다. 자체 설계 + 논문(PRELUDE·Wilson·risk-coverage·ADWIN·ConfidenceBench·Goodhart) + 업계 표준(Anthropic·LangChain·OpenAI·Google)을 대조해 확정했다.
   - 알고리즘 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md). 원장 계약(P15-03 실체화) → [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md).
   - 코어 1차: `src/runtime/growth.ts`, `npm run spike:growth` **14/14 PASS**. 남음: 원장 이원화·ADWIN·커버리지·작업유형별 범위, 체크인 배선, `@` 팔레트 노출·비활성, 설정 성장 패널.
-  - **알려진 결함(P3-M5에서 고친다)**: `@` 팔레트가 `/api/commands`만 읽어 **등록된 나비 에이전트가 목록에 안 뜬다.** P3-M2가 라우팅은 배선했지만 발견 경로를 만들지 않았다. 팔레트는 marker-agnostic이라 `@`와 `/`가 같은 목록을 보여주는 문제도 함께 고친다(에이전트는 `@`에만, 최우선 노출).
-  - **해소해야 할 데드락**: M4a는 학습 도구를 라우팅된 턴에만 붙이는데, 나비가 되기 전 멘션이 막히면 라우팅이 없어 학습도 못 하고 영원히 알 단계다. 페르소나는 **일반 대화에서도 배경 학습**하도록 완화한다(멘션 게이트는 라우팅 권한에만 적용).
+  - ✅ **`@` 팔레트 결함 해소** — `/api/commands`가 하네스만 읽어 등록된 에이전트가 목록에 안 떴다(P3-M2가 라우팅만 배선하고 발견 경로를 안 만들었다). 에이전트를 최우선으로 반환하고 `/`에서는 제외하며, 단계 배지를 붙이고 나비가 아니면 회색으로 선택을 막는다.
+  - ✅ **데드락 해소 — `growthSubject`와 `routedAgent`를 나눈다.** M4a는 학습을 라우팅된 턴에만 붙였고, 멘션 게이트와 합치면 페르소나는 지목될 수 없어 체크인도 못 하고 영원히 알이었다. 이제 두 개념을 나눈다.
+
+    | | 무엇을 정하는가 | 언제 정해지는가 |
+    |---|---|---|
+    | `routedAgent` | 이 턴이 **채택하는 정체성** — 시스템 프롬프트, 모델, 도구 제한, 자율성 | `@이름`이 명시될 때만 |
+    | `growthSubject` | 이 턴의 **관측이 귀속되는 곳** — 기억과 성장 원장 | 항상. 라우팅이 없으면 내장 페르소나 |
+
+    평범한 턴은 페르소나의 턴이므로 페르소나가 배우고 체크인한다. **지목은 여전히 벌어야 한다** — 게이트가 지키려던 것이 그것이다. 커스텀 에이전트에게 맡긴 턴은 그 에이전트에 귀속된다(전문가가 한 일을 페르소나가 자기 실적으로 배우면 안 된다).
+  - ✅ **체크인 배선** — `naby_checkin`(런타임), 일시정지 브리지(`checkinRegistry`, M2와 같은 기법), 게이트가 쓰는 `autonomous`/`tripwire` 행, 인라인 프롬프트 UI(추천은 답한 뒤 공개). 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) §9, 계약 → [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md).
+  - ⬜ 남은 것: 설정 성장 패널(시각화 + 후퇴 사유를 쉬운 한국어로), 2차 축.
 - **P3-M6** ⬜ — 학습된 에이전트를 Claude Code 표준 서브에이전트 `.md` + 무손실 사이드카로 내보내기. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md). 단계 표기는 권한이 아니라 이력이며, 재수입 시 원장으로 다시 계산한다.
 - **P3-M4** 🔶 **M4a·M4b 구현 완료(2026-07-25, 커밋 대기)** — 학습. 페르소나 턴에서 배운 것을 메모리로 잡아 두고(쓰기 게이트) 다음 턴에 주입한다.
   - **진단**: Phase 1.5가 스토어·쓰기 게이트·주입을 다 만들고 P3-M2가 주입을 배선했는데, **행을 쓰는 코드가 하나도 없었다.** `decideMemoryWrite`는 런타임에 구현·export만 되어 있고 호출자가 없는 dormant 상태였다(M2 이전의 주입과 똑같다). 그래서 스토어는 영원히 비어 있고 검토 UI에도 재료가 없었다. 개인화 전략 §3.2가 "추출·검증 단계가 비었다"고 지적한 그 공백이다.
@@ -111,7 +120,7 @@ Agent {
     - **게이트 두 겹**: ① 툴콜 게이트(Phase 2 정책) ② 쓰기 게이트(`decideMemoryWrite`, `store.putMemory` 내부에서 적용).
     - **오염 방어 3가지**: ① 모든 쓰기가 `requestedStatus:'proposed'`다. 주입은 `confirmed`만 되므로(계약 §5) **사람이 확인하기 전에는 어떤 답변도 바꾸지 못한다** — 전략 §2.3 "완전 자동 메모리는 만들지 않는다"를 코드로 강제한다. ② provenance는 `artifact` 등급이다. 모델이 "사용자가 X를 좋아한다"고 말하는 것은 사용자가 직접 말한 것과 다르므로 `user` 등급을 주지 않는다. ③ 시크릿 모양 값은 결정론적으로 거부한다(`looksLikeSecret` — sk-/Bearer/JWT/봇토큰/PEM/`password=`). `app.db` 암호화가 아직 미결(전략 §7.2)이라 토큰을 넣으면 평문 자격증명이 디스크에 남는다.
     - 순수 함수(스파이크 검증): `normalizeMemoryKey`(슬러그화 — "Prefers Dark Mode"와 "prefers-dark-mode"가 한 행으로 upsert되게, 한글 유지), `looksLikeSecret`, `resolveMemoryScopeKey`(scope→key는 계약 §2 사실이라 런타임에 둔다), `validateRememberInput`(값 400자 상한, type/scope 검증). `org` 스코프는 **에이전트에게 쓰기를 허용하지 않는다** — 팀 자산은 사람이 큐레이션한다.
-    - `buildToolset(outbox, mcp?, memory?)`에 학습 sink를 더했다. **라우팅된 에이전트 턴에만** 도구가 붙는다. 일반 턴의 도구 목록은 M4 이전과 byte-for-byte 같다.
+    - `buildToolset(outbox, mcp?, memory?, checkin?)`에 학습 sink를 더했다. 처음에는 **라우팅된 에이전트 턴에만** 붙여 일반 턴의 도구 목록을 M4 이전과 byte-for-byte 같게 두었으나, P3-M5에서 그 결정이 데드락을 만들어 `growthSubject` 기준으로 바꿨다(위 참조). 일반 턴에도 `naby_remember`와 `naby_checkin`이 붙는다.
   - **M4b — 학습 지시 주입**(셸 `lib/learning.ts`, 유닛 7). 도구만 주고 지시를 안 하면 모델이 들쭉날쭉 부른다. 지시는 모델이 그냥 두면 틀리는 세 가지를 박는다. 캡처는 제안이라 "이제부터 적용됩니다"라고 말하면 안 되고, 기준은 "다음 주에도 참인가"이고, 시크릿은 메모리가 아니다.
     - **`canLearn` 게이트**: `toolRefs`로 제한된 에이전트가 `naby_remember`를 못 부르면 지시를 **주입하지 않는다.** 부를 수 없는 도구를 부르라고 지시하면 스킬 주입이 `availableTools`로 막는 "반쪽 실행"과 같은 문제가 된다. 비교 규칙은 P3-M2 게이트와 동일(현재 `normalizeToolName`은 항등이라 유사 이름 MCP 도구는 다른 도구다).
     - 도구의 기본 스코프는 `agent.memoryScope`다. **읽기(주입)는 계속 전 스코프 합집합으로 둔다** — 좁히면 품질만 떨어진다. `memoryScope`는 "어디에 쓰는가"를 정한다.
