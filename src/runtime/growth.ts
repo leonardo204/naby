@@ -321,8 +321,15 @@ export type GrowthReasonCode =
 export type GrowthChange = {
   direction: 'up' | 'down' | 'flat';
   code: GrowthReasonCode;
-  /** Percentage points moved (absolute), for the sentence. */
-  delta: number;
+  /** How far the Wilson BOUND moved between the two halves, in absolute points
+   *  (0–100). NOT the same scale as `GrowthState.percent`, which is the bound
+   *  normalized against the butterfly threshold — a 9-point bound move is a
+   *  ~15-point gauge move. Named for the scale on purpose: a panel that printed
+   *  this next to the gauge as "down 9%" would have two numbers on screen
+   *  disagreeing, which is the trap the egg-0% and blocked-99% rules already
+   *  exist to avoid. Lead the sentence with `recentMisses`/`recentTrials`, which
+   *  the user can verify against their own conversation. */
+  boundDeltaPoints: number;
   /** The kind of work that drove it, when one clearly did. */
   taskType?: string;
   /** Misses in the recent half, for "3 of the last 8 went differently". */
@@ -343,7 +350,7 @@ export type GrowthChange = {
 export function diagnoseChange(records: readonly CheckinRecord[]): GrowthChange {
   const all = [...records].sort((a, b) => a.at - b.at);
   if (all.length < GROWTH_MIN_SAMPLE) {
-    return { direction: 'flat', code: 'not-measured', delta: 0 };
+    return { direction: 'flat', code: 'not-measured', boundDeltaPoints: 0 };
   }
   const recent = all.slice(-Math.ceil(all.length / 2));
   const earlier = all.slice(0, all.length - recent.length);
@@ -353,7 +360,7 @@ export function diagnoseChange(records: readonly CheckinRecord[]): GrowthChange 
   const earlierBound = earlier.length
     ? wilsonLowerBound(earlier.filter((r) => r.hit).length, earlier.length)
     : 0;
-  const delta = Math.round(Math.abs(recentBound - earlierBound) * 100);
+  const boundDeltaPoints = Math.round(Math.abs(recentBound - earlierBound) * 100);
   const direction: GrowthChange['direction'] =
     recentBound > earlierBound + 0.01 ? 'up' : recentBound < earlierBound - 0.01 ? 'down' : 'flat';
 
@@ -382,20 +389,20 @@ export function diagnoseChange(records: readonly CheckinRecord[]): GrowthChange 
     return {
       direction,
       code: 'new-pattern',
-      delta,
+      boundDeltaPoints,
       taskType: worstNewType,
       recentMisses,
       recentTrials: recent.length,
     };
   }
   if (direction === 'down') {
-    return { direction, code: 'accuracy-drop', delta, recentMisses, recentTrials: recent.length };
+    return { direction, code: 'accuracy-drop', boundDeltaPoints, recentMisses, recentTrials: recent.length };
   }
   if (direction === 'up') {
     // Distinguish "getting better" from "same rate, firmer evidence" — the second
     // is real progress too, but calling it improvement would be a small lie.
     const code: GrowthReasonCode = recentRate > earlierRate + 0.01 ? 'accuracy-gain' : 'evidence-grew';
-    return { direction, code, delta, recentMisses, recentTrials: recent.length };
+    return { direction, code, boundDeltaPoints, recentMisses, recentTrials: recent.length };
   }
-  return { direction: 'flat', code: 'steady', delta, recentMisses, recentTrials: recent.length };
+  return { direction: 'flat', code: 'steady', boundDeltaPoints, recentMisses, recentTrials: recent.length };
 }

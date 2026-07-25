@@ -231,7 +231,7 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
   record(
     '(e) a drop caused by unfamiliar work is diagnosed as a new pattern, and named',
     change.direction === 'down' && change.code === 'new-pattern' && change.taskType === 'sql-review',
-    `direction=${change.direction} code=${change.code} taskType=${change.taskType} delta=${change.delta}pp misses=${change.recentMisses}/${change.recentTrials}`,
+    `direction=${change.direction} code=${change.code} taskType=${change.taskType} boundDelta=${change.boundDeltaPoints}pp misses=${change.recentMisses}/${change.recentTrials}`,
   );
 
   // Same drop, but the work is of a kind it already knew: that is an accuracy
@@ -259,7 +259,7 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
   record(
     '(f) a rise from firmer evidence is reported as such, not as improvement',
     change.direction !== 'down' && change.code !== 'accuracy-gain',
-    `direction=${change.direction} code=${change.code} delta=${change.delta}pp`,
+    `direction=${change.direction} code=${change.code} boundDelta=${change.boundDeltaPoints}pp`,
   );
 
   const improving = [...runOf(2, 10, { t0: 1_000 }), ...runOf(10, 10, { t0: 9_000 })];
@@ -267,7 +267,7 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
   record(
     '(f2) genuine improvement IS reported as an accuracy gain',
     up.direction === 'up' && up.code === 'accuracy-gain',
-    `direction=${up.direction} code=${up.code} delta=${up.delta}pp`,
+    `direction=${up.direction} code=${up.code} boundDelta=${up.boundDeltaPoints}pp`,
   );
 }
 
