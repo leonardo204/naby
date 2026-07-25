@@ -71,6 +71,17 @@ export {
   addMcpSchema,
   ADD_MCP_TOOL_NAME,
   type McpProposalSink,
+  // naby_remember — the agent captures what it learned about the user (P3-M4a).
+  // Every capture lands as a PROPOSAL; only a human confirm makes it injectable.
+  makeRemember,
+  rememberSchema,
+  REMEMBER_TOOL_NAME,
+  MEMORY_VALUE_MAX,
+  normalizeMemoryKey,
+  looksLikeSecret,
+  resolveMemoryScopeKey,
+  validateRememberInput,
+  type MemoryLearningSink,
   // fetch_url — the model reads a public web page/API.
   makeFetchUrl,
   fetchUrlSchema,

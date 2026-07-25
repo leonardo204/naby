@@ -12,7 +12,13 @@
 //                   the class of call the gate exists to guard.
 
 import type { Executor, ToolOutput, ToolSchema } from './engine.js';
-import type { McpEntry } from './store/store.js';
+import type {
+  McpEntry,
+  MemoryItem,
+  MemoryScope,
+  MemoryType,
+  MemoryWriteRequest,
+} from './store/store.js';
 import { validateMcpEntry } from './mcp.js';
 
 // ---------------------------------------------------------------------------
@@ -293,9 +299,253 @@ export function makeAddMcp(sink: McpProposalSink): Executor {
 }
 
 // ---------------------------------------------------------------------------
+// naby_remember — HOW THE AGENT LEARNS ITS USER (Phase 3, P3-M4a)
+//
+// Phase 1.5 built the memory store, the write gate and turn-time injection, and
+// P3-M2 wired injection into every turn. But nothing ever WROTE a row, so the
+// store stayed empty and the loop never closed. This tool is the writer.
+//
+// WHY A TOOL, and not a second model call at end of turn: the agent already
+// knows, mid-conversation, when it just learned something durable — and a tool
+// call costs no extra round trip, streams into the transcript where the user can
+// see it, and (the part that matters) passes THE SAME gate as every other call.
+// A policy rule can deny or ask for `naby_remember` exactly like Bash.
+//
+// TWO GATES, both of which must pass:
+//   1. the tool-call gate (Phase 2 policy) — may deny or require approval;
+//   2. the memory write gate (decideMemoryWrite, applied inside store.putMemory)
+//      — trust ordering and scope-escalation rules.
+//
+// WHAT KEEPS THIS FROM BECOMING A POISONING VECTOR:
+//   * Every write asks for `proposed`, never `confirmed`. Only confirmed memory
+//     is injected (contract §5), so a captured row cannot shape a single turn
+//     until the human confirms it in the review UI. "완전 자동 메모리는 만들지
+//     않는다" (strategy §2.3) is enforced here, by construction.
+//   * provenance.source is 'artifact' — a local artifact tier, NOT 'user'. The
+//     model saying "the user prefers X" is not the same as the user saying it,
+//     and the trust ordering must reflect that (a later 'user'-tier row wins).
+//   * Secret-shaped values are refused deterministically (looksLikeSecret).
+//     app.db encryption is still an open decision (strategy §7.2), so a token
+//     written into durable memory would be a plaintext credential at rest.
+// ---------------------------------------------------------------------------
+
+/** The bare name of the learning tool — also the gate/allowlist key. */
+export const REMEMBER_TOOL_NAME = 'naby_remember';
+
+/** Max stored value length. Memory lines are injected under a per-turn token
+ *  budget, so a long value would crowd out everything else; a fact that needs
+ *  more than this is a document, not a memory. */
+export const MEMORY_VALUE_MAX = 400;
+
+/** Fixed confidence for a tool-captured row. The model has no calibrated
+ *  probability to report, so asking it for one would be theater; the row is
+ *  `proposed` and a human decides. */
+const CAPTURE_CONFIDENCE = 0.5;
+
+/** What the remember executor needs: somewhere to write, plus THIS turn's scope
+ *  keys. Scope→key is a runtime contract fact (contract §2: sessionId | cwd |
+ *  userId | orgId), so it is resolved here rather than in each shell. */
+export interface MemoryLearningSink {
+  putMemory(req: MemoryWriteRequest): MemoryItem;
+  /** The session this turn runs in — the 'session' scope key AND provenance. */
+  sessionId: string;
+  /** The project directory, when the turn has one — the 'project' scope key. */
+  cwd?: string;
+  /** The user scope key (a single-user-machine constant). */
+  userId: string;
+  /** The routed agent's own scope, used when the model names none (P3-M4b). */
+  defaultScope?: MemoryScope;
+}
+
+/** Scopes the agent may write. 'org' is deliberately absent: team-wide memory is
+ *  a shared asset a person curates, not something one agent turn mints. */
+const WRITABLE_SCOPES: readonly MemoryScope[] = ['session', 'project', 'user'];
+const MEMORY_TYPES: readonly MemoryType[] = ['working', 'episodic', 'semantic', 'procedural'];
+
+/** Normalize a caller-supplied key into a stable slug — the upsert identity
+ *  within (scope, scopeKey), so "Prefers Dark Mode" and "prefers-dark-mode" must
+ *  land on ONE row rather than two. Keeps Hangul (a Korean-language user's
+ *  memory keys are legitimate) and returns '' when nothing usable is left. */
+export function normalizeMemoryKey(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_./]+/g, '-')
+    .replace(/[^a-z0-9가-힣-]/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64);
+}
+
+/** Refuse anything shaped like a credential. Deterministic and deliberately
+ *  broad: a false positive costs the agent one memory, a false negative writes a
+ *  plaintext secret into a file that outlives the session. */
+export function looksLikeSecret(value: string): boolean {
+  const v = value.trim();
+  return (
+    // The token BODY may itself contain - and _ : a Slack bot token really is
+    // `xoxb-1234-5678-abcd…`, so requiring an unbroken alphanumeric run here
+    // would miss the very credentials this is meant to catch.
+    /\b(?:sk|pk|shub|ghp|gho|xox[bap])[-_][A-Za-z0-9][A-Za-z0-9_-]{15,}/.test(v) ||
+    /\bBearer\s+[A-Za-z0-9._-]{16,}/i.test(v) ||
+    /\b\d{6,}:[A-Za-z0-9_-]{30,}\b/.test(v) || // telegram bot token
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(v) ||
+    /\b(?:password|passwd|api[_ -]?key|secret|token|credential)\b\s*[:=]\s*\S+/i.test(v) ||
+    /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./.test(v) // JWT
+  );
+}
+
+/** Resolve a scope name to this turn's scope key, or undefined when the turn has
+ *  no such scope (a projectless turn has no 'project' key). */
+export function resolveMemoryScopeKey(
+  scope: MemoryScope,
+  sink: Pick<MemoryLearningSink, 'sessionId' | 'cwd' | 'userId'>,
+): string | undefined {
+  if (scope === 'session') return sink.sessionId || undefined;
+  if (scope === 'project') return sink.cwd || undefined;
+  if (scope === 'user') return sink.userId || undefined;
+  return undefined; // 'org' is not writable by an agent
+}
+
+/** Everything wrong with a remember request, in the words the MODEL needs to fix
+ *  it. Empty array = the request is well-formed. Pure. */
+export function validateRememberInput(input: {
+  key: string;
+  value: string;
+  type: string;
+  scope: string;
+}): string[] {
+  const problems: string[] = [];
+  if (!normalizeMemoryKey(input.key)) {
+    problems.push('`key` must contain letters or digits (it becomes a stable slug, e.g. "prefers-metric-units")');
+  }
+  const value = input.value.trim();
+  if (!value) problems.push('`value` is empty — say what was learned, as one sentence');
+  if (value.length > MEMORY_VALUE_MAX) {
+    problems.push(`\`value\` is ${value.length} chars; keep it under ${MEMORY_VALUE_MAX} (one fact, one sentence)`);
+  }
+  if (looksLikeSecret(value)) {
+    problems.push(
+      'that `value` looks like a credential (token/key/password) — never store secrets in memory; store the preference, not the secret',
+    );
+  }
+  if (!MEMORY_TYPES.includes(input.type as MemoryType)) {
+    problems.push(`\`type\` must be one of ${MEMORY_TYPES.join(', ')}`);
+  }
+  if (!WRITABLE_SCOPES.includes(input.scope as MemoryScope)) {
+    problems.push(`\`scope\` must be one of ${WRITABLE_SCOPES.join(', ')} ('org' memory is curated by a person, not an agent)`);
+  }
+  return problems;
+}
+
+/** Build the remember executor bound to a turn's sink. Every write lands as a
+ *  PROPOSAL and the returned message tells the model exactly that, so it neither
+ *  claims to the user that the fact is now active nor repeats the call. */
+export function makeRemember(sink: MemoryLearningSink): Executor {
+  return async (input): Promise<ToolOutput> => {
+    const rec = asRecord(input);
+    const key = String(rec.key ?? '');
+    const value = String(rec.value ?? '');
+    const type = String(rec.type ?? 'semantic');
+    const scope = String(rec.scope ?? sink.defaultScope ?? 'user');
+
+    const problems = validateRememberInput({ key, value, type, scope });
+    if (problems.length) {
+      return {
+        content: `Nothing was remembered: ${problems.join('; ')}.`,
+        isError: true,
+      };
+    }
+
+    const scopeKey = resolveMemoryScopeKey(scope as MemoryScope, sink);
+    if (!scopeKey) {
+      return {
+        content:
+          `Nothing was remembered: this turn has no '${scope}' scope to write to` +
+          (scope === 'project' ? ' (no working directory). Use scope "user" for a fact that holds everywhere.' : '.'),
+        isError: true,
+      };
+    }
+
+    const normalizedKey = normalizeMemoryKey(key);
+    try {
+      // The write gate runs INSIDE putMemory (decideMemoryWrite): it can refuse
+      // outright (throws) or pin the status. We ask for 'proposed' regardless, so
+      // a capture never becomes injectable without a human.
+      const saved = sink.putMemory({
+        scope: scope as MemoryScope,
+        scopeKey,
+        type: type as MemoryType,
+        key: normalizedKey,
+        value: value.trim(),
+        provenance: {
+          source: 'artifact',
+          sessionId: sink.sessionId,
+          basis: 'learned from this conversation',
+        },
+        confidence: CAPTURE_CONFIDENCE,
+        requestedStatus: 'proposed',
+      });
+      return {
+        content:
+          `Noted "${normalizedKey}" in ${scope} memory as a PROPOSAL. It is not in use yet — ` +
+          'memory only shapes future answers after the user confirms it in Settings → Agents → ' +
+          'memory review. Do not call this again for the same fact, and do not tell the user it is ' +
+          'already being applied.',
+        data: { id: saved.id, key: saved.key, scope: saved.scope, status: saved.status },
+      };
+    } catch (e) {
+      // A gate deny (e.g. a lower tier trying to overwrite a confirmed row).
+      return {
+        content: `Nothing was remembered: ${e instanceof Error ? e.message : String(e)}.`,
+        isError: true,
+      };
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // JSON-schema tool definitions (NO execute). The engine converts these to
 // whatever its SDK needs; the runtime supplies the executors separately.
 // ---------------------------------------------------------------------------
+
+export const rememberSchema: ToolSchema = {
+  name: REMEMBER_TOOL_NAME,
+  description:
+    'Remember a durable fact about THIS user so future conversations start from it — how they want ' +
+    'work done, a standing rule, a term their team uses, the state of an ongoing project. Call it the ' +
+    'moment you learn something that would still be true next week. The entry is saved as a PROPOSAL ' +
+    'and does NOT affect any answer until the user confirms it, so proposing one is safe and cheap. ' +
+    'Do NOT store: transient task state, anything you were told only for this one message, secrets ' +
+    '(tokens, keys, passwords), or a fact you already remembered. One fact per call.',
+  parameters: {
+    type: 'object',
+    properties: {
+      key: {
+        type: 'string',
+        description:
+          'Short stable slug naming the fact, e.g. "prefers-metric-units". Reusing a key updates that entry instead of adding a duplicate.',
+      },
+      value: {
+        type: 'string',
+        description: `The fact itself, in one sentence (max ${MEMORY_VALUE_MAX} chars). Write it so it makes sense with no conversation around it.`,
+      },
+      type: {
+        type: 'string',
+        enum: ['working', 'episodic', 'semantic', 'procedural'],
+        description:
+          'working = current task state; episodic = something that happened; semantic = a standing fact or preference; procedural = how they want a task done.',
+      },
+      scope: {
+        type: 'string',
+        enum: ['session', 'project', 'user'],
+        description:
+          'How far it applies: "user" for anywhere, "project" for this working directory only, "session" for this conversation only. Defaults to the agent\'s own scope.',
+      },
+    },
+    required: ['key', 'value', 'type'],
+  },
+};
 
 export const addMcpSchema: ToolSchema = {
   name: ADD_MCP_TOOL_NAME,
@@ -369,10 +619,15 @@ export const sendMessageSchema: ToolSchema = {
  * When an `mcp` sink is supplied, the `naby_add_mcp` tool is included so the
  * agent can register an MCP server on the user's behalf (as a proposal — see
  * makeAddMcp). Omit it (undefined) and the tool is absent, e.g. in a context
- * with no store to write to. */
+ * with no store to write to.
+ *
+ * When a `memory` sink is supplied, `naby_remember` is included so the agent can
+ * capture what it learns about the user (also as a proposal — see makeRemember).
+ * It carries THIS turn's scope keys, so it is built per turn rather than once. */
 export function buildToolset(
   outbox: Outbox,
   mcp?: McpProposalSink,
+  memory?: MemoryLearningSink,
 ): {
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
@@ -386,6 +641,10 @@ export function buildToolset(
   if (mcp) {
     toolSchemas.push(addMcpSchema);
     executors[ADD_MCP_TOOL_NAME] = makeAddMcp(mcp);
+  }
+  if (memory) {
+    toolSchemas.push(rememberSchema);
+    executors[REMEMBER_TOOL_NAME] = makeRemember(memory);
   }
   return { toolSchemas, executors };
 }
