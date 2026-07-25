@@ -454,4 +454,5 @@ export {
   shouldRecord,
   type CheckinQuestion,
   type CheckinAnswer,
+  type DegenerateCode,
 } from './runtime/checkin.js';

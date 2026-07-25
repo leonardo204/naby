@@ -26,6 +26,7 @@ import {
   CHECKIN_MIN_OPTIONS,
   degenerateReason,
   scoreCheckin,
+  type DegenerateCode,
   shouldRecord,
   validateCheckinInput,
   type CheckinAnswer,
@@ -558,8 +559,8 @@ export interface CheckinLedgerRow {
   taskType?: string;
   /** Set when the question was degenerate: kept, marked, out of the hit rate. */
   excludedFromScoring?: boolean;
-  /** Why it was excluded, in plain words, so the panel can say so. */
-  reason?: string;
+  /** Why it was excluded, as a CODE the shell renders per locale. */
+  reason?: DegenerateCode;
 }
 
 /** What the check-in executor needs from the shell: a way to interrupt the user,

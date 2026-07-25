@@ -209,9 +209,15 @@ export function questionSimilarity(a: string, b: string): number {
   return shared / (at.size + bt.size - shared);
 }
 
+/** Why a check-in was thrown out. A CODE, not prose, for the same reason
+ *  `GrowthReasonCode` is: the runtime must not hardcode a language, and the shell
+ *  renders it in the user's own words. Storing the English sentence would leak it
+ *  straight into a Korean panel. */
+export type DegenerateCode = 'one-real-option' | 'repeat-question';
+
 /**
  * Why this check-in must not count toward accuracy, or undefined when it is a
- * real question. The reason is stored on the row so the panel can say what was
+ * real question. The code is stored on the row so the panel can say what was
  * excluded and why — never a silent drop.
  *
  * @param recentQuestions the agent's recent check-in questions, newest first
@@ -220,14 +226,12 @@ export function degenerateReason(input: {
   question: string;
   options: readonly string[];
   recentQuestions?: readonly string[];
-}): string | undefined {
+}): DegenerateCode | undefined {
   const distinct = new Set(input.options.map((o) => normalizeCheckinQuestion(o)).filter(Boolean));
-  if (distinct.size < CHECKIN_MIN_OPTIONS) {
-    return 'the options were not meaningfully different';
-  }
+  if (distinct.size < CHECKIN_MIN_OPTIONS) return 'one-real-option';
   for (const prior of input.recentQuestions ?? []) {
     if (questionSimilarity(input.question, prior) >= DEGENERATE_SIMILARITY) {
-      return 'the same question had just been asked';
+      return 'repeat-question';
     }
   }
   return undefined;
