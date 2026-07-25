@@ -416,6 +416,9 @@ export {
 export {
   wilsonLowerBound,
   stageFor,
+  brierScore,
+  askDecisionQuality,
+  BRIER_UNINFORMATIVE,
   canBeAddressed,
   computeGrowth,
   detectChangePoint,
@@ -428,6 +431,7 @@ export {
   type GrowthState,
   type GrowthChange,
   type GrowthReasonCode,
+  type AskQuality,
   type CheckinRecord,
   type LedgerKind,
 } from './runtime/growth.js';

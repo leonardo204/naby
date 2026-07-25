@@ -2,7 +2,7 @@
 id: phase-3-butterfly-trust-meter
 title: Phase 3 P3-M5 — 나비 신뢰 지표 (알고리즘 설계)
 type: design
-version: 0.4.0
+version: 0.5.0
 status: active
 scope: 페르소나 에이전트를 얼마나 믿고 맡길 수 있는지를 측정해 알·애벌레·번데기·나비로 표시하는 알고리즘. 체크인 적중률의 Wilson 하한, 커버리지, 물음 트리거, 창 관리, 보정, 트립와이어, 작업유형별 범위, 후퇴 진단, 게이밍 방어를 정한다. 이벤트 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
 related: [phase-3-persona-agent, phase-3-checkin-contracts, phase-3-agent-export, personalization-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
@@ -190,7 +190,15 @@ Google ADK/Vertex 에이전트 평가는 **trajectory 평가와 final response �
 - ✅ **체크인 배선** — `naby_checkin`(런타임 도구) + 일시정지 브리지(`checkinRegistry`, M2와 같은 기법) + 게이트가 쓰는 `autonomous`/`tripwire` 행 + 인라인 프롬프트 UI. `npm run spike:checkin` **10/10 PASS**, 셸 테스트 28건.
 - ✅ **설정 성장 패널** — 단계 사다리, 게이지, 축(적중·커버리지·제외·사후수정·전체기간), 작업 유형별 분해, 최근 결정 목록, 그리고 **후퇴 사유를 쉬운 한국어로** 낸다. 사유는 코드 + 실제 횟수로 만들어서 사용자가 자기 대화와 대조할 수 있다.
 - ✅ **내보내기(P3-M6)** — 상세 → [`phase-3-agent-export`](phase-3-agent-export.md). **단계는 주장이 아니라 출처**라서, 내보낸 파일이 다른 기기에서 멘션 권한을 선언할 수 없다.
-- ⬜ 2차 축(물음 판단 정밀도·재현율, Brier 보정), 임포트.
+- ✅ **임포트(P3-M7)** — 파일은 신뢰를 선언할 수 없다. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md) §7.
+- ✅ **2차 축** — Brier 보정과 물음 판단 정밀도·재현율. **측정하고 보여주되 게이트에 넣지 않는다**(§11의 결정 그대로).
+
+### 9.2 2차 축을 어떻게 보여주는가
+
+숫자가 아니라 **문장으로** 낸다. "Brier 0.09"는 맡길지 말지 정하는 사람에게 아무 의미가 없고, "확실하다고 말하면 그 숫자를 믿어도 된다"는 의미가 있다.
+
+- **보정** — 기준선은 **0.25**다. 언제나 "50% 확실"이라고 말하는 에이전트가 정확히 그 값을 받으므로, 그 아래면 확신도가 정보를 담고 그 위면 장식이다. 검증에서 확인한 사실 하나: 80% 맞히면서 0.99를 주장해도 0.196으로 여전히 기준선 아래다. 큰소리 자체가 나쁜 게 아니라, **확신이 결과와 어긋날 때** 넘어간다(50% 맞히며 0.99 주장 = 0.49).
+- **물음 판단** — 정밀도와 재현율을 **쌍으로만** 보여준다. 완벽한 에이전트는 모든 물음이 결과적으로 불필요했으므로 정밀도가 0이다. 그건 실패가 아니라 "이제 그만 물어도 된다"는 신호이고, 정밀도만 따로 보여주면 잘하는 에이전트에게 낙제점을 붙이는 화면이 된다.
 
 패널이 지키는 규칙 넷.
 

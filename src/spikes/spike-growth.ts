@@ -21,10 +21,17 @@
 //       stage up once recent work misses.
 //   (j) An IMPORTED ledger grants no stage — a file cannot declare trust — and
 //       does not disturb the rows actually observed here.
+//   (k) The Brier axis separates being right from knowing when you are wrong: the
+//       same hit rate can score differently, and 0.5-always is exactly the line.
+//   (l) Ask precision and recall grade the decision to ask, and the tension with
+//       a high hit rate is real rather than a bug.
 //
 // Pure arithmetic, no store and no engine — runs in milliseconds.
 
 import {
+  BRIER_UNINFORMATIVE,
+  askDecisionQuality,
+  brierScore,
   BUTTERFLY_THRESHOLD,
   GROWTH_MIN_SAMPLE,
   GROWTH_WINDOW,
@@ -313,6 +320,94 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
       mixed.trials === alone.trials &&
       diagnoseChange(imported).code === 'not-measured',
     `imported-only=${cold.stage} ${cold.percent}% (${cold.trials} trials); same rows as mine=${mine.stage}; mixed=${mixed.stage} ${mixed.hits}/${mixed.trials} vs real-only ${alone.stage} ${alone.hits}/${alone.trials}`,
+  );
+}
+
+// -- (k) calibration is a different axis from accuracy ----------------------
+{
+  // Both are right 8 of 10. The first KNOWS which two it got wrong; the second
+  // was loudly certain about all ten — same accuracy, worse calibration.
+  const honest: CheckinRecord[] = Array.from({ length: 10 }, (_, i) => ({
+    at: 1_000 + i,
+    agentId: 'a',
+    kind: 'checkin' as const,
+    hit: i < 8,
+    confidence: i < 8 ? 0.9 : 0.2,
+  }));
+  const overconfident: CheckinRecord[] = honest.map((r) => ({ ...r, confidence: 0.99 }));
+  const hedging: CheckinRecord[] = honest.map((r) => ({ ...r, confidence: 0.5 }));
+  // Certain every time and right half the time: THIS is confidence as decoration.
+  const decorative: CheckinRecord[] = Array.from({ length: 10 }, (_, i) => ({
+    at: 2_000 + i,
+    agentId: 'a',
+    kind: 'checkin' as const,
+    hit: i < 5,
+    confidence: 0.99,
+  }));
+
+  const h = brierScore(honest)!;
+  const o = brierScore(overconfident)!;
+  const d = brierScore(decorative)!;
+  const g = computeGrowth(honest);
+  const go = computeGrowth(overconfident);
+  record(
+    '(k) the same hit rate can score differently, and 0.5-always sits exactly on the line',
+    // Same accuracy, better calibration scores lower.
+    h.score < o.score &&
+      h.samples === 10 &&
+      // A constant 0.5 is EXACTLY the uninformative value, whatever the accuracy.
+      Math.abs(brierScore(hedging)!.score - BRIER_UNINFORMATIVE) < 1e-9 &&
+      h.score < BRIER_UNINFORMATIVE &&
+      // Being loudly certain is NOT automatically worse than hedging: at 80%
+      // accuracy 0.99 still beats always-0.5. It only crosses the line when the
+      // certainty stops matching the outcomes.
+      o.score < BRIER_UNINFORMATIVE &&
+      d.score > BRIER_UNINFORMATIVE &&
+      // The stage is untouched by any of it: this axis is measured, not gated.
+      g.stage === go.stage &&
+      g.brier !== undefined &&
+      brierScore([{ at: 1, agentId: 'a', kind: 'checkin', hit: true }]) === undefined,
+    `8/10 honest=${h.score.toFixed(3)} < 8/10 certain=${o.score.toFixed(3)} < line ${BRIER_UNINFORMATIVE} = always-0.5; 5/10 certain=${d.score.toFixed(3)} is above it. stage both ${g.stage}`,
+  );
+}
+
+// -- (l) grading the decision to ask ---------------------------------------
+{
+  const rows: CheckinRecord[] = [
+    // Asked, and the user went another way: the ask was warranted.
+    { at: 1, agentId: 'a', kind: 'checkin', hit: false },
+    { at: 2, agentId: 'a', kind: 'checkin', hit: false },
+    // Asked, and the user agreed: it already knew.
+    { at: 3, agentId: 'a', kind: 'checkin', hit: true },
+    // Acted alone and had to be fixed: it should have asked.
+    { at: 4, agentId: 'a', kind: 'autonomous', correctedAfter: true },
+    // Acted alone, nothing needed fixing.
+    { at: 5, agentId: 'a', kind: 'autonomous' },
+    { at: 6, agentId: 'a', kind: 'autonomous' },
+  ];
+  const q = askDecisionQuality(rows)!;
+  // A flawless agent: every ask turns out to have been unnecessary, so precision
+  // is 0 — the signal that it can stop asking, NOT a failing grade.
+  const flawless = askDecisionQuality([
+    { at: 1, agentId: 'a', kind: 'checkin', hit: true },
+    { at: 2, agentId: 'a', kind: 'checkin', hit: true },
+    { at: 3, agentId: 'a', kind: 'autonomous' },
+  ])!;
+  record(
+    '(l) ask precision and recall are graded, and a flawless agent scores 0 precision',
+    Math.abs(q.precision - 2 / 3) < 1e-9 &&
+      Math.abs(q.recall - 2 / 3) < 1e-9 &&
+      q.warrantedAsks === 2 &&
+      q.unnecessaryAsks === 1 &&
+      q.missedAsks === 1 &&
+      q.correctSilences === 2 &&
+      q.samples === 6 &&
+      flawless.precision === 0 &&
+      flawless.recall === 0 &&
+      // Nothing to score reads as absent, not as zero.
+      askDecisionQuality([]) === undefined &&
+      askDecisionQuality([{ at: 1, agentId: 'a', kind: 'tripwire' }]) === undefined,
+    `precision=${q.precision.toFixed(2)} recall=${q.recall.toFixed(2)} (warranted ${q.warrantedAsks}, unnecessary ${q.unnecessaryAsks}, missed ${q.missedAsks}, silent ${q.correctSilences}); flawless precision=${flawless.precision}`,
   );
 }
 

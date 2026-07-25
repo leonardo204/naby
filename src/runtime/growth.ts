@@ -65,6 +65,10 @@ export type CheckinRecord = {
   taskType?: string;
   /** kind='checkin': the user took the recommendation unchanged. */
   hit?: boolean;
+  /** kind='checkin': the agent's OWN stated confidence in its recommendation,
+   *  0–1. Recorded but never trusted — `brierScore` measures whether it means
+   *  anything (§4.7). */
+  confidence?: number;
   /** kind='autonomous': the user corrected the result afterwards. The miss
    *  signal for the covered region — without it coverage inflates for free. */
   correctedAfter?: boolean;
@@ -200,6 +204,113 @@ export function detectChangePoint(records: readonly CheckinRecord[]): number {
   return cut;
 }
 
+// ---------------------------------------------------------------------------
+// The second tier of axes (§4.7, §4.5) — measured, shown, and NOT gated on
+// ---------------------------------------------------------------------------
+//
+// Accuracy answers "does it know what I want". These answer two different
+// questions that a person deciding whether to delegate actually cares about:
+// does it know WHEN IT DOES NOT know, and does it interrupt me at the right
+// moments. Neither gates a stage — their thresholds would be numbers invented
+// before any real ledger existed (§11) — but both are computed and displayed
+// from day one, because an axis nobody can see is an axis nobody fixes.
+
+/**
+ * BRIER SCORE over the agent's stated confidence: the mean squared error between
+ * what it claimed and what happened. Lower is better; 0 is perfect.
+ *
+ * The reference point that makes it readable: an agent that always says "0.5"
+ * scores exactly 0.25 no matter how often it is right, so **0.25 is the
+ * uninformative line.** Below it the confidence carries information; at or above
+ * it the number is decoration.
+ *
+ * This is a DIFFERENT axis from accuracy, and ConfidenceBench (2026) is blunt
+ * about why it matters: the most accurate model is not the best calibrated one.
+ * Selective automation rests on the second property — "0.8 confident" has to mean
+ * "right about 80% of the time" before anyone can safely let it act alone.
+ *
+ * Returns undefined when no row carried a confidence: an absent axis reads as
+ * absent, never as a zero that looks like a perfect score.
+ */
+export function brierScore(
+  records: readonly CheckinRecord[],
+): { score: number; samples: number } | undefined {
+  const rated = scorable(withoutImported(records)).filter(
+    (r) => typeof r.confidence === 'number' && r.confidence >= 0 && r.confidence <= 1,
+  );
+  if (rated.length === 0) return undefined;
+  const total = rated.reduce((sum, r) => {
+    const outcome = r.hit ? 1 : 0;
+    return sum + (r.confidence! - outcome) ** 2;
+  }, 0);
+  return { score: total / rated.length, samples: rated.length };
+}
+
+/** How well the agent judges WHEN to ask. */
+export type AskQuality = {
+  /** Of the times it asked, how often the ask was warranted. */
+  precision: number;
+  /** Of the times an ask was warranted, how often it asked. */
+  recall: number;
+  /** It asked and the user chose differently — the ask caught a divergence. */
+  warrantedAsks: number;
+  /** It asked and the user took the recommendation — it already knew. */
+  unnecessaryAsks: number;
+  /** It acted alone and the user had to fix it — it should have asked. */
+  missedAsks: number;
+  /** It acted alone and nothing needed fixing. */
+  correctSilences: number;
+  /** Consequential decisions this is computed over. */
+  samples: number;
+};
+
+/**
+ * Score the DECISION TO ASK as its own classifier, which is what LangSmith does
+ * when it grades "did it stop for approval" separately from "was the answer
+ * right" (§4.5). Treating every consequential action as one labelled instance:
+ *
+ *   asked + user diverged   → warranted   (true positive)
+ *   asked + user agreed     → unnecessary (false positive)
+ *   acted + user corrected  → missed      (false negative)
+ *   acted + nothing fixed   → correct silence (true negative)
+ *
+ * NOTE THE DELIBERATE TENSION with the hit rate: an agent that is always right
+ * has LOW ask precision, because every ask turns out to have been unnecessary.
+ * That is not a contradiction, it is the signal — it means "you can stop asking
+ * about this kind of thing", which is precisely the transition from a supervised
+ * agent to a trusted one. The panel therefore shows the pair, never precision
+ * alone, or the number would read as a failing grade for an agent doing well.
+ *
+ * Returns undefined when there is nothing to score.
+ */
+export function askDecisionQuality(records: readonly CheckinRecord[]): AskQuality | undefined {
+  const rows = withoutImported(records);
+  const asks = rows.filter((r) => (r.kind ?? 'checkin') === 'checkin' && r.hit !== undefined);
+  const acts = rows.filter((r) => r.kind === 'autonomous');
+  if (asks.length + acts.length === 0) return undefined;
+
+  const warrantedAsks = asks.filter((r) => !r.hit).length;
+  const unnecessaryAsks = asks.filter((r) => r.hit).length;
+  const missedAsks = acts.filter((r) => r.correctedAfter).length;
+  const correctSilences = acts.length - missedAsks;
+
+  const askedTotal = warrantedAsks + unnecessaryAsks;
+  const neededTotal = warrantedAsks + missedAsks;
+  return {
+    precision: askedTotal > 0 ? warrantedAsks / askedTotal : 0,
+    recall: neededTotal > 0 ? warrantedAsks / neededTotal : 0,
+    warrantedAsks,
+    unnecessaryAsks,
+    missedAsks,
+    correctSilences,
+    samples: asks.length + acts.length,
+  };
+}
+
+/** The Brier value an agent scores by always claiming 0.5 — the line below which
+ *  its stated confidence starts carrying information. */
+export const BRIER_UNINFORMATIVE = 0.25;
+
 /** The computed state of one agent's growth. */
 export type GrowthState = {
   stage: GrowthStage;
@@ -236,6 +347,14 @@ export type GrowthState = {
   /** True when accuracy alone would have earned butterfly but a safety refusal in
    *  the window blocks it. Lets the panel say WHY it stalled at 99%. */
   blockedByTripwire?: boolean;
+
+  // -- the second tier: measured and shown, never gated on ------------------
+  /** Mean squared error of its stated confidence over the same window. Absent
+   *  when no check-in carried one — never 0, which would look perfect. */
+  brier?: number;
+  brierSamples: number;
+  /** How well it judges when to ask. Absent when there is nothing to score. */
+  ask?: AskQuality;
 };
 
 /** Sort newest-last, then take the recent window. */
@@ -288,6 +407,9 @@ export function computeGrowth(
   const tripwires = spanRows.filter((r) => r.kind === 'tripwire').length;
   const decisions = autonomous.length + checkins.length;
 
+  const brier = brierScore(spanRows);
+  const ask = askDecisionQuality(spanRows);
+
   // A safety refusal is a HARD block, not a term in an average (§4.8).
   const accuracyStage = stageFor(lowerBound, trials);
   const blockedByTripwire = tripwires > 0 && accuracyStage === 'butterfly';
@@ -323,6 +445,11 @@ export function computeGrowth(
     excluded: spanRows.filter((r) => r.excludedFromScoring).length,
     ...(cut > 0 ? { changePointAt: cut } : {}),
     ...(blockedByTripwire ? { blockedByTripwire: true } : {}),
+    // Computed over the SAME span as accuracy, so the panel never mixes a recent
+    // hit rate with a lifetime calibration figure.
+    ...(brier ? { brier: brier.score } : {}),
+    brierSamples: brier?.samples ?? 0,
+    ...(ask ? { ask } : {}),
   };
 }
 
