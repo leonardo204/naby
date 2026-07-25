@@ -432,6 +432,23 @@ export {
   type LedgerKind,
 } from './runtime/growth.js';
 
+// -- taking a grown agent with you (Phase 3, P3-M6) --------------------------
+// Pure packaging: a stock Claude Code subagent `.md` (learned facts inlined, so
+// one file is enough) plus a lossless `.naby.json` sidecar. `proposed`, `session`
+// and credential-shaped rows never leave, and every drop is counted for the user.
+export {
+  buildAgentExport,
+  exportBasename,
+  memoryDropReason,
+  yamlScalar,
+  AGENT_EXPORT_FORMAT_VERSION,
+  REDACTED,
+  type AgentExportInput,
+  type AgentExportReport,
+  type AgentExportResult,
+  type MemoryDropReason,
+} from './runtime/agent-export.js';
+
 // -- the check-in itself (Phase 3, P3-M5) ------------------------------------
 // What the meter measures: the agent's own proposal, the user's pick, and the
 // deterministic rules that keep a padded or repeated question from counting.
