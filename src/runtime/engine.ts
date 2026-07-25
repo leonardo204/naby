@@ -229,11 +229,27 @@ export type EngineEvent =
 // The Engine interface (contract §2). The rest of the app depends only on this.
 // ---------------------------------------------------------------------------
 
+/** A subagent the model may delegate to for this turn (Phase 2.5 M4).
+ *  Engine-neutral: the Claude Agent SDK engine maps it to a native `agents`
+ *  definition (spawned via the gated `Task` tool); the AI-SDK engine has no
+ *  native subagents and ignores it. `toolRefs`, when set, RESTRICTS the subagent
+ *  to those tools; omitted = inherit the turn's tools. */
+export type SubagentSpec = {
+  name: string;
+  description?: string;
+  systemPrompt: string;
+  model?: string;
+  toolRefs?: string[];
+};
+
 export type EngineRunInput = {
   /** provider + model id/deployment — the ONLY key-dependent input. */
   model: ModelSelection;
   /** conversation so far, from our provider-independent store. */
   messages: RuntimeMessage[];
+  /** Subagents the model may delegate to (Phase 2.5 M4). Engine-specific: the
+   *  Claude Agent SDK maps these to native agents; other engines ignore them. */
+  subagents?: SubagentSpec[];
   /** System prompt / instructions for the turn. NOT a message — each engine
    * forwards this through its provider's dedicated slot (`ai@7`'s `system`
    * option, the Agent SDK's `systemPrompt`). Provider-independent: the same

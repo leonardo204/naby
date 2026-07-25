@@ -202,6 +202,27 @@ export function buildQueryOptions(args: {
     abortController,
     stderr: onStderr,
     ...(input.model.model ? { model: input.model.model } : {}),
+    // Phase 2.5 (M4): expose Naby's enabled subagents as NATIVE SDK agents, keyed
+    // by name, so the model can delegate to them through the built-in Task tool.
+    // A delegated subagent's own tool calls still pass through THIS turn's
+    // PreToolUse gate (verified in spike-subagent-gate), so orchestration inherits
+    // the Phase-2 policy for free. `toolRefs` restricts the subagent's tools; the
+    // description drives when the model picks it.
+    ...(input.subagents && input.subagents.length > 0
+      ? {
+          agents: Object.fromEntries(
+            input.subagents.map((s) => [
+              s.name,
+              {
+                description: s.description ?? `The ${s.name} subagent.`,
+                prompt: s.systemPrompt,
+                ...(s.model ? { model: s.model } : {}),
+                ...(s.toolRefs && s.toolRefs.length > 0 ? { tools: s.toolRefs } : {}),
+              },
+            ]),
+          ),
+        }
+      : {}),
   };
 }
 

@@ -16,6 +16,7 @@ import type {
   Gate,
   ModelSelection,
   RuntimeImage,
+  SubagentSpec,
   ToolOutput,
   ToolSchema,
 } from './engine.js';
@@ -42,6 +43,10 @@ export type RunTurnOptions = {
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
   gate: Gate;
+  /** Subagents the model may delegate to this turn (Phase 2.5 M4). Passed to the
+   *  engine, which maps them if it supports native delegation (Claude Agent SDK)
+   *  or ignores them (AI-SDK). */
+  subagents?: SubagentSpec[];
   /** System prompt for this turn. Passed to the engine on its OWN field, never
    * appended to the history — `ai@7` rejects `role:'system'` inside `messages`
    * and a system prompt is not part of the transcript we replay (contract §6). */
@@ -281,6 +286,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     messages: turnMessages,
     ...(effectiveSystem !== undefined ? { system: effectiveSystem } : {}),
     ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    ...(opts.subagents !== undefined && opts.subagents.length > 0
+      ? { subagents: opts.subagents }
+      : {}),
     toolSchemas,
     gate,
     executors,

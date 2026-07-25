@@ -30,6 +30,7 @@ export type {
   JsonSchema,
   ModelSelection,
   RuntimeMessage,
+  SubagentSpec,
   ToolCall,
   ToolOutput,
   ToolSchema,

@@ -3,6 +3,14 @@
 > 상태: 초안 (2026-07-25). Phase 1.6까지 완료된 시점에서 작성.
 > 목표: "관측·등록·주입까지"에서 "실제 도구 실행 + 인간 승인 + 서브에이전트 오케스트레이션"으로.
 
+## 진행 상황 (2026-07-25 업데이트)
+
+- **M1 ✅** PolicyStore + realPolicy + 게이트 배선 + 권한 설정 UI. (naby 45cc3b8 / cockpit f20cbf8)
+- **M2 ✅** 인간 승인 브리지(ask→일시정지→인라인 프롬프트, globalThis 레지스트리, abort/TTL). (naby 668bf3c / cockpit b78651d)
+- **M3 ✅** 자동 스킬 주입 셸 배선 + 도구 보유 스킬 toolRef 검증. (naby 61532b8 / cockpit e3d9e5f)
+- **M4 ~** 서브에이전트: **dev-claude 네이티브 `agents` 매핑 완료**(모델이 gated Task로 위임). **남음(M4b): ai-sdk 수동 `naby_delegate`**(중첩 세션) + 실제 위임 라이브 검증.
+- 별건(dormant): 메모리 자동 주입도 셸 미배선(스킬과 동일 패턴).
+
 ---
 
 ## 0. 현재 상태 (근거)
