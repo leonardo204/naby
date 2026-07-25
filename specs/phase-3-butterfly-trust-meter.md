@@ -2,7 +2,7 @@
 id: phase-3-butterfly-trust-meter
 title: Phase 3 P3-M5 — 나비 신뢰 지표 (알고리즘 설계)
 type: design
-version: 0.3.0
+version: 0.4.0
 status: active
 scope: 페르소나 에이전트를 얼마나 믿고 맡길 수 있는지를 측정해 알·애벌레·번데기·나비로 표시하는 알고리즘. 체크인 적중률의 Wilson 하한, 커버리지, 물음 트리거, 창 관리, 보정, 트립와이어, 작업유형별 범위, 후퇴 진단, 게이밍 방어를 정한다. 이벤트 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
 related: [phase-3-persona-agent, phase-3-checkin-contracts, phase-3-agent-export, personalization-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
@@ -188,7 +188,15 @@ Google ADK/Vertex 에이전트 평가는 **trajectory 평가와 final response �
 - ✅ **원장** — `eval_events`(P15-03 실체화). 계약은 [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md).
 - ✅ **`@` 팔레트** — 에이전트 최우선 노출, 단계 배지, 나비 아니면 회색·선택 차단. 팔레트와 패널이 같은 읽기 함수(`growthRead`)를 쓴다.
 - ✅ **체크인 배선** — `naby_checkin`(런타임 도구) + 일시정지 브리지(`checkinRegistry`, M2와 같은 기법) + 게이트가 쓰는 `autonomous`/`tripwire` 행 + 인라인 프롬프트 UI. `npm run spike:checkin` **10/10 PASS**, 셸 테스트 28건.
-- ⬜ 설정 성장 패널(시각화 + 후퇴 사유 렌더), export(P3-M6), 2차 축(물음 판단 정밀도·재현율, Brier 보정).
+- ✅ **설정 성장 패널** — 단계 사다리, 게이지, 축(적중·커버리지·제외·사후수정·전체기간), 작업 유형별 분해, 최근 결정 목록, 그리고 **후퇴 사유를 쉬운 한국어로** 낸다. 사유는 코드 + 실제 횟수로 만들어서 사용자가 자기 대화와 대조할 수 있다.
+- ⬜ export(P3-M6), 2차 축(물음 판단 정밀도·재현율, Brier 보정).
+
+패널이 지키는 규칙 넷.
+
+1. **무엇으로 오르지 않는지 말한다.** 사용자는 "학습률"을 대화 횟수나 저장된 기억 개수로 읽는다. 마지막 줄에서 "나비가 먼저 묻고 그 추천이 실제로 고른 것과 같았는지만 센다"고 못 박는다. 이 문장이 없으면 숫자가 임의로 보이고 무시된다.
+2. **숫자 둘이 서로 다른 말을 하지 않게 한다.** 알 단계는 게이지 대신 "몇 번 더 답하면 되는지"를 보여주고, 트립와이어로 막힌 에이전트는 왜 게이지가 조금 앞에서 멈추는지 말한다. `boundDeltaPoints`는 게이지와 다른 척도라 아예 렌더하지 않는다. **애벌레 문구도 같은 이유로 고쳤다** — 애벌레는 0%일 수 있으므로 "맞히기 시작했다"고 쓰면 옆의 게이지와 모순된다.
+3. **작업 유형별로 쪼개 보여준다.** "메일은 나비, SQL은 알"이 하나의 오해하기 쉬운 평균으로 뭉개지지 않는다.
+4. **결정 목록을 남긴다.** 무엇을 물었고 무엇을 골랐는지 보이므로 숫자를 검산할 수 있다.
 
 ### 9.1 배선에서 확정된 두 가지 설계
 
