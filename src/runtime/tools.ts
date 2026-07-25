@@ -21,6 +21,13 @@ import type {
 } from './store/store.js';
 import { validateMcpEntry } from './mcp.js';
 import {
+  DELEGATE_TOOL_NAME,
+  canDelegate,
+  delegateSchema,
+  makeDelegate,
+  type DelegationSink,
+} from './delegate.js';
+import {
   CHECKIN_TOOL_NAME,
   CHECKIN_MAX_OPTIONS,
   CHECKIN_MIN_OPTIONS,
@@ -833,12 +840,18 @@ export const sendMessageSchema: ToolSchema = {
  *
  * When a `checkin` sink is supplied, `naby_checkin` is included so the agent can
  * pause and ask how to proceed — the exchange the trust meter scores (P3-M5).
- * Also per turn: the sink holds this turn's suspend/resume plumbing. */
+ * Also per turn: the sink holds this turn's suspend/resume plumbing.
+ *
+ * When a `delegation` sink is supplied AND it has somewhere to delegate with depth
+ * left (`canDelegate`), `naby_delegate` is included — the manual subagent path for
+ * engines with no native one (Phase 2.5 M4b). Absent otherwise, so a turn never
+ * advertises delegation it cannot perform. */
 export function buildToolset(
   outbox: Outbox,
   mcp?: McpProposalSink,
   memory?: MemoryLearningSink,
   checkin?: CheckinSink,
+  delegation?: DelegationSink,
 ): {
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
@@ -860,6 +873,11 @@ export function buildToolset(
   if (checkin) {
     toolSchemas.push(checkinSchema);
     executors[CHECKIN_TOOL_NAME] = makeCheckin(checkin);
+  }
+  if (delegation && canDelegate(delegation)) {
+    // The schema enumerates the roster, so it is built per turn from the sink.
+    toolSchemas.push(delegateSchema(delegation.subagents));
+    executors[DELEGATE_TOOL_NAME] = makeDelegate(delegation);
   }
   return { toolSchemas, executors };
 }

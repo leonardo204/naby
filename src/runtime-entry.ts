@@ -436,6 +436,24 @@ export {
   type LedgerKind,
 } from './runtime/growth.js';
 
+// -- naby_delegate (Phase 2.5, M4b) ------------------------------------------
+// Subagents on an engine with no native ones: the AI-SDK path IGNORED
+// SubagentSpec, so which engine was selected silently changed what the app could
+// do. The nested turn runs behind the SAME gate, `toolRefs` only ever narrows, and
+// depth is capped.
+export {
+  makeDelegate,
+  delegateSchema,
+  canDelegate,
+  findSubagent,
+  validateDelegateInput,
+  DELEGATE_TOOL_NAME,
+  MAX_DELEGATION_DEPTH,
+  DELEGATE_TASK_MAX,
+  type DelegationSink,
+  type DelegationResult,
+} from './runtime/delegate.js';
+
 // -- taking a grown agent with you (Phase 3, P3-M6) --------------------------
 // Pure packaging: a stock Claude Code subagent `.md` (learned facts inlined, so
 // one file is enough) plus a lossless `.naby.json` sidecar. `proposed`, `session`
