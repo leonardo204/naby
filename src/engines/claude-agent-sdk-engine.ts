@@ -196,14 +196,11 @@ export function buildQueryOptions(args: {
     // pass in `mcpServers` (the in-process `nabytools` server, which already
     // carries Naby's registry — app.db mcp_servers). It is MCP-specific and does
     // NOT affect CLAUDE.md/hooks, which still load via settingSources above.
-    // STREAM THE ANSWER AS IT IS WRITTEN.
-    //
-    // Without this the SDK yields only COMPLETE assistant messages, so nothing
-    // reaches the screen until a whole message is finished. On a real task — where
-    // the model thinks, reads files, then writes a long answer — that reads as a
-    // frozen app: reported as "over a minute of thinking and no response at all".
-    // The shell already converts every text event into a `content_block_delta`, so
-    // the render path existed; the deltas did not.
+    // Needed for the REASONING stream: without it the SDK yields only complete
+    // assistant messages and the collapsed thinking block stays empty until the
+    // very end, which is exactly the silence this was meant to fix. The answer's
+    // own text deltas are read from these events but NOT forwarded — see the
+    // message loop for why.
     includePartialMessages: true,
     strictMcpConfig: true,
     // NOTE: allowedTools is deliberately UNSET — listing our tool there
@@ -1089,10 +1086,22 @@ export class ClaudeAgentSdkEngine implements Engine {
             // A token-level delta. Pushed with `partial: true` so the consumer
             // RENDERS it without accumulating: the complete message follows as its
             // own non-partial event, and counting both would double the text.
-            const delta = readTextDelta(msg);
-            if (delta) channel.push({ kind: 'text', role: 'assistant', text: delta, partial: true });
-            // Reasoning streams on the same channel as the answer but as its OWN
-            // kind, so the consumer can show it without it becoming the reply.
+            // ANSWER TEXT DELTAS ARE DELIBERATELY NOT PUSHED.
+            //
+            // Pushing them streamed the reply token by token, and it broke the
+            // rendering: the answer came out as dozens of separate bubbles split
+            // mid-word, one per flush. I could not find the cause by reading the
+            // client, and a broken transcript is worse than a late one — so the
+            // answer is back to arriving as complete messages (the behaviour that
+            // was known good) while the REASONING still streams below.
+            //
+            // `readTextDelta` stays exported and tested: it is the piece a proper
+            // fix needs, and re-deriving it later would be re-doing work.
+            //
+            // Reasoning streams on the same channel but as its OWN kind, so the
+            // consumer shows it without it becoming the reply. Its target is a
+            // collapsed block whose text is appended by a separate reducer path,
+            // which is why it does not hit whatever splits the answer.
             const thought = readThinkingDelta(msg);
             if (thought) channel.push({ kind: 'thinking', text: thought, partial: true });
           } else if (msg.type === 'assistant') {
