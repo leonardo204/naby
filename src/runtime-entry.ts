@@ -240,6 +240,7 @@ export {
   resolveClaudeAgentSdkPath,
   // Asks the LOCAL sign-in which models it may use, so the chat bar's list is not
   // a constant that goes stale the day a new model ships.
+  readTextDelta,
   probeClaudeModels,
   MODEL_PROBE_TIMEOUT_MS,
   MODEL_PROBE_RETRY_TIMEOUT_MS,

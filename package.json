@@ -55,7 +55,8 @@
     "spike:export": "tsx src/spikes/spike-export.ts",
     "spike:import": "tsx src/spikes/spike-import.ts",
     "spike:delegate": "npm run build:runtime && tsx src/spikes/spike-delegate.ts",
-    "spike:bootstrap": "tsx src/spikes/spike-bootstrap.ts"
+    "spike:bootstrap": "tsx src/spikes/spike-bootstrap.ts",
+    "spike:stream": "tsx src/spikes/spike-stream.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",

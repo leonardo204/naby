@@ -196,6 +196,15 @@ export function buildQueryOptions(args: {
     // pass in `mcpServers` (the in-process `nabytools` server, which already
     // carries Naby's registry — app.db mcp_servers). It is MCP-specific and does
     // NOT affect CLAUDE.md/hooks, which still load via settingSources above.
+    // STREAM THE ANSWER AS IT IS WRITTEN.
+    //
+    // Without this the SDK yields only COMPLETE assistant messages, so nothing
+    // reaches the screen until a whole message is finished. On a real task — where
+    // the model thinks, reads files, then writes a long answer — that reads as a
+    // frozen app: reported as "over a minute of thinking and no response at all".
+    // The shell already converts every text event into a `content_block_delta`, so
+    // the render path existed; the deltas did not.
+    includePartialMessages: true,
     strictMcpConfig: true,
     // NOTE: allowedTools is deliberately UNSET — listing our tool there
     // would auto-approve it and silently shadow the gate.
@@ -267,6 +276,26 @@ async function loadAgentSdk(): Promise<AgentSdk> {
     });
   }
   return cachedSdk;
+}
+
+/**
+ * The text of one streaming delta, or '' when the event carries none.
+ *
+ * Reads defensively: `stream_event` wraps the raw Anthropic stream, whose shape is
+ * the provider's rather than ours, and a message-level or content-block-start event
+ * carries no text at all. THINKING deltas are deliberately not returned — they are
+ * not the answer, and rendering them as assistant text would put reasoning in the
+ * transcript as if it were the reply.
+ */
+export function readTextDelta(msg: unknown): string {
+  if (!msg || typeof msg !== 'object') return '';
+  const event = (msg as { event?: unknown }).event as
+    | { type?: string; delta?: { type?: string; text?: string } }
+    | undefined;
+  if (!event || event.type !== 'content_block_delta') return '';
+  const d = event.delta;
+  if (!d || d.type !== 'text_delta') return '';
+  return typeof d.text === 'string' ? d.text : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1061,12 @@ export class ClaudeAgentSdkEngine implements Engine {
               providerId: input.model.providerId,
               model: msg.model,
             });
+          } else if (msg.type === 'stream_event') {
+            // A token-level delta. Pushed with `partial: true` so the consumer
+            // RENDERS it without accumulating: the complete message follows as its
+            // own non-partial event, and counting both would double the text.
+            const delta = readTextDelta(msg);
+            if (delta) channel.push({ kind: 'text', role: 'assistant', text: delta, partial: true });
           } else if (msg.type === 'assistant') {
             const text = extractText(msg.message.content);
             if (text) channel.push({ kind: 'text', role: 'assistant', text });
