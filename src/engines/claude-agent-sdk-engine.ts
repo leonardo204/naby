@@ -287,6 +287,17 @@ async function loadAgentSdk(): Promise<AgentSdk> {
  * not the answer, and rendering them as assistant text would put reasoning in the
  * transcript as if it were the reply.
  */
+export function readThinkingDelta(msg: unknown): string {
+  if (!msg || typeof msg !== 'object') return '';
+  const event = (msg as { event?: unknown }).event as
+    | { type?: string; delta?: { type?: string; thinking?: string } }
+    | undefined;
+  if (!event || event.type !== 'content_block_delta') return '';
+  const d = event.delta;
+  if (!d || d.type !== 'thinking_delta') return '';
+  return typeof d.thinking === 'string' ? d.thinking : '';
+}
+
 export function readTextDelta(msg: unknown): string {
   if (!msg || typeof msg !== 'object') return '';
   const event = (msg as { event?: unknown }).event as
@@ -652,6 +663,19 @@ function lastUserImages(messages: EngineRunInput['messages']): RuntimeImage[] | 
     if (m?.role === 'user') return m.images;
   }
   return undefined;
+}
+
+/** Complete `thinking` blocks out of an assistant message's content. Mirrors
+ *  `extractText`; the field is `thinking`, not `text`. */
+function extractThinking(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter(
+      (b): b is { type: 'thinking'; thinking: string } =>
+        !!b && typeof b === 'object' && (b as { type?: unknown }).type === 'thinking',
+    )
+    .map((b) => String(b.thinking ?? ''))
+    .join('');
 }
 
 /**
@@ -1067,8 +1091,16 @@ export class ClaudeAgentSdkEngine implements Engine {
             // own non-partial event, and counting both would double the text.
             const delta = readTextDelta(msg);
             if (delta) channel.push({ kind: 'text', role: 'assistant', text: delta, partial: true });
+            // Reasoning streams on the same channel as the answer but as its OWN
+            // kind, so the consumer can show it without it becoming the reply.
+            const thought = readThinkingDelta(msg);
+            if (thought) channel.push({ kind: 'thinking', text: thought, partial: true });
           } else if (msg.type === 'assistant') {
             const text = extractText(msg.message.content);
+            // Complete thinking blocks, for the case where nothing streamed (a
+            // replayed message, or a provider that sends the block whole).
+            const thought = extractThinking(msg.message.content);
+            if (thought) channel.push({ kind: 'thinking', text: thought });
             if (text) channel.push({ kind: 'text', role: 'assistant', text });
             if (msg.error) {
               channel.push({

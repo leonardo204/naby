@@ -14,11 +14,16 @@
 //       fix in one flag, so it is asserted on the SAME function the engine calls.
 //   (b) A text delta is read out of the raw provider event.
 //   (c) A THINKING delta is NOT read as answer text — reasoning must not land in
-//       the transcript as if it were the reply.
+//       the transcript as if it were the reply. It is read by its OWN function, so
+//       the collapsed block gets it and the answer does not.
 //   (d) Event shapes that carry no text yield '' rather than throwing: `stream_event`
 //       wraps the provider's stream, whose shape is not ours to assume.
 
-import { buildQueryOptions, readTextDelta } from '../engines/claude-agent-sdk-engine.js';
+import {
+  buildQueryOptions,
+  readTextDelta,
+  readThinkingDelta,
+} from '../engines/claude-agent-sdk-engine.js';
 import type { EngineRunInput } from '../runtime/engine.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -67,9 +72,13 @@ function record(name: string, pass: boolean, evidence: string): void {
     `-> "${readTextDelta(textDelta)}"`,
   );
   record(
-    '(c) a THINKING delta is not read as answer text',
-    readTextDelta(thinkingDelta) === '',
-    `-> "${readTextDelta(thinkingDelta)}"`,
+    '(c) a thinking delta is not answer text, and IS read as reasoning',
+    readTextDelta(thinkingDelta) === '' &&
+      readThinkingDelta(thinkingDelta) === 'hmm' &&
+      // And the reverse: an answer delta is not mistaken for reasoning, or the
+      // collapsed block would duplicate the reply.
+      readThinkingDelta(textDelta) === '',
+    `asText="${readTextDelta(thinkingDelta)}" asThinking="${readThinkingDelta(thinkingDelta)}"; text delta asThinking="${readThinkingDelta(textDelta)}"`,
   );
   const empties: unknown[] = [
     {},
@@ -81,7 +90,7 @@ function record(name: string, pass: boolean, evidence: string): void {
     null,
     undefined,
   ];
-  const bad = empties.filter((e) => readTextDelta(e) !== '');
+  const bad = empties.filter((e) => readTextDelta(e) !== '' || readThinkingDelta(e) !== '');
   record(
     '(d) events with no text yield an empty string rather than throwing',
     bad.length === 0,

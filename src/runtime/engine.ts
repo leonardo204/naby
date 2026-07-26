@@ -175,6 +175,16 @@ export type EngineEvent =
       text: string;
       partial?: boolean;
     }
+  /**
+   * The model's REASONING, not its reply.
+   *
+   * Kept a separate kind rather than folded into `text` on purpose: a consumer
+   * that renders thinking as the answer puts working-out into the transcript as
+   * if it were the response, which is worse than not showing it. A distinct kind
+   * forces every consumer to decide what to do with it — the shell renders it in
+   * a collapsed block, and the transcript copy never includes it.
+   */
+  | { kind: 'thinking'; text: string; partial?: boolean }
   | { kind: 'tool_request'; toolCallId: string; toolName: string; input: unknown }
   | {
       kind: 'gate_result';
