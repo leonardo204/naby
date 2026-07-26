@@ -238,7 +238,13 @@ export {
   ClaudeAgentSdkEngine,
   isClaudeAgentSdkAvailable,
   resolveClaudeAgentSdkPath,
+  // Asks the LOCAL sign-in which models it may use, so the chat bar's list is not
+  // a constant that goes stale the day a new model ships.
+  probeClaudeModels,
+  MODEL_PROBE_TIMEOUT_MS,
+  MODEL_PROBE_RETRY_TIMEOUT_MS,
   type ClaudeEngineDiagnostics,
+  type ClaudeModelInfo,
 } from './engines/claude-agent-sdk-engine.js';
 
 // Whether the LOCAL Claude sign-in the dev engine runs on actually exists and

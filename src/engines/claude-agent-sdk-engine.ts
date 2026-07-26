@@ -270,6 +270,154 @@ async function loadAgentSdk(): Promise<AgentSdk> {
 }
 
 // ---------------------------------------------------------------------------
+// WHICH MODELS THIS SIGN-IN ACTUALLY HAS
+//
+// The chat bar's model list was a hand-curated constant, which means it goes
+// stale the day a new model ships and the app has to be rebuilt to name it. The
+// SDK already knows the answer — `Query.supportedModels()` reports what the LOCAL
+// sign-in is entitled to, which is strictly better than any list we could
+// maintain: it reflects the user's own plan rather than a guess about it.
+//
+// HOW THIS AVOIDS SPENDING A TURN. `query()` connects and initializes before it
+// processes any prompt, so the probe hands it an AsyncIterable prompt that never
+// yields. The CLI comes up, answers the initialize request, and is aborted — no
+// message is ever sent, so nothing is billed and no session is written.
+//
+// Best-effort by contract: not signed in, SDK absent, CLI slow to start — all of
+// them return undefined and the caller falls back to its curated list. A model
+// picker that throws would be worse than one that is a few weeks out of date.
+// ---------------------------------------------------------------------------
+
+/** One model the local sign-in may use, as the SDK reports it. */
+export type ClaudeModelInfo = {
+  value: string;
+  displayName: string;
+  description?: string;
+  /** Canonical id an alias resolves to (`opus` → `claude-opus-5`). */
+  resolvedModel?: string;
+  supportsEffort?: boolean;
+  supportedEffortLevels?: string[];
+};
+
+/**
+ * Two timeouts, because the two failure modes want opposite things.
+ *
+ * Measured on a signed-in machine: a WARM probe answers in 0.6–1.6s; a COLD first
+ * spawn took 22s; and roughly every other attempt gets stuck behind the previous
+ * CLI's teardown and never answers at all (see `probeClaudeModels`).
+ *
+ * A single generous limit made the stuck case cost 45s before the retry could
+ * rescue it — 48s for a menu, which is indistinguishable from broken. A single
+ * tight limit would fail a genuine cold start. So the FIRST attempt is short (it
+ * either answers fast or is the stuck one) and the RETRY is generous (it is the
+ * one that may be paying for a cold start). Worst realistic case is ~8s + cold
+ * start, and the caller never blocks on either: the picker shows its fallback
+ * meanwhile and swaps the live list in when it lands.
+ */
+export const MODEL_PROBE_TIMEOUT_MS = 8_000;
+export const MODEL_PROBE_RETRY_TIMEOUT_MS = 45_000;
+
+/**
+ * Ask the local sign-in for its model list, retrying ONCE.
+ *
+ * WHY A RETRY, STATED HONESTLY: measured back-to-back, probes came out
+ * success / timeout / success / success. Closing the generator (see below) fixed
+ * the later pairs but not the second attempt in a fresh process, and I did not
+ * find the cause — something in the SDK's first teardown is not finished when the
+ * next `query()` starts. One retry after a short pause turns an observably flaky
+ * call into a reliable one, which is the right trade for a model picker; it is a
+ * workaround for a cause still unknown, not an explanation of it.
+ */
+export async function probeClaudeModels(opts?: {
+  cwd?: string;
+  timeoutMs?: number;
+}): Promise<ClaudeModelInfo[] | undefined> {
+  const first = await probeOnce(opts);
+  if (first) return first;
+  await new Promise((r) => setTimeout(r, PROBE_RETRY_DELAY_MS));
+  return probeOnce({ ...opts, timeoutMs: opts?.timeoutMs ?? MODEL_PROBE_RETRY_TIMEOUT_MS });
+}
+
+/** Pause before the single retry — long enough for the previous CLI to be gone,
+ *  short enough to stay inside a menu interaction. */
+const PROBE_RETRY_DELAY_MS = 400;
+
+async function probeOnce(opts?: {
+  cwd?: string;
+  timeoutMs?: number;
+}): Promise<ClaudeModelInfo[] | undefined> {
+  let sdk: AgentSdk;
+  try {
+    sdk = await loadAgentSdk();
+  } catch {
+    return undefined;
+  }
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), opts?.timeoutMs ?? MODEL_PROBE_TIMEOUT_MS);
+  // `Query` extends AsyncGenerator, and ABORTING IS NOT CLOSING IT. Measured:
+  // probe → probe → probe alternated success / timeout / success, because the
+  // previous CLI was still holding on and the next `query()` waited for it.
+  // Calling `.return()` is what actually finishes the generator and lets the child
+  // go, so two probes in a row both answer.
+  let query: { return?: (v?: unknown) => Promise<unknown> } | undefined;
+  try {
+    // A prompt that never yields: the CLI initializes and then waits, which is
+    // exactly the window in which `supportedModels()` can be asked.
+    const idlePrompt = (async function* () {
+      await new Promise<void>((resolve) => {
+        if (ac.signal.aborted) return resolve();
+        ac.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    })();
+    const q = sdk.query({
+      prompt: idlePrompt as never,
+      options: {
+        abortController: ac,
+        ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+      } as never,
+    }) as unknown as {
+      supportedModels?: () => Promise<unknown[]>;
+      return?: (v?: unknown) => Promise<unknown>;
+    };
+    query = q;
+    if (typeof q.supportedModels !== 'function') return undefined;
+    const raw = await q.supportedModels();
+    if (!Array.isArray(raw)) return undefined;
+    const models: ClaudeModelInfo[] = [];
+    for (const item of raw) {
+      const r = (item ?? {}) as Record<string, unknown>;
+      const value = typeof r.value === 'string' ? r.value : '';
+      if (!value) continue;
+      models.push({
+        value,
+        displayName: typeof r.displayName === 'string' && r.displayName ? r.displayName : value,
+        ...(typeof r.description === 'string' && r.description ? { description: r.description } : {}),
+        ...(typeof r.resolvedModel === 'string' && r.resolvedModel
+          ? { resolvedModel: r.resolvedModel }
+          : {}),
+        ...(typeof r.supportsEffort === 'boolean' ? { supportsEffort: r.supportsEffort } : {}),
+        ...(Array.isArray(r.supportedEffortLevels)
+          ? { supportedEffortLevels: r.supportedEffortLevels.filter((x): x is string => typeof x === 'string') }
+          : {}),
+      });
+    }
+    return models.length > 0 ? models : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timeout);
+    ac.abort();
+    // Close the generator so the SDK tears its CLI down now rather than whenever
+    // it notices the abort. Best-effort: a throw here would mask the result.
+    try {
+      await query?.return?.();
+    } catch {
+      /* already finished */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Small async channel: hooks, the tool handler, and the query-message loop all
 // push EngineEvents here; run() yields them out in order.
 // ---------------------------------------------------------------------------
