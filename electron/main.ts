@@ -16,6 +16,7 @@
 
 import { app, BrowserWindow, dialog } from 'electron';
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +37,79 @@ import { boot, createMainWindow, type BootResult } from './boot.js';
 // the resolved path.
 app.setName('Naby');
 
+type SqliteHandle = {
+  prepare(sql: string): { get(): unknown };
+  close(): void;
+};
+
+/**
+ * Does this database hold anything a user would miss?
+ *
+ * `undefined` means "could not tell" — locked, corrupt, or not a database at
+ * all. Each caller resolves that ambiguity in the direction that keeps data:
+ * never clobber a target we cannot read, never move a source we cannot read.
+ *
+ * FILE SIZE CANNOT ANSWER THIS, and assuming it could is what broke: an empty
+ * database still carries its full schema and a seeded builtin agent, so a
+ * pristine placeholder is thousands of bytes. Gating on `size > 0` read that
+ * placeholder as live data and left every real session stranded in the old home.
+ *
+ * `node:sqlite` is loaded lazily, with the same targeted ExperimentalWarning
+ * suppression sqlite-store.ts documents at length — a static import is hoisted
+ * above any suppression, so the warning would escape before it could be muted.
+ */
+function holdsUserData(dbPath: string): boolean | undefined {
+  if (!existsSync(dbPath) || statSync(dbPath).size === 0) return false;
+
+  let db: SqliteHandle | undefined;
+  const emitWarning = process.emitWarning;
+  try {
+    process.emitWarning = ((warning: string | Error, ...rest: unknown[]): void => {
+      const message = typeof warning === 'string' ? warning : (warning?.message ?? '');
+      const first = rest[0];
+      const type =
+        typeof first === 'string' ? first : ((first as { type?: string } | undefined)?.type ?? '');
+      if (type === 'ExperimentalWarning' && /SQLite/i.test(message)) return;
+      (emitWarning as (...a: unknown[]) => void).call(process, warning, ...rest);
+    }) as typeof process.emitWarning;
+
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as {
+      DatabaseSync: new (path: string) => SqliteHandle;
+    };
+    db = new DatabaseSync(dbPath);
+
+    // Opened read-write on purpose: a read-only open fails outright on a
+    // database left with a hot -wal, which is exactly the state a crashed
+    // session leaves behind — the one case where the data matters most.
+    let counted = false;
+    for (const table of ['sessions', 'messages', 'projects', 'memory_items']) {
+      try {
+        const row = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as
+          | { n: number }
+          | undefined;
+        counted = true;
+        if (Number(row?.n ?? 0) > 0) return true;
+      } catch {
+        // Absent in an older schema. Not an answer either way — ask the next one.
+      }
+    }
+
+    // Not one of the four tables exists. This opened, but it is not a Naby
+    // database — a corrupt or foreign file, which is emphatically not the same
+    // as an empty one and must not be treated as free space.
+    return counted ? false : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    process.emitWarning = emitWarning;
+    try {
+      db?.close();
+    } catch {
+      // Nothing left to do with a handle we are discarding anyway.
+    }
+  }
+}
+
 /**
  * Move a legacy database into the unified ~/.naby home (the launch-mode-
  * independent location boot() now points every store at).
@@ -49,9 +123,10 @@ function migrateLegacyUserData(): void {
   const target = join(homedir(), '.naby');
   const targetDb = join(target, 'app.db');
 
-  // If the unified home already holds a real database, keep it — never clobber.
-  // (A 0-byte placeholder counts as absent; see the note below.)
-  if (existsSync(targetDb) && statSync(targetDb).size > 0) return;
+  // If the unified home already holds real data, keep it — never clobber. An
+  // unreadable target counts as occupied for the same reason: "I cannot tell"
+  // is not permission to overwrite.
+  if (holdsUserData(targetDb) !== false) return;
 
   // Legacy homes the DB may have lived in before it was unified, newest-intent
   // first: the packaged/dev userData dir ("<userData>/naby") and the pre-setName
@@ -68,10 +143,11 @@ function migrateLegacyUserData(): void {
     //
     // Gate on the DATABASE, not on the directory: boot creates directories (for
     // credentials) before this runs, so a directory check is permanently true.
-    // And an empty file counts as absent — a 0-byte placeholder must not be
-    // mistaken for real data (in either direction).
+    // And gate on its CONTENTS, not its size: a candidate that only ever got as
+    // far as a schema has nothing to give, and claiming it would stop the search
+    // before the home that does hold the sessions is ever examined.
     const fromDb = join(src, 'app.db');
-    if (!existsSync(fromDb) || statSync(fromDb).size === 0) continue;
+    if (holdsUserData(fromDb) !== true) continue;
 
     try {
       mkdirSync(target, { recursive: true });
