@@ -104,6 +104,14 @@ realPolicy({ store, scope, scopeKey, requestApproval, safeDefaults })
 
 **toolRef 문법을 정하고 문서화한다**(신규): `builtin:Read` | `mcp:<server>/<tool>` | `runtime:fetch_url`.
 
+> **갱신(2026-07-27)** — `runtime:` 네임스페이스가 워크스페이스 도구 일곱 개로 늘었다. 읽기는 `read_file`·`list_dir`·`glob`·`grep`, 쓰기는 `write_file`·`edit_file`, 실행은 `run_command`이며 `src/runtime/fs-tools.ts`에 있다. 이 도구들이 생긴 이유는 Agent SDK가 아닌 프로바이더(ai-sdk 경로, 즉 ChatGPT·OpenAI 구독)에는 파일을 읽을 수단이 아예 없었기 때문이다. 이는 프로바이더의 능력 차이가 아니라 우리 레이어의 구멍이므로 런타임에서 메운다.
+>
+> 이 변경은 게이트에 전제 하나를 깨뜨린다. `phase1HarnessFloor`는 "런타임 도구는 우리 것이니 전부 허용"이었는데, 모든 런타임 도구가 메모나 HTTP GET이던 동안에만 참이다. 파일을 쓰는 도구에는 성립하지 않으므로 `MUTATING_TOOLS`를 floor 안에서 제외한다. 제외를 호출부가 아니라 floor 안에서 하는 이유는, 앞으로 어떤 조립 지점도 실수로 넘길 수 없게 하기 위해서다.
+>
+> 플랜 모드는 이 엔진에서 아무 일도 하지 않고 있었다(클라이언트가 claude 엔진에만 `permissionMode`를 보냈다). 이제 모든 엔진에 보내고, naby 엔진은 쓰기 도구를 스키마에서 빼고 floor를 강제한다. 게이트만 걸고 도구를 남겨두지 않는 이유는, 보이는데 매번 거부당하는 도구는 모드가 작동하는 것이 아니라 비서가 고장 난 것으로 읽히기 때문이다.
+
+**`/` 팔레트는 하네스만 보여준다**(2026-07-27). cockpit 내장 명령 여섯 개(`/qa`·`/ap`·`/fx`·`/ex`·`/go`·`/new-branch`)와 클라이언트에 인라인으로 있던 `/plan`을 삭제한다. 설정 어디에도 항목이 없는 명령을 사용자의 하네스와 섞어 보여주면 "이건 어디서 온 것이고 어떻게 고치나"를 UI에서 답할 수 없다. 함께 삭제한 것은 내장 전용 장치다 — 한/영 프롬프트 본문, 본문을 `~/.cockpit/skills/<verb>/SKILL.md`로 쓰고 다시 읽던 왕복, `~/.cockpit/skills.json` 읽기(F1-03 트림에서 작성자가 삭제되어 쓰는 코드가 없다). 남는 규칙은 하나다. **팔레트와 리졸버가 같은 하네스 행을 읽는다.** 메뉴가 제안하는 동사는 반드시 확장되고, 메뉴에 없는 동사는 조용히 동작하지 않는다.
+
 **resolveToolRefs(refs, available)** — `src/runtime/harness-tools.ts`(신규)
 - refs를 이번 턴에 쓸 수 있는 도구(builtin·mcp·runtime)에 맞춰 `{schemas, executors}` 부분집합을 만든다.
 - 해석하지 못한 ref가 있으면 스킬 **지시문은 주입하되** 빠진 도구를 세어 로그에 남긴다. 증상 없이 반쪽만 실행하는 일은 만들지 않는다(기존 원칙).
