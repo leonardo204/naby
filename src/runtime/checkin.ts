@@ -29,6 +29,7 @@
 // cheap instead of impossible.
 
 import { DANGEROUS_BUILTINS } from './gate.js';
+import { MUTATING_TOOLS } from './fs-tools.js';
 
 // ---------------------------------------------------------------------------
 // Which actions are consequential enough to be scored
@@ -40,7 +41,15 @@ import { DANGEROUS_BUILTINS } from './gate.js';
  * tools, so our outbound tools are named here rather than in the gate — the gate
  * decides permission, this decides whether an action is worth measuring.
  */
-export const CONSEQUENTIAL_RUNTIME_TOOLS: readonly string[] = ['send_message'];
+export const CONSEQUENTIAL_RUNTIME_TOOLS: readonly string[] = [
+  'send_message',
+  // The workspace tools that write or execute. Named here as well as in the
+  // gate for the reason above: the gate decides whether a call is permitted,
+  // this decides whether it is the kind of act the trust meter is measuring.
+  // Omitting them would let the agent edit a project all day and register as
+  // having done nothing worth being asked about.
+  ...MUTATING_TOOLS,
+];
 
 /**
  * Whether a call is the kind of action a check-in is ABOUT: it mutates the
@@ -70,7 +79,17 @@ export function isConsequentialTool(bareName: string): boolean {
  * so a wrong guess here cannot move a stage. Kept honest rather than optimistic.
  */
 export function isReversibleAction(bareName: string): boolean {
-  return bareName === 'Write' || bareName === 'Edit' || bareName === 'MultiEdit' || bareName === 'NotebookEdit';
+  return (
+    bareName === 'Write' ||
+    bareName === 'Edit' ||
+    bareName === 'MultiEdit' ||
+    bareName === 'NotebookEdit' ||
+    // Our own file writes take the same snapshot path, so they are recoverable
+    // for the same reason. `run_command` is deliberately absent: a shell command
+    // is not.
+    bareName === 'write_file' ||
+    bareName === 'edit_file'
+  );
 }
 
 // ---------------------------------------------------------------------------

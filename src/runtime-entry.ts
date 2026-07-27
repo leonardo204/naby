@@ -96,6 +96,31 @@ export {
   type OutboxEntry,
 } from './runtime/tools.js';
 
+// The WORKSPACE toolset — read/search/edit/run over the open project, so a turn
+// on ANY provider can look at the code instead of asking the user to paste it.
+// Merged alongside MCP in the shell rather than folded into `buildToolset`,
+// because it needs a `cwd` and a permission mode that only the composition root
+// knows. `MUTATING_TOOLS` is what the gate floor keys on.
+export {
+  buildWorkspaceTools,
+  MUTATING_TOOLS,
+  READONLY_TOOLS,
+  makeReadFile,
+  makeListDir,
+  makeGlob,
+  makeGrep,
+  makeWriteFile,
+  makeEditFile,
+  makeRunCommand,
+  readFileSchema,
+  listDirSchema,
+  globSchema,
+  grepSchema,
+  writeFileSchema,
+  editFileSchema,
+  runCommandSchema,
+} from './runtime/fs-tools.js';
+
 // Persistence (F1-05). The shell depends on the `Store` INTERFACE; the driver
 // it constructs is its own choice. SqliteStore is the durable one — note that
 // `node:sqlite` is experimental and its availability inside Electron is still

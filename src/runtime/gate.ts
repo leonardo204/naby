@@ -9,6 +9,7 @@
 // and, via timestamps, that it saw it BEFORE the executor ran.
 
 import type { Gate, GateDecision, ToolCall } from './engine.js';
+import { MUTATING_TOOLS } from './fs-tools.js';
 
 export type GateLogEntry = {
   seq: number;
@@ -155,8 +156,21 @@ export const DANGEROUS_BUILTINS: readonly string[] = [
  *   executors, gated for real in Phase 2.
  */
 export function phase1HarnessFloor(runtimeToolNames: readonly string[] = []): DecisionPolicy {
-  const allow = new Set<string>([...runtimeToolNames, ...OBSERVATION_BUILTINS]);
-  const dangerous = new Set<string>(DANGEROUS_BUILTINS);
+  // OUR OWN TOOLS ARE NOT AUTOMATICALLY SAFE.
+  //
+  // The allowance for `runtimeToolNames` reads as "they are our executors, we
+  // gate them for real in Phase 2", and that was true while every runtime tool
+  // was a note or an HTTP GET. It stopped being true the moment the runtime grew
+  // write_file / edit_file / run_command: passing those through would make
+  // read-only observation mode permit the exact thing it exists to forbid. They
+  // are subtracted here rather than at the call site so no future composition
+  // root can hand them in by accident.
+  const mutatingRuntime = new Set<string>(MUTATING_TOOLS);
+  const allow = new Set<string>([
+    ...runtimeToolNames.filter((n) => !mutatingRuntime.has(n)),
+    ...OBSERVATION_BUILTINS,
+  ]);
+  const dangerous = new Set<string>([...DANGEROUS_BUILTINS, ...MUTATING_TOOLS]);
   return (call: ToolCall): GateDecision => {
     if (dangerous.has(call.toolName)) {
       return {
