@@ -148,6 +148,10 @@ The Naby Layer owns projects, sessions, memory, and context (design §3.6). This
 
 **Sequencing**: B before C (routes need the store ops), C before E (UIs need the routes before their direct reads are removed), D alongside C (so newly created sessions carry a `cwd` the routes can group by). Verification of B–E belongs in [`phase-1-test-plan`](../test/phase-1-test-plan.md).
 
+**Correction — a view is not always a route.** Phase C is written per ROUTE, and that is not the same set as the readers. Recent has two surfaces: the maximized panel reads `/api/global-state`, but the sidebar dropdown is pushed over the `/ws/global-state` channel, which C never named. So re-backing the route left the dropdown on `~/.cockpit/state.json` and the two surfaces disagreed — an empty panel beside a full dropdown, and an unread badge that would not clear because the read and the "mark read" write landed in different stores. Both now build from one store-backed function (`server/state/recentSessions.ts`), and the WS change-watcher watches `app.db` rather than a file it does not read. **The rule this leaves behind: E's criterion is satisfied per SURFACE, not per route — enumerate the WS channels and SSR pages too.**
+
+**Every engine writes the store it is read from.** D records `cwd` on the Naby engine's own session lifecycle. Sessions run on any OTHER engine (claude/codex/ollama/kimi/deepseek) had no store row at all, so they were absent from every re-backed view and opened as an empty transcript — a hole no view-side change can close. The orchestrator now records them from its single `emit` choke point (`server/state/transcriptRecorder.ts`), with Naby opted out via `EngineSpec.persistsOwnTranscript` because its runtime already writes as it runs.
+
 ---
 
 ## References
