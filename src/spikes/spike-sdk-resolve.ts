@@ -38,6 +38,17 @@
 //   (f) NABY_APP_ROOT WINS over a resolvable module-relative anchor, so a
 //       packaged app uses ITS OWN copy rather than whatever stale checkout the
 //       frozen path happens to name on the machine it runs on.
+//   (g) ONE PREDICATE. The Claude account chip hides itself on
+//       `describeClaudeLogin().relevant`, which had its own private copy of the
+//       resolver; v1.5.2 shipped an app whose engine worked and whose chip was
+//       invisible. Asserted in both directions so a hardcoded `true` fails.
+//   (h) RESOLVED OUT OF THE ASAR. Reading through `app.asar` works — Electron
+//       patches fs. SPAWNING through one does not: `posix_spawn` is the OS's,
+//       and to the OS an asar is a file. The SDK locates its `claude` engine
+//       binary relative to its own module, so an archive path killed every turn
+//       with `spawn ENOTDIR` — with the SDK's stderr going into a buffer nobody
+//       read, so the reply bubble just vanished. Also asserts the rewrite is
+//       GUARDED: no twin on disk, no rewrite.
 //
 // NO NETWORK, NO KEYS, NO MODEL CALL. Prints PASS/FAIL per assertion; exits
 // non-zero on any FAIL. Cleans up its temp dirs.
@@ -53,7 +64,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -266,6 +277,43 @@ async function main(): Promise<void> {
       agreeWhenPresent && agreeWhenAbsent,
       `withAppRoot=${agreeWhenPresent} withoutAppRoot=${agreeWhenAbsent}`,
     );
+
+    // -- (h) resolve OUT of the asar, because spawn cannot read one ----------
+    // Reads through `app.asar` work (Electron patches fs); spawning through one
+    // does not (`posix_spawn` is the OS's, and to the OS an asar is a file). The
+    // SDK finds its `claude` engine binary relative to its own module, so an
+    // archive path made every turn die with `spawn ENOTDIR` — silently.
+    const asarRoot = mkdtempSync(join(tmpdir(), 'naby-sdk-asar-'));
+    tmpRoots.push(asarRoot);
+    const inAsar = join(asarRoot, 'app.asar');
+    const unpacked = join(asarRoot, 'app.asar.unpacked');
+    buildStubLayout(inAsar, '9.9.9-inside-asar');
+    buildStubLayout(unpacked, '9.9.9-unpacked');
+    process.env.NABY_APP_ROOT = inAsar;
+    const spawnable = bareRuntime.resolveClaudeAgentSdkPath();
+    record(
+      checks,
+      '(h) an app.asar hit is rewritten to the unpacked twin',
+      spawnable !== null && spawnable.includes(`${sep}app.asar.unpacked${sep}`),
+      `resolved=${spawnable?.includes('app.asar.unpacked') === true ? 'unpacked' : 'INSIDE ASAR'}`,
+    );
+
+    // The rewrite is guarded, not blind: with no twin on disk the archive path
+    // is left alone. Rewriting it there would turn a working read into a
+    // missing file — the failure electron-builder.yml warns about.
+    const lone = mkdtempSync(join(tmpdir(), 'naby-sdk-lonely-'));
+    tmpRoots.push(lone);
+    const loneAsar = join(lone, 'app.asar');
+    buildStubLayout(loneAsar, '9.9.9-no-twin');
+    process.env.NABY_APP_ROOT = loneAsar;
+    const untouched = bareRuntime.resolveClaudeAgentSdkPath();
+    record(
+      checks,
+      '(h) with no unpacked twin the archive path is left alone',
+      untouched !== null && untouched.startsWith(realpathSync(loneAsar)),
+      `resolved=${untouched === null ? 'null' : 'archive path kept'}`,
+    );
+    delete process.env.NABY_APP_ROOT;
   } finally {
     delete process.env.NABY_APP_ROOT;
     for (const dir of tmpRoots) rmSync(dir, { recursive: true, force: true });

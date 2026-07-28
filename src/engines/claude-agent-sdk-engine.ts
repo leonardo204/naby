@@ -49,7 +49,8 @@
 // into the in-process MCP handler is not something we want to depend on.
 
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type {
@@ -183,17 +184,40 @@ function sdkResolutionAnchors(): string[] {
 }
 
 /**
+ * Move a path out of `app.asar` and into `app.asar.unpacked`, WHEN that twin
+ * really exists.
+ *
+ * A path inside the archive is fine to READ — Electron patches `fs` so reads
+ * fall through to the unpacked copy. It is NOT fine to SPAWN from: `posix_spawn`
+ * and `LoadLibraryW` are the OS's, not Electron's, and to the OS `app.asar` is a
+ * FILE. The Agent SDK locates its `claude` engine binary relative to its own
+ * module, so importing it from the archive path made it spawn through
+ * `.../app.asar/.../claude-agent-sdk-darwin-arm64/claude` and die with
+ * `spawn ENOTDIR`. The turn ended right there, with the SDK's own stderr going
+ * into a buffer nobody read, so the answer bubble simply vanished.
+ *
+ * The `existsSync` guard is the whole difference between this and the naive
+ * `.replace('app.asar', 'app.asar.unpacked')` that electron-builder.yml warns
+ * against: a file that was never unpacked has no twin, and rewriting its path
+ * would turn a working read into a missing file.
+ */
+function preferUnpacked(p: string): string {
+  if (!p.includes(`${sep}app.asar${sep}`)) return p;
+  const twin = p.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
+  return existsSync(twin) ? twin : p;
+}
+
+/**
  * Where the Agent SDK lives, or null when it is genuinely not installed.
  *
- * Returns the FIRST anchor that resolves. A path inside `app.asar` is a correct
- * answer: the package is asarUnpack'd and Electron's patched fs redirects reads
- * to `app.asar.unpacked`, so both the import and the engine binary it spawns
- * land on real files.
+ * Returns the FIRST anchor that resolves, rewritten to the unpacked tree when
+ * one exists — see `preferUnpacked` for why reading and spawning disagree about
+ * what an asar is.
  */
 export function resolveClaudeAgentSdkPath(): string | null {
   for (const anchor of sdkResolutionAnchors()) {
     try {
-      return createRequire(anchor).resolve(AGENT_SDK_SPECIFIER);
+      return preferUnpacked(createRequire(anchor).resolve(AGENT_SDK_SPECIFIER));
     } catch {
       // Not here. Try the next anchor before concluding it is missing.
     }
@@ -1266,6 +1290,18 @@ export class ClaudeAgentSdkEngine implements Engine {
           }
         }
       } catch (e) {
+        // SAY WHAT THE SUBPROCESS SAID. `onStderr` fills `diagnostics.stderr`
+        // and, until this line, nothing ever read it: when the SDK failed to
+        // start its engine binary the turn ended with an empty transcript and
+        // not one word anywhere — no log, no error in the UI, just a reply
+        // bubble that appeared and vanished. Diagnosing it meant driving the
+        // packaged app's SDK by hand from outside. The buffer is the best
+        // evidence there is about a spawn failure, so it goes to the log.
+        const tail = diagnostics.stderr.join('').trim().slice(-2000);
+        console.error(
+          `[engine:claude-agent-sdk] turn failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        if (tail) console.error(`[engine:claude-agent-sdk] sdk stderr:\n${tail}`);
         channel.push({
           kind: 'error',
           message: e instanceof Error ? e.message : String(e),

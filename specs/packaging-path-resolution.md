@@ -2,7 +2,7 @@
 id: packaging-path-resolution
 title: 패키징 경로 해석과 릴리스 검증 규약
 type: interface
-version: 1.0.0
+version: 1.1.0
 status: active
 scope: 배포본에서 런타임이 파일과 패키지를 어떻게 찾는지, 그리고 릴리스가 실제로 동작하는지 무엇으로 확인하는지를 정한다. `import.meta.url`이 번들러에 따라 빌드 머신 경로로 굳는 문제와, 그 때문에 로컬 패키징 검증이 무효가 되는 문제를 다룬다. 강제 개발 모드의 문(門)도 같은 배포 경계 위에 있어 함께 둔다. 엔진 선택 규칙 자체는 phase-2-2.5-plan이 다룬다.
 related: [phase-1-desktop-shell, chatgpt-oauth-dev-provider, phase-1-contracts, personalized-agent-desktop-app]
@@ -44,6 +44,14 @@ file:///Users/runner/work/naby/naby/dist/naby-runtime.mjs
 순서를 지키는 이유는 적중률이 아니다. **배포본은 자기 사본을 써야 한다.** 같은 디스크에 굴러다니는 남의 체크아웃을 집으면 다른 버전이 물린다.
 
 `process.cwd()`는 기준점으로 **쓰지 않는다.** 공짜 폴백처럼 보이지만 실행 디렉터리의 체크아웃으로 새는 통로다. 굳은 빌드 경로와 같은 종류의 함정이다.
+
+### 읽기와 실행은 asar를 다르게 본다
+
+**asar 안의 경로는 읽을 수는 있어도 실행할 수는 없다.** Electron이 `fs`를 패치해 `app.asar/...` 읽기를 언팩된 사본으로 넘겨주지만, `posix_spawn`과 `LoadLibraryW`는 OS의 것이라 패치가 닿지 않는다. OS에게 `app.asar`는 디렉터리가 아니라 파일이므로 그 경로로 프로세스를 띄우면 `spawn ENOTDIR`이 난다.
+
+패키지 하나가 **하위 프로세스를 띄운다면** 그 패키지의 경로는 `app.asar.unpacked` 쪽으로 돌려야 한다. Agent SDK가 그렇다. 자기 모듈 위치를 기준으로 `claude` 엔진 바이너리를 찾기 때문에, 아카이브 경로에서 로드하면 바이너리 경로도 아카이브를 통과한다.
+
+돌릴 때는 **언팩된 쌍둥이가 실제로 있는지 확인하고** 돌린다. `electron-builder.yml`이 경고하는 무작정 `.replace('app.asar', 'app.asar.unpacked')`와 이 점이 다르다. 언팩되지 않은 파일에는 쌍둥이가 없고, 그런 경로를 바꾸면 멀쩡히 읽히던 파일이 사라진다.
 
 ### 패키지를 찾을 때 한 가지 더
 
@@ -89,7 +97,7 @@ file:///Users/runner/work/naby/naby/dist/naby-runtime.mjs
 
 ## 6. 스파이크
 
-`npm run spike:sdk-resolve` (8) · `npm run spike:devmode` (14)
+`npm run spike:sdk-resolve` (10) · `npm run spike:devmode` (14)
 
 `spike:sdk-resolve`는 임시 디렉터리에 **배포본 레이아웃을 재구성해서** 검사한다. 소스 체크아웃에서는 루트 `node_modules`가 항상 먼저 걸리므로 이 계열의 버그가 드러나지 않기 때문이다. 다음을 포함한다.
 
@@ -97,5 +105,6 @@ file:///Users/runner/work/naby/naby/dist/naby-runtime.mjs
 - 앱 루트가 모듈 기준 경로를 **이기는가**
 - 없는 것을 있다고 하지 않는가 (양방향)
 - 칩의 `relevant`와 엔진의 가용성이 **양방향으로** 일치하는가
+- asar 안에서 걸린 경로를 언팩된 쌍둥이로 돌리는가, 그리고 쌍둥이가 없으면 **건드리지 않는가**
 
 마지막 항목은 하드코딩된 `true`로는 통과할 수 없다. 수정을 되돌리면 실패하는 것까지 확인하고 넣었다. 스파이크를 추가할 때는 **고치기 전 상태에서 실패하는지** 먼저 본다. 통과만 하는 검사는 검사가 아니다.
