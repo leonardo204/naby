@@ -41,7 +41,7 @@
 
 - 셸 API(`/api/naby`)는 **dev 서버에서 500이 난다.** turbopack이 `node:sqlite`를 외부화하지 못한다. 반드시 prod 빌드 서버(`node server.mjs`, distDir `.next-prod`)로 확인한다.
 - 엔진 턴 루프를 고쳤으면 `npm run spike:autonomy`와 `npm run spike:02`를 먼저 돌린다. mock 모델로 실제 엔진·게이트·실행기를 구동해 회귀를 잡는다.
-- 스파이크는 `NABY_DB_PATH`를 임시 디렉터리로 돌린다. 실제 `~/.naby/app.db`를 건드리지 않는다.
+- **스파이크와 셸 테스트 모두 `NABY_DB_PATH`를 임시 경로로 돌린다.** 실제 `~/.naby/app.db`를 건드리지 않는다(셸은 `vitest.setup.ts`). 실 DB에 쓰면 테스트 세션이 최근 목록을 밀어낸다.
 - **배포본 경로 문제는 로컬 패키징본으로 검증되지 않는다.** Next(webpack)가 `import.meta.url`을 빌드 머신 절대 경로로 굳히므로, 이 기계에서는 고장난 코드도 통과한다. 릴리스는 draft로 올린 뒤 **GitHub에서 받은 아티팩트로** 확인하고 공개한다 → [패키징 경로 해석](specs/packaging-path-resolution.md)
 - 런타임에서 경로를 해석할 때 `NABY_APP_ROOT` → `COCKPIT_ROOT` → `import.meta.url` 순서를 지킨다. `process.cwd()`는 쓰지 않는다.
 - 판정 함수(`isClaudeAgentSdkAvailable` 같은 것)를 새로 만들기 전에 같은 질문에 답하는 함수가 있는지 먼저 찾는다. 사본이 둘이면 UI가 틀린 쪽을 믿는다.
