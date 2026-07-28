@@ -64,11 +64,20 @@ jobs:
           node-version: 22
           cache: npm
 
+      # GITHUB_TOKEN is here for `@vscode/ripgrep`, whose postinstall downloads a
+      # prebuilt binary through the GitHub API. Unauthenticated, that call is
+      # rate-limited per runner IP and returns 403 — which is how the macOS job
+      # failed on the first v1.0.0 attempt, after four retries, before any of our
+      # own code ran. The token only raises the rate limit; nothing is published.
       - name: Install root dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Install shell dependencies
         working-directory: shell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       # -----------------------------------------------------------------------
@@ -151,11 +160,20 @@ jobs:
           node-version: 22
           cache: npm
 
+      # GITHUB_TOKEN is here for `@vscode/ripgrep`, whose postinstall downloads a
+      # prebuilt binary through the GitHub API. Unauthenticated, that call is
+      # rate-limited per runner IP and returns 403 — which is how the macOS job
+      # failed on the first v1.0.0 attempt, after four retries, before any of our
+      # own code ran. The token only raises the rate limit; nothing is published.
       - name: Install root dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Install shell dependencies
         working-directory: shell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       # NO SIGNING STEP, DELIBERATELY (design §6.2). electron-updater skips
@@ -209,11 +227,20 @@ jobs:
       - name: Install packaging tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fakeroot dpkg rpm
 
+      # GITHUB_TOKEN is here for `@vscode/ripgrep`, whose postinstall downloads a
+      # prebuilt binary through the GitHub API. Unauthenticated, that call is
+      # rate-limited per runner IP and returns 403 — which is how the macOS job
+      # failed on the first v1.0.0 attempt, after four retries, before any of our
+      # own code ran. The token only raises the rate limit; nothing is published.
       - name: Install root dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Install shell dependencies
         working-directory: shell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       # BOTH targets ship, and the .deb is the one that actually launches on a
