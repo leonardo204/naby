@@ -46,11 +46,14 @@
 // reported "signed out" — that would tell the user to run a command that fixes
 // nothing. `unknown` renders as a muted dot and blocks nothing.
 
-import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
+
+// THE one definition of "is the Agent SDK reachable from here". Importing it
+// rather than re-deriving it is the point: see `agentSdkResolvable` below.
+import { isClaudeAgentSdkAvailable } from './claude-agent-sdk-engine.js';
 
 // ---------------------------------------------------------------------------
 // The answer
@@ -249,17 +252,20 @@ function findClaudeCli(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * Whether the Agent SDK itself is present. Reused rather than reimplemented so
- * "the dev engine can run" has one definition.
+ * Whether the Agent SDK itself is present.
+ *
+ * This used to be a local `createRequire(import.meta.url).resolve(...)` under a
+ * comment claiming it was "reused rather than reimplemented" — it was a
+ * reimplementation, and it carried the whole bug on its own. When the engine's
+ * resolver learned that `import.meta.url` is constant-folded by webpack into the
+ * build machine's path (see resolveClaudeAgentSdkPath), this copy did not, so
+ * `relevant` stayed false in a shipped build and the Claude account chip
+ * rendered nothing while the engine itself worked fine.
+ *
+ * Now it genuinely is one definition. Two copies of a predicate is two answers
+ * to "can the dev engine run here", and the UI believed the wrong one.
  */
-function agentSdkResolvable(): boolean {
-  try {
-    createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');
-    return true;
-  } catch {
-    return false;
-  }
-}
+const agentSdkResolvable = isClaudeAgentSdkAvailable;
 
 /**
  * Read ONLY the two expiry timestamps (plus non-secret plan labels) out of the

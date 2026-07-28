@@ -65,6 +65,8 @@ function record(checks: Check[], name: string, pass: boolean, evidence: string):
 interface RuntimeExports {
   resolveClaudeAgentSdkPath(): string | null;
   isClaudeAgentSdkAvailable(): boolean;
+  /** `relevant` is what the Claude account chip hides itself on. */
+  describeClaudeLogin(opts?: Record<string, unknown>): { relevant: boolean };
 }
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -243,6 +245,27 @@ async function main(): Promise<void> {
       `answered=${preferred?.startsWith(otherReal) === true ? 'app root' : 'module-relative'}`,
     );
     delete process.env.NABY_APP_ROOT;
+
+    // -- (g) ONE definition of "can the dev engine run here" ----------------
+    // The Claude account chip hides itself on `describeClaudeLogin().relevant`,
+    // which had its OWN copy of the resolver. The copy was not fixed when the
+    // engine's was, so v1.5.2 shipped an app whose Claude engine worked while
+    // its account chip stayed invisible. Asserting the two agree — in BOTH
+    // directions, so a hardcoded `true` cannot pass — is what keeps the
+    // predicate single.
+    const agree = (rt: RuntimeExports): boolean =>
+      rt.describeClaudeLogin().relevant === rt.isClaudeAgentSdkAvailable();
+
+    process.env.NABY_APP_ROOT = stubRoot;
+    const agreeWhenPresent = agree(bareRuntime) && bareRuntime.describeClaudeLogin().relevant;
+    delete process.env.NABY_APP_ROOT;
+    const agreeWhenAbsent = agree(bareRuntime) && !bareRuntime.describeClaudeLogin().relevant;
+    record(
+      checks,
+      '(g) the account chip and the engine share one availability answer',
+      agreeWhenPresent && agreeWhenAbsent,
+      `withAppRoot=${agreeWhenPresent} withoutAppRoot=${agreeWhenAbsent}`,
+    );
   } finally {
     delete process.env.NABY_APP_ROOT;
     for (const dir of tmpRoots) rmSync(dir, { recursive: true, force: true });
