@@ -80,13 +80,18 @@ const esmBanner = {
 // app is a zip anyone can open, so a plaintext secret compiled into it is a
 // published secret. Absent key -> empty hash -> electron/devmode.ts reports the
 // feature unavailable and the UI hides it, so an official build has no door.
+//
+// The key is TRIMMED before hashing. The value arrives from a `.env` line or a
+// CI secret, and either can pick up a trailing newline on the way in — that
+// would bake the hash of a string no user can ever type, producing a build whose
+// door is visible and unopenable. Trimming both ends of the pipe (see the same
+// tolerance in electron/devmode.ts) removes that whole failure mode.
 loadEnv();
-const devModeHash = process.env.FORCE_DEVMODE_KEY
-  ? createHash('sha256').update(process.env.FORCE_DEVMODE_KEY, 'utf8').digest('hex')
-  : '';
+const devModeKey = (process.env.FORCE_DEVMODE_KEY ?? '').trim();
+const devModeHash = devModeKey ? createHash('sha256').update(devModeKey, 'utf8').digest('hex') : '';
 console.log(
   devModeHash
-    ? '[build] forced dev mode: key present, hash baked in (the key itself is not)'
+    ? `[build] forced dev mode: key present (${devModeKey.length} chars), hash baked in (the key itself is not)`
     : '[build] forced dev mode: no FORCE_DEVMODE_KEY — the door is absent from this build',
 );
 

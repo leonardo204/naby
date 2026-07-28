@@ -70,6 +70,33 @@ export function isDevModeUnlocked(): boolean {
 }
 
 /**
+ * What an unlock attempt did. This used to be a bare boolean, and that was a
+ * mistake worth naming: a key that did not match and a key that matched but
+ * could not be written to disk are different problems with different fixes, and
+ * collapsing them meant the UI told the user "wrong key" for both. Whoever is
+ * holding the right key then has no way to find out what actually went wrong.
+ */
+export type UnlockOutcome =
+  /** Key matched and the marker was persisted. Takes effect next launch. */
+  | 'unlocked'
+  /** The key hashed to something else. */
+  | 'mismatch'
+  /** This build has no door — no key can open it. */
+  | 'unavailable'
+  /** Key matched, but the marker could not be written; it would not survive a restart. */
+  | 'not-persisted';
+
+/** Constant-time compare of `candidate`'s SHA-256 against the baked hash. */
+function matches(candidate: string): boolean {
+  const a = Buffer.from(sha256(candidate), 'utf8');
+  const b = Buffer.from(EXPECTED_HASH, 'utf8');
+  // Both are hex digests of the same algorithm, so unequal lengths mean the
+  // baked value is not a digest at all. Bail rather than throw.
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
  * Compare a user-supplied key against the baked hash and, on a match, open the
  * door for subsequent launches.
  *
@@ -77,22 +104,30 @@ export function isDevModeUnlocked(): boolean {
  * the app can hash offline far faster than they can drive this dialog — but a
  * timing-variable compare is the kind of thing that gets copied into somewhere
  * it matters, so it is written correctly once.
+ *
+ * TOLERATES SURROUNDING WHITESPACE, by trying the exact string first and the
+ * trimmed one only if that fails. Keys get pasted out of a `.env` line or a
+ * terminal, and a trailing newline rides along invisibly in a password field —
+ * an unreadable input that silently rejects correct keys is a trap. Trying the
+ * exact value first means a key that genuinely contains edge whitespace still
+ * works; the fallback can only ever accept more, never less.
  */
-export function unlockDevMode(key: string): boolean {
-  if (!isDevModeAvailable()) return false;
-  const candidate = Buffer.from(sha256(key ?? ''), 'utf8');
-  const expected = Buffer.from(EXPECTED_HASH, 'utf8');
-  if (candidate.length !== expected.length) return false;
-  if (!timingSafeEqual(candidate, expected)) return false;
+export function unlockDevMode(key: string): UnlockOutcome {
+  if (!isDevModeAvailable()) return 'unavailable';
+
+  const typed = key ?? '';
+  if (!matches(typed) && !matches(typed.trim())) return 'mismatch';
 
   try {
     mkdirSync(dirname(markerPath()), { recursive: true });
     writeFileSync(markerPath(), `${EXPECTED_HASH}\n`, { encoding: 'utf8', mode: 0o600 });
-    return true;
-  } catch {
-    // Could not persist — report failure rather than claim an unlock that will
-    // not survive the restart the user is about to be asked for.
-    return false;
+    return 'unlocked';
+  } catch (err) {
+    // Could not persist — say so rather than claim an unlock that will not
+    // survive the restart the user is about to be asked for, and log the reason,
+    // because "correct key, unwritable home" is invisible from the UI alone.
+    console.error(`[devmode] key matched but the marker could not be written: ${String(err)}`);
+    return 'not-persisted';
   }
 }
 

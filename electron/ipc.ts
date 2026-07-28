@@ -143,7 +143,7 @@ export const CHANNELS = [
   // and whether it is open; it never exposes the key or its baked hash.
   //
   //   devmode:status  — {available, unlocked, activeNow}
-  //   devmode:unlock  — compare a typed key against the baked hash; boolean out
+  //   devmode:unlock  — compare a typed key against the baked hash; outcome out
   //   devmode:lock    — close it again
   'devmode:status',
   'devmode:unlock',
@@ -425,6 +425,9 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     }),
   );
 
+  // Returns WHICH way the attempt went, not just whether it worked: the renderer
+  // has to tell a mismatch apart from a match that could not be persisted, and
+  // it cannot see the exception that distinguishes them.
   handle('devmode:unlock', (_e, key: unknown) =>
     ok(unlockDevMode(typeof key === 'string' ? key : '')),
   );

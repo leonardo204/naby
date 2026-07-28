@@ -236,8 +236,15 @@ const devMode = {
   status: (): Promise<Result<{ available: boolean; unlocked: boolean; activeNow: boolean }>> =>
     ipcRenderer.invoke('devmode:status'),
 
-  /** True only when the key matched AND the unlock was persisted. */
-  unlock: (key: string): Promise<Result<boolean>> => ipcRenderer.invoke('devmode:unlock', key),
+  /**
+   * `'unlocked'` only when the key matched AND the unlock was persisted. The
+   * other outcomes are distinct on purpose — `'mismatch'` and `'not-persisted'`
+   * need different things from the user, and used to be the same `false`.
+   */
+  unlock: (
+    key: string,
+  ): Promise<Result<'unlocked' | 'mismatch' | 'unavailable' | 'not-persisted'>> =>
+    ipcRenderer.invoke('devmode:unlock', key),
 
   /** Close it again. Takes effect on the next launch, like opening it. */
   lock: (): Promise<Result<void>> => ipcRenderer.invoke('devmode:lock'),
