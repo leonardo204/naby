@@ -21,6 +21,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
+import { applyDevModeToEnv } from './devmode.js';
 
 // ---------------------------------------------------------------------------
 // Identity — must run before anything reads `userData`
@@ -249,6 +250,10 @@ async function start(): Promise<void> {
   // Must run BEFORE boot(): boot reads `isChatgptOauthEnabled()` (which reads
   // this env var) to decide whether to install the vault-backed token source.
   autoOpenChatgptSealInDev();
+  // A packaged build stays sealed above; this is the deliberate exception —
+  // someone who typed the build's dev-mode key gets the dev providers in the
+  // REAL artifact. Must be before boot(), which reads the seal exactly once.
+  applyDevModeToEnv();
 
   try {
     bootResult = await boot();

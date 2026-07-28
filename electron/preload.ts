@@ -226,6 +226,23 @@ type UpdateStatus = {
   currentVersion: string;
 };
 
+/**
+ * FORCED DEV MODE — the door that lets a shipped build run the dev-only
+ * providers (see electron/devmode.ts). Three calls, no read path to the key or
+ * its hash: the renderer can ask whether a door exists, offer one, and close it.
+ */
+const devMode = {
+  /** `{ available, unlocked, activeNow }` — see the IPC handler. */
+  status: (): Promise<Result<{ available: boolean; unlocked: boolean; activeNow: boolean }>> =>
+    ipcRenderer.invoke('devmode:status'),
+
+  /** True only when the key matched AND the unlock was persisted. */
+  unlock: (key: string): Promise<Result<boolean>> => ipcRenderer.invoke('devmode:unlock', key),
+
+  /** Close it again. Takes effect on the next launch, like opening it. */
+  lock: (): Promise<Result<void>> => ipcRenderer.invoke('devmode:lock'),
+};
+
 const updates = {
   /** Current status, for a component that mounted after the last push. */
   get: (): Promise<Result<UpdateStatus>> => ipcRenderer.invoke('update:get'),
@@ -275,6 +292,8 @@ contextBridge.exposeInMainWorld('naby', {
   onboarding,
   /** F1-09 — auto-update status and controls. */
   updates,
+  /** The dev-mode door, for testing dev-only providers in the real artifact. */
+  devMode,
   /** CO-05 — DEV-ONLY ChatGPT subscription sign-in. `available:false` unless the
    *  dev seal is open; no read path to the stored tokens. */
   chatgptOauth,

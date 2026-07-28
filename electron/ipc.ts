@@ -32,6 +32,7 @@ import type { CredentialVault } from './credentials.js';
 import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
 import type { Updater, UpdateStatus } from './updater.js';
+import { isDevModeAvailable, isDevModeUnlocked, lockDevMode, unlockDevMode } from './devmode.js';
 import type { ProviderDescription, ProviderProfile } from '../dist/naby-runtime.mjs';
 import { isChatgptOauthEnabled } from '../src/providers/chatgpt-oauth.js';
 
@@ -135,6 +136,18 @@ export const CHANNELS = [
   'chatgpt-oauth:status',
   'chatgpt-oauth:signin',
   'chatgpt-oauth:signout',
+
+  // FORCED DEV MODE (electron/devmode.ts) — the key-gated door that lets a
+  // SHIPPED build run the dev-only providers, so a release can be tested as the
+  // artifact users actually get. `status` reports whether this build has a door
+  // and whether it is open; it never exposes the key or its baked hash.
+  //
+  //   devmode:status  — {available, unlocked, activeNow}
+  //   devmode:unlock  — compare a typed key against the baked hash; boolean out
+  //   devmode:lock    — close it again
+  'devmode:status',
+  'devmode:unlock',
+  'devmode:lock',
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
@@ -393,6 +406,31 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
 
   handle('update:install', () => {
     deps.updater?.installNow();
+    return ok(undefined as void);
+  });
+
+  // FORCED DEV MODE (see electron/devmode.ts). `status` is safe to expose: it
+  // reveals whether this build HAS a door and whether it is open, never the key
+  // or its hash. `unlock` returns only a boolean — a wrong key is
+  // indistinguishable from a right one that could not be persisted, which is the
+  // correct amount to tell a caller that may not be the user.
+  handle('devmode:status', () =>
+    ok({
+      available: isDevModeAvailable(),
+      unlocked: isDevModeUnlocked(),
+      // Whether THIS launch is actually running with the dev providers on. It
+      // differs from `unlocked` until the app is restarted, and the UI says so
+      // rather than implying the switch already took effect.
+      activeNow: process.env.NABY_ENABLE_CHATGPT_OAUTH === '1',
+    }),
+  );
+
+  handle('devmode:unlock', (_e, key: unknown) =>
+    ok(unlockDevMode(typeof key === 'string' ? key : '')),
+  );
+
+  handle('devmode:lock', () => {
+    lockDevMode();
     return ok(undefined as void);
   });
 

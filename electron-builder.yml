@@ -109,16 +109,27 @@ asar: true
 files:
   - dist/electron/**
   # ---------------------------------------------------------------------
-  # THE DEV-ONLY ChatGPT SUBSCRIPTION-OAUTH MODULE MUST NOT SHIP — spec §2
+  # THE ChatGPT SUBSCRIPTION-OAUTH MODULE NOW SHIPS — KEY-GATED, NOT ABSENT
   # ---------------------------------------------------------------------
-  # electron/chatgpt-oauth.ts is compiled to dist/electron/chatgpt-oauth.mjs so
-  # the DEV flow can load it (boot.ts reaches it through a computed dynamic
-  # import). It talks to the UNOFFICIAL ChatGPT backend — a ToS grey zone, the
-  # same risk class as the Agent SDK — so it is excluded from the packaged
-  # artifact here, giving the "absent from the shipped app" property the runtime
-  # flag seal (isChatgptOauthEnabled) already backs. Defense in depth: even with
-  # NABY_ENABLE_CHATGPT_OAUTH somehow set, a shipped build cannot load the module.
-  - '!dist/electron/chatgpt-oauth.mjs'
+  # electron/chatgpt-oauth.ts (compiled to dist/electron/chatgpt-oauth.mjs) talks
+  # to the UNOFFICIAL ChatGPT backend — a ToS grey zone. It used to be excluded
+  # here, so the capability was ABSENT from the artifact and no flag could
+  # resurrect it.
+  #
+  # THAT PROPERTY IS DELIBERATELY TRADED AWAY, and the trade should be legible:
+  # testing a release meant rebuilding it unpackaged, which is not the binary
+  # users get, so bugs in the shipped artifact were untestable. The module is now
+  # present and reachable only behind the forced-dev-mode key
+  # (electron/devmode.ts): the door is a SHA-256 whose preimage is not in the
+  # artifact, so a user cannot open it, but a developer with the key can.
+  #
+  # The guarantee is therefore "gated by a secret nobody shipped" rather than
+  # "physically not there". Weaker, and chosen on purpose. If it ever needs to be
+  # absent again, restore this line — nothing else depends on it being present.
+  #
+  # NOTE the asymmetry with the Agent SDK below: that is Anthropic's package, so
+  # including it is a REDISTRIBUTION question, not just an access one. This file
+  # is ours.
   - dist/naby-runtime.mjs
   - package.json
   - '!node_modules/**'

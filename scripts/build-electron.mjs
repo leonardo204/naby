@@ -29,6 +29,8 @@
 //     the five provider adapters into the main process a second time.
 
 import { build } from 'esbuild';
+import { createHash } from 'node:crypto';
+import { loadEnv } from './load-env.mjs';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,8 +73,26 @@ const esmBanner = {
   ].join('\n'),
 };
 
+// FORCED DEV MODE — bake the HASH of the key, never the key.
+//
+// `.env` is loaded here (it is not loaded for a plain build otherwise) purely to
+// read FORCE_DEVMODE_KEY. What reaches the artifact is its SHA-256: a packaged
+// app is a zip anyone can open, so a plaintext secret compiled into it is a
+// published secret. Absent key -> empty hash -> electron/devmode.ts reports the
+// feature unavailable and the UI hides it, so an official build has no door.
+loadEnv();
+const devModeHash = process.env.FORCE_DEVMODE_KEY
+  ? createHash('sha256').update(process.env.FORCE_DEVMODE_KEY, 'utf8').digest('hex')
+  : '';
+console.log(
+  devModeHash
+    ? '[build] forced dev mode: key present, hash baked in (the key itself is not)'
+    : '[build] forced dev mode: no FORCE_DEVMODE_KEY — the door is absent from this build',
+);
+
 /** Node 22 is Electron 43's floor; nothing here needs to go lower. */
 const shared = {
+  define: { __NABY_DEVMODE_HASH__: JSON.stringify(devModeHash) },
   bundle: true,
   platform: 'node',
   target: 'node22',
