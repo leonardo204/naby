@@ -1,9 +1,14 @@
 {
   "name": "naby",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Personalized persona agent desktop app — spike harness (Phase 0)",
+  "description": "Personalized persona agent desktop app",
+  "author": {
+    "name": "YONGSUB LEE",
+    "email": "zerolive@altimedia.com"
+  },
+  "homepage": "https://github.com/leonardo204/naby",
   "main": "dist/electron/main.mjs",
   "scripts": {
     "build:runtime": "node scripts/build-runtime.mjs",

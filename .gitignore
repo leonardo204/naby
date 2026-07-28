@@ -20,3 +20,7 @@ dist/
 # electron-builder output
 release/
 .electron-builder.bundle-agent-sdk.yml
+
+# Code-signing key material. Never commit — see the release docs.
+*.p12
+*.pfx
