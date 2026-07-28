@@ -186,14 +186,36 @@ jobs:
       # A .pfx in CI secrets is no longer an option regardless: OV code-signing
       # keys have been required to live on FIPS 140-2 L2 hardware or a cloud HSM
       # since June 2023.
+      # BUILD IN AN EMPTY HOME — the fix for the Windows build, and the reason
+      # is worth stating because the workaround looks arbitrary otherwise.
+      #
+      # Something in `next build` walks the user profile. On macOS and Linux that
+      # is merely wasteful; on a Windows runner C:\Users\<user> contains app
+      # execution aliases under Microsoft\WindowsApps that are reparse points, and
+      # scandir on them raises EACCES:
+      #
+      #   glob error [EACCES: permission denied, scandir
+      #     'C:\Users\runneradmin\Local Settings\Microsoft\WindowsApps\...']
+      #   Failed to compile.
+      #
+      # The caller could not be identified from the logs: a --require shim that
+      # wrapped fs.readdir/readdirSync/opendir was armed inside the very process
+      # that failed and never fired, so the walk does not go through those (a
+      # native scanner, or a worker that drops execArgv). Rather than keep
+      # guessing, this points HOME/USERPROFILE at an empty directory for the build
+      # step only — whatever walks the profile now walks nothing.
+      #
+      # Scoped to this step: `npm ci` ran earlier against the real profile, so the
+      # npm cache is unaffected, and LOCALAPPDATA is left alone so electron-builder
+      # keeps its download cache.
       - name: Build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # TEMPORARY: identify what reads the user profile during `next build`.
-          # Remove together with scripts/trace-profile-scan.cjs.
-          NODE_OPTIONS: --require ${{ github.workspace }}/scripts/trace-profile-scan.cjs
+          HOME: ${{ runner.temp }}/buildhome
+          USERPROFILE: ${{ runner.temp }}/buildhome
         shell: bash
         run: |
+          mkdir -p "$HOME"
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
             npm run build:app && node scripts/build-dist.mjs --win --publish always
           else
