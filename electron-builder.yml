@@ -69,9 +69,19 @@ publish:
   - provider: github
     owner: leonardo204
     repo: naby
-    # Releases stay invisible to the updater until explicitly published, so a
-    # half-uploaded set of artifacts is never offered to users.
-    releaseType: release
+    # DRAFT, and the reason is the sentence that was already written here: a
+    # half-uploaded set of artifacts must never be offered to users. That was the
+    # stated intent all along, but the value said `release`, which does the
+    # opposite — electron-publish sets `draft: this.releaseType === "draft"`
+    # (electron-publish/out/gitHubPublisher.js), so `release` publishes the
+    # moment the first job finishes uploading.
+    #
+    # That gap matters because the three platform jobs are INDEPENDENT. If macOS
+    # fails and Windows succeeds, `release` leaves a live v1.x carrying only an
+    # .exe and no latest-mac.yml — every mac user's updater then sees a version
+    # it cannot fetch. A draft holds everything until a human looks at the
+    # artifact list and presses Publish.
+    releaseType: draft
 
 # ---------------------------------------------------------------------------
 # npmRebuild — design §3.2
