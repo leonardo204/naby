@@ -107,38 +107,78 @@ type AgentSdk = {
 /**
  * Every place the SDK is allowed to be found, in order.
  *
- * The first anchor is THIS module, which covers a source checkout in both
- * linkages: under `tsx` it is `src/engines/`, and in the bundle it is
- * `dist/naby-runtime.mjs`, and both walk up to the repo's own node_modules.
+ * TWO SEPARATE BUGS SHAPED THIS LIST, and both were invisible from a source
+ * checkout, which is why it is written out rather than left to `import.meta.url`.
  *
- * THE REST EXIST BECAUSE OF HOW THE APP IS PACKAGED, and this is the whole bug:
- * electron-builder.yml drops the root node_modules (`'!node_modules/**'`), so in
- * a shipped build the SDK arrives ONLY through `shell/node_modules` — the shell
- * has its own dependency on it. Node's resolver walks ANCESTOR directories, and
- * `app.asar/shell/node_modules` is a SIBLING of `app.asar/dist`, never an
- * ancestor. So the package sat in the artifact, unpacked and complete, while
- * `isClaudeAgentSdkAvailable()` reported it missing and the UI dropped the
- * Claude subscription option — a false negative, not an absence.
+ * (1) WHERE THE PACKAGE IS. electron-builder.yml drops the root node_modules
+ *     (`'!node_modules/**'`), so a shipped build gets the SDK only through
+ *     `shell/node_modules` — the shell has its own dependency on it. Node
+ *     resolves by walking ANCESTORS, and `app.asar/shell/node_modules` is a
+ *     SIBLING of `app.asar/dist`, never an ancestor. Anchoring on
+ *     `<root>/shell/package.json` makes `<root>/shell/node_modules` the
+ *     resolver's first candidate.
  *
- * Anchoring on `<dir>/shell/package.json` makes `<dir>/shell/node_modules` the
- * resolver's first candidate. Walking a few levels up covers `dist/` (packaged)
- * and `src/engines/` (tsx) without either path being hardcoded.
+ * (2) WHY `import.meta.url` CANNOT BE TRUSTED HERE. This module is bundled three
+ *     times over: by esbuild into `dist/naby-runtime.mjs` and into the shell's
+ *     server chunks (both keep `import.meta.url` intact), and by WEBPACK into
+ *     the Next server chunk that actually serves `/api/naby` — which
+ *     CONSTANT-FOLDS it to the build machine's absolute path. A CI-built release
+ *     therefore carries `file:///Users/runner/work/naby/naby/dist/...`, and
+ *     every anchor derived from it points at a directory that exists on no
+ *     user's disk. The SDK shipped, complete and unpacked, and the app reported
+ *     it missing.
+ *
+ * So the RUNTIME-DERIVED anchors come FIRST. `NABY_APP_ROOT` is published by
+ * electron/boot.ts from `app.getAppPath()`; `COCKPIT_ROOT` is published by
+ * electron/next-server.ts and already points at the shell directory. Their order
+ * also matters for correctness, not just for hit rate: a packaged app must
+ * resolve against ITS OWN copy, never against whatever stale checkout the frozen
+ * build path happens to name on this particular machine.
  */
 function sdkResolutionAnchors(): string[] {
-  const anchors: string[] = [import.meta.url];
-  let dir: string;
+  const anchors: string[] = [];
+  const add = (...parts: string[]): void => {
+    const p = join(...parts);
+    if (!anchors.includes(p)) anchors.push(p);
+  };
+
+  // 1. Runtime truth, immune to whatever a bundler did to this file.
+  const appRoot = process.env.NABY_APP_ROOT;
+  if (appRoot) {
+    add(appRoot, 'shell', 'package.json');
+    add(appRoot, 'package.json');
+  }
+  const shellRoot = process.env.COCKPIT_ROOT;
+  if (shellRoot) add(shellRoot, 'package.json');
+
+  // 2. This module, for every context that has no Electron main process to
+  //    publish the above: `tsx` on a checkout, spikes, the CLI.
+  anchors.push(import.meta.url);
+  let dir: string | undefined;
   try {
     dir = dirname(fileURLToPath(import.meta.url));
   } catch {
-    return anchors; // not a file: URL — the first anchor is all we have
+    dir = undefined; // not a file: URL — nothing further to derive
   }
-  // 4 is generous for both layouts; the loop stops at the filesystem root.
-  for (let i = 0; i < 4; i += 1) {
-    anchors.push(join(dir, 'shell', 'package.json'));
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  if (dir !== undefined) {
+    // 6 levels covers `dist/` and `src/engines/` as well as the deeper
+    // `.next-prod/server/chunks/` nesting, should import.meta.url survive there.
+    for (let i = 0; i < 6; i += 1) {
+      add(dir, 'shell', 'package.json');
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
   }
+
+  // NOTE: process.cwd() is deliberately NOT an anchor. It looked like a free
+  // fallback and it is the same hazard as the frozen build path, one step
+  // removed: the engine would resolve into whatever checkout the process happens
+  // to be sitting in — a different SDK version, or one on a disk the app has no
+  // business reading. The three anchors above cover every context that has the
+  // package (packaged app, embedded shell, checkout), and when they all miss,
+  // "missing" is the honest answer.
+
   return anchors;
 }
 

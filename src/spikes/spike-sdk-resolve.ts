@@ -27,11 +27,31 @@
 //       the UI offers an engine that cannot run.
 //   (d) The resolved package is REAL — its package.json parses and names the
 //       SDK — rather than merely a string that came back non-null.
+//   (e) A DEAD `import.meta.url` STILL RESOLVES, given NABY_APP_ROOT. This is the
+//       SECOND bug, and the one v1.5.1 shipped without fixing: Next/webpack
+//       constant-folds `import.meta.url` into the BUILD MACHINE's absolute path,
+//       so the release that serves /api/naby carries
+//       `file:///Users/runner/work/naby/naby/dist/...` — a phantom on every user
+//       machine. (a)-(d) all pass with that bug present, because on the build
+//       machine the frozen path is real. Only an anchor that comes from the
+//       RUNTIME can catch it.
+//   (f) NABY_APP_ROOT WINS over a resolvable module-relative anchor, so a
+//       packaged app uses ITS OWN copy rather than whatever stale checkout the
+//       frozen path happens to name on the machine it runs on.
 //
 // NO NETWORK, NO KEYS, NO MODEL CALL. Prints PASS/FAIL per assertion; exits
 // non-zero on any FAIL. Cleans up its temp dirs.
 
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -78,6 +98,24 @@ function buildPackagedLayout(root: string): void {
     join(scope, 'claude-agent-sdk'),
     'dir',
   );
+}
+
+/**
+ * The same shape, but with a STUB package carrying a marker version.
+ *
+ * Needed because Node reports the REALPATH of a resolved module, so two roots
+ * that both symlink the one real package are indistinguishable in the result —
+ * and "which root answered" is precisely what (e) and (f) assert. A stub is
+ * honest here: these two checks are about resolution order, not about the SDK.
+ */
+function buildStubLayout(root: string, marker: string): void {
+  const pkg = join(root, 'shell', 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(
+    join(pkg, 'package.json'),
+    JSON.stringify({ name: '@anthropic-ai/claude-agent-sdk', version: marker, main: 'sdk.mjs' }),
+  );
+  writeFileSync(join(pkg, 'sdk.mjs'), 'export const stub = true;\n');
 }
 
 async function main(): Promise<void> {
@@ -152,7 +190,61 @@ async function main(): Promise<void> {
       barePath === null && bareRuntime.isClaudeAgentSdkAvailable() === false,
       `path=${barePath ?? 'null'} available=${bareRuntime.isClaudeAgentSdkAvailable()}`,
     );
+
+    // -- (e) dead import.meta.url + NABY_APP_ROOT ---------------------------
+    // `bareRuntime` is loaded from a temp dir with no shell/ and no
+    // node_modules, so EVERY module-relative anchor is a dead end — which is
+    // what a CI-built release looks like on a user's machine, where the frozen
+    // build path names a directory that does not exist. The app root is the only
+    // thing left, and it has to be enough.
+    const stubRoot = mkdtempSync(join(tmpdir(), 'naby-sdk-approot-'));
+    tmpRoots.push(stubRoot);
+    buildStubLayout(stubRoot, '9.9.9-app-root');
+    process.env.NABY_APP_ROOT = stubRoot;
+    // Compare against the REAL path: on macOS mkdtemp hands back /var/... while
+    // Node reports the resolved module under /private/var/....
+    const stubReal = realpathSync(stubRoot);
+    const viaAppRoot = bareRuntime.resolveClaudeAgentSdkPath();
+    record(
+      checks,
+      '(e) NABY_APP_ROOT resolves it when the module-relative anchors are dead',
+      viaAppRoot !== null && viaAppRoot.startsWith(stubReal),
+      `path=${viaAppRoot === null ? 'null' : '…' + viaAppRoot.slice(-40)}`,
+    );
+
+    // The env var must not manufacture a hit either: pointed somewhere empty,
+    // absent stays absent.
+    const empty = mkdtempSync(join(tmpdir(), 'naby-sdk-empty-'));
+    tmpRoots.push(empty);
+    process.env.NABY_APP_ROOT = empty;
+    const viaEmptyRoot = bareRuntime.resolveClaudeAgentSdkPath();
+    record(
+      checks,
+      '(e) an app root without the SDK does not manufacture a hit',
+      viaEmptyRoot === null,
+      `path=${viaEmptyRoot ?? 'null'}`,
+    );
+
+    // -- (f) the app root outranks a resolvable module-relative anchor -------
+    // `pkgRuntime` sits in a layout that resolves on its own. Pointed at a
+    // DIFFERENT root that also has the SDK, it must follow the app root — a
+    // packaged app has to use its own copy, not a checkout that happens to be
+    // on the same disk.
+    const other = mkdtempSync(join(tmpdir(), 'naby-sdk-other-'));
+    tmpRoots.push(other);
+    buildStubLayout(other, '9.9.9-other-root');
+    process.env.NABY_APP_ROOT = other;
+    const otherReal = realpathSync(other);
+    const preferred = pkgRuntime.resolveClaudeAgentSdkPath();
+    record(
+      checks,
+      '(f) NABY_APP_ROOT wins over the module-relative anchor',
+      preferred !== null && preferred.startsWith(otherReal),
+      `answered=${preferred?.startsWith(otherReal) === true ? 'app root' : 'module-relative'}`,
+    );
+    delete process.env.NABY_APP_ROOT;
   } finally {
+    delete process.env.NABY_APP_ROOT;
     for (const dir of tmpRoots) rmSync(dir, { recursive: true, force: true });
   }
 

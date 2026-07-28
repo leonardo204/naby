@@ -155,6 +155,21 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
   process.env.NABY_DB_PATH ??= dbPath;
   process.env.NABY_HOME ??= nabyHome;
 
+  // WHERE THIS INSTALL LIVES, published for code that cannot work it out itself.
+  //
+  // `appRoot` is derived here from `app.getAppPath()` and this module's own
+  // location, both of which are real at RUNTIME. Inside the embedded Next
+  // server that is not available: webpack CONSTANT-FOLDS `import.meta.url` into
+  // the build machine's absolute path, so a CI-built release carries
+  // `file:///Users/runner/work/naby/naby/...` and any path derived from it
+  // points at a directory that exists on no user's disk. That is exactly how the
+  // Agent SDK went missing in v1.5.0/v1.5.1 — the package shipped, and the
+  // resolver was anchored on a phantom.
+  //
+  // The Next server runs IN THIS PROCESS (see next-server.ts), so an env var set
+  // before it starts is visible to it. `??=` so a test or a launcher can override.
+  process.env.NABY_APP_ROOT ??= appRoot;
+
   const token = mintSessionToken();
 
   // -- runtime bundle ------------------------------------------------------
