@@ -160,13 +160,20 @@ files:
   #
   # Measured on the first packaging run of this config: 224 MB of
   # `claude-agent-sdk-darwin-arm64` — the non-OSS engine binary — landed
-  # INSIDE app.asar. Two separate problems in one: design §3.3 says it is
-  # never in a shipped build (the redistribution question the engine pivot
-  # exists to avoid), and a binary inside an asar cannot be spawned anyway,
-  # so it was pure dead weight. F1-03 removes the feature package that pulls
-  # it; until then this exclusion is what keeps it out.
-  - '!shell/node_modules/@anthropic-ai/claude-agent-sdk/**'
-  - '!shell/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
+  # INSIDE app.asar, which is both a redistribution question and useless
+  # (a binary inside an asar cannot be spawned).
+  #
+  # IT NOW SHIPS, by explicit decision, so the Claude subscription sign-in can be
+  # exercised in the real artifact behind the forced-dev-mode key. Two things had
+  # to be true for that to mean anything, and both are:
+  #   * the packages are no longer excluded (below), and
+  #   * they are asarUnpack'd, or the engine binary would be unspawnable and the
+  #     inclusion would be dead weight exactly as it was the first time.
+  #
+  # This REVERSES design §3.3's "never in a shipped build" for these packages.
+  # Unlike dist/electron/chatgpt-oauth.mjs — which is ours — this is Anthropic's
+  # package, so the artifact now redistributes it and the key gates USE, not
+  # PRESENCE. Restoring the two lines below puts it back if that changes.
   - '!shell/node_modules/@rolldown/**'
   - '!shell/node_modules/@rollup/**'
   - '!shell/node_modules/@tailwindcss/oxide*/**'
@@ -217,6 +224,11 @@ asarUnpack:
   - '**/node_modules/node-pty/**'
   - '**/node_modules/fsevents/**'
   - '**/node_modules/@vscode/ripgrep/**'
+  # The Claude Agent SDK's engine is a real executable that gets spawned, so it
+  # has to live outside the archive. Shipping it inside app.asar would package
+  # ~224 MB that can never run.
+  - '**/node_modules/@anthropic-ai/claude-agent-sdk/**'
+  - '**/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
 
 mac:
   # macos-latest runners are arm64 (design §6.1); per-arch until there is a
