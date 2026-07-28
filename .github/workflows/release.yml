@@ -119,6 +119,11 @@ jobs:
           # Publishing only. This token never enters the artifact — the feed repo
           # is public precisely so no credential has to ship (design §6.3).
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Forced dev mode. Only the SHA-256 of this reaches the artifact
+          # (scripts/build-electron.mjs); the key itself never ships. Without it
+          # the hash is empty and the release has no dev-mode door at all —
+          # which is what happened to v1.4.0.
+          FORCE_DEVMODE_KEY: ${{ secrets.FORCE_DEVMODE_KEY }}
         run: |
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
             npm run build:app && node scripts/build-dist.mjs --mac --publish always
@@ -211,6 +216,11 @@ jobs:
       - name: Build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Forced dev mode. Only the SHA-256 of this reaches the artifact
+          # (scripts/build-electron.mjs); the key itself never ships. Without it
+          # the hash is empty and the release has no dev-mode door at all —
+          # which is what happened to v1.4.0.
+          FORCE_DEVMODE_KEY: ${{ secrets.FORCE_DEVMODE_KEY }}
           HOME: ${{ runner.temp }}/buildhome
           USERPROFILE: ${{ runner.temp }}/buildhome
         shell: bash
@@ -276,6 +286,11 @@ jobs:
       - name: Build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Forced dev mode. Only the SHA-256 of this reaches the artifact
+          # (scripts/build-electron.mjs); the key itself never ships. Without it
+          # the hash is empty and the release has no dev-mode door at all —
+          # which is what happened to v1.4.0.
+          FORCE_DEVMODE_KEY: ${{ secrets.FORCE_DEVMODE_KEY }}
         run: |
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
             npm run build:app && node scripts/build-dist.mjs --linux --publish always
