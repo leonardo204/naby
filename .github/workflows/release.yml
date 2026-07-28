@@ -189,6 +189,9 @@ jobs:
       - name: Build
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TEMPORARY: identify what reads the user profile during `next build`.
+          # Remove together with scripts/trace-profile-scan.cjs.
+          NODE_OPTIONS: --require ${{ github.workspace }}/scripts/trace-profile-scan.cjs
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
