@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -37,6 +37,8 @@
     "spike:harness": "tsx src/spikes/spike-harness.ts",
     "spike:skill": "tsx src/spikes/spike-skill-inject.ts",
     "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",
+    "spike:devmode": "tsx src/spikes/spike-devmode.ts",
+    "spike:sdk-resolve": "npm run build:runtime && tsx src/spikes/spike-sdk-resolve.ts",
     "spike:add-mcp": "npm run build:runtime && tsx src/spikes/spike-add-mcp.ts",
     "spike:fetch-url": "npm run build:runtime && tsx src/spikes/spike-fetch-url.ts",
     "spike:multimodal": "tsx src/spikes/spike-multimodal.ts",
