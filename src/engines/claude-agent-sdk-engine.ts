@@ -49,7 +49,8 @@
 // into the in-process MCP handler is not something we want to depend on.
 
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import type {
   HookCallback,
@@ -104,18 +105,60 @@ type AgentSdk = {
 };
 
 /**
- * Where the Agent SDK lives, or null when it is not installed.
+ * Every place the SDK is allowed to be found, in order.
  *
- * Resolution is relative to THIS module's URL, which is what makes it correct
- * in both linkages: under `tsx` that is `src/engines/`, and inside the bundle it
- * is `dist/naby-runtime.mjs` — both walk up to the parent repo's node_modules.
+ * The first anchor is THIS module, which covers a source checkout in both
+ * linkages: under `tsx` it is `src/engines/`, and in the bundle it is
+ * `dist/naby-runtime.mjs`, and both walk up to the repo's own node_modules.
+ *
+ * THE REST EXIST BECAUSE OF HOW THE APP IS PACKAGED, and this is the whole bug:
+ * electron-builder.yml drops the root node_modules (`'!node_modules/**'`), so in
+ * a shipped build the SDK arrives ONLY through `shell/node_modules` — the shell
+ * has its own dependency on it. Node's resolver walks ANCESTOR directories, and
+ * `app.asar/shell/node_modules` is a SIBLING of `app.asar/dist`, never an
+ * ancestor. So the package sat in the artifact, unpacked and complete, while
+ * `isClaudeAgentSdkAvailable()` reported it missing and the UI dropped the
+ * Claude subscription option — a false negative, not an absence.
+ *
+ * Anchoring on `<dir>/shell/package.json` makes `<dir>/shell/node_modules` the
+ * resolver's first candidate. Walking a few levels up covers `dist/` (packaged)
+ * and `src/engines/` (tsx) without either path being hardcoded.
+ */
+function sdkResolutionAnchors(): string[] {
+  const anchors: string[] = [import.meta.url];
+  let dir: string;
+  try {
+    dir = dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return anchors; // not a file: URL — the first anchor is all we have
+  }
+  // 4 is generous for both layouts; the loop stops at the filesystem root.
+  for (let i = 0; i < 4; i += 1) {
+    anchors.push(join(dir, 'shell', 'package.json'));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return anchors;
+}
+
+/**
+ * Where the Agent SDK lives, or null when it is genuinely not installed.
+ *
+ * Returns the FIRST anchor that resolves. A path inside `app.asar` is a correct
+ * answer: the package is asarUnpack'd and Electron's patched fs redirects reads
+ * to `app.asar.unpacked`, so both the import and the engine binary it spawns
+ * land on real files.
  */
 export function resolveClaudeAgentSdkPath(): string | null {
-  try {
-    return createRequire(import.meta.url).resolve(AGENT_SDK_SPECIFIER);
-  } catch {
-    return null;
+  for (const anchor of sdkResolutionAnchors()) {
+    try {
+      return createRequire(anchor).resolve(AGENT_SDK_SPECIFIER);
+    } catch {
+      // Not here. Try the next anchor before concluding it is missing.
+    }
   }
+  return null;
 }
 
 /** The SDK's own option/server types, derived from the real package so they
