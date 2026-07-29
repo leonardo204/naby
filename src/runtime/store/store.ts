@@ -45,6 +45,15 @@ export type SessionRef = {
   cwd?: string;
   /** Whether the session is pinned in the browsing list. */
   pinned?: boolean;
+  /**
+   * WHEN it was pinned (epoch ms), or absent when it is not pinned — and also
+   * absent for a session pinned before schema v7, which never recorded it.
+   *
+   * This is what orders pinned tabs: earliest pin sits leftmost. Recency cannot
+   * stand in for it, which is why the field exists — sorting pinned tabs by
+   * last use made them swap places the moment the user typed in one of them.
+   */
+  pinnedAt?: number;
   /** Coarse lifecycle state, e.g. 'active' | 'ended'; absent = unknown. */
   status?: string;
 };
@@ -942,7 +951,10 @@ export interface Store {
   // -- pinned sessions (§6.1) ---------------------------------------------
 
   /** Pin/unpin a session in the browsing list. */
-  setSessionPinned(sessionId: string, pinned: boolean): void;
+  /** Pin or unpin. Pinning stamps `pinnedAt` (idempotent — re-pinning an
+   *  already-pinned session keeps its original stamp, so a client re-sending its
+   *  whole pinned set cannot reshuffle the order); unpinning clears it. */
+  setSessionPinned(sessionId: string, pinned: boolean, at?: number): void;
 
   /** Pinned sessions, MOST-RECENTLY-USED FIRST. */
   listPinnedSessions(): SessionRef[];

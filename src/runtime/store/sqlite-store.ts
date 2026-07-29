@@ -181,7 +181,13 @@ function openSilently(path: string): DatabaseSyncType {
 // (§2): deleteSession never touches harness; removeProject removes only
 // scope='project' harness for that cwd; user/org survive — enforced in the
 // methods, not by any FK.
-const SCHEMA_VERSION = 6;
+/**
+ * Exported so tests and spikes can assert "stamped to the CURRENT version"
+ * instead of hardcoding a number that goes stale on the next migration — which
+ * is exactly what happened when v7 landed and spike:harness started failing on
+ * a lossless migration it had verified correctly.
+ */
+export const SCHEMA_VERSION = 7;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -192,6 +198,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_used_at INTEGER NOT NULL,
   cwd          TEXT,                          -- owning project (a LINK, not a key); NULL = projectless
   pinned       INTEGER NOT NULL DEFAULT 0,    -- 0/1
+  pinned_at    INTEGER,                       -- WHEN it was pinned; NULL = not pinned
   status       TEXT                           -- e.g. 'active' | 'ended'; NULL = unknown
 );
 
@@ -416,6 +423,10 @@ type SessionRow = {
   cwd?: string | null;
   pinned?: number | null;
   status?: string | null;
+  // v7. Orders the pinned tabs: earliest pin sits leftmost. `last_used_at` used
+  // to stand in for this and could not express it — a pinned tab jumped around
+  // as soon as the user typed in another one.
+  pinned_at?: number | null;
 };
 
 function toSessionRef(row: SessionRow): SessionRef {
@@ -429,6 +440,7 @@ function toSessionRef(row: SessionRow): SessionRef {
   // cwd is a LINK, surfaced when present; it is never a key for session state.
   if (row.cwd !== null && row.cwd !== undefined) ref.cwd = row.cwd;
   if (row.pinned !== null && row.pinned !== undefined) ref.pinned = Number(row.pinned) !== 0;
+  if (row.pinned_at !== null && row.pinned_at !== undefined) ref.pinnedAt = Number(row.pinned_at);
   if (row.status !== null && row.status !== undefined) ref.status = row.status;
   return ref;
 }
@@ -748,6 +760,19 @@ export class SqliteStore implements Store {
     // version so a re-open (current === 3) never re-runs them. Additive only:
     // every column is nullable or carries a DEFAULT, so existing session rows
     // stay valid with no backfill and no data is touched.
+    // v?->v7: pin ORDER. Adding the column is enough for correctness — a row
+    // pinned before this migration has pinned_at NULL and sorts last, which is
+    // the only honest answer since the moment it was pinned was never recorded.
+    // Gated on the column being absent rather than on the version, so a database
+    // that skipped versions self-heals; ALTER TABLE ADD COLUMN has no
+    // IF NOT EXISTS and throws on a second run.
+    const sessionCols = this.db.prepare('PRAGMA table_info(sessions)').all() as {
+      name: string;
+    }[];
+    if (sessionCols.length > 0 && !sessionCols.some((c) => c.name === 'pinned_at')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN pinned_at INTEGER');
+    }
+
     if (current > 0 && current < 3) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN cwd TEXT');
       this.db.exec('ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
@@ -1899,17 +1924,45 @@ export class SqliteStore implements Store {
 
   // -- pinned sessions -----------------------------------------------------
 
-  setSessionPinned(sessionId: string, pinned: boolean): void {
+  /**
+   * Pin or unpin, STAMPING WHEN. The timestamp is what orders the pinned tabs
+   * (earliest first); unpinning clears it so a re-pin goes to the end rather
+   * than reclaiming its old position.
+   *
+   * Re-pinning an already-pinned session does NOT restamp — the call is
+   * idempotent, so a client that re-sends its full pinned set (which
+   * /api/pinned-sessions does on every change) cannot silently reshuffle the
+   * order it is trying to preserve.
+   */
+  setSessionPinned(sessionId: string, pinned: boolean, at: number = Date.now()): void {
     this.assertOpen();
+    if (!pinned) {
+      this.db
+        .prepare('UPDATE sessions SET pinned = 0, pinned_at = NULL WHERE session_id = ?')
+        .run(sessionId);
+      return;
+    }
     this.db
-      .prepare('UPDATE sessions SET pinned = ? WHERE session_id = ?')
-      .run(pinned ? 1 : 0, sessionId);
+      .prepare(
+        `UPDATE sessions
+            SET pinned = 1,
+                pinned_at = COALESCE(pinned_at, ?)
+          WHERE session_id = ?`,
+      )
+      .run(at, sessionId);
   }
 
   listPinnedSessions(): SessionRef[] {
     this.assertOpen();
     const rows = this.db
-      .prepare('SELECT * FROM sessions WHERE pinned = 1 ORDER BY last_used_at DESC')
+      // Pin ORDER, not recency: the tab bar stacks pinned tabs left-to-right in
+      // the order they were pinned. Rows pinned before v7 have no stamp and
+      // sort last, then by recency among themselves.
+      .prepare(
+        `SELECT * FROM sessions
+          WHERE pinned = 1
+          ORDER BY pinned_at IS NULL, pinned_at ASC, last_used_at DESC`,
+      )
       .all() as SessionRow[];
     return rows.map(toSessionRef);
   }

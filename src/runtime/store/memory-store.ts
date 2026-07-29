@@ -820,17 +820,35 @@ export class MemoryStore implements Store {
 
   // -- pinned sessions -----------------------------------------------------
 
-  setSessionPinned(sessionId: string, pinned: boolean): void {
+  setSessionPinned(sessionId: string, pinned: boolean, at: number = Date.now()): void {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.ref.pinned = pinned;
+    if (!pinned) {
+      // Cleared, so a re-pin lands at the END rather than reclaiming its old
+      // slot. Mirrors the SQLite driver.
+      delete s.ref.pinnedAt;
+    } else if (s.ref.pinnedAt === undefined) {
+      // Idempotent: an already-pinned session keeps its original stamp, so a
+      // client re-sending its whole pinned set cannot reshuffle the order.
+      s.ref.pinnedAt = at;
+    }
   }
 
   listPinnedSessions(): SessionRef[] {
+    // Pin ORDER (earliest first), with unstamped rows — pinned before the
+    // pinnedAt field existed — last, then by recency among themselves.
     return [...this.sessions.values()]
       .filter((s) => s.ref.pinned === true)
       .map((s) => ({ ...s.ref }))
-      .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+      .sort((a, b) => {
+        const ap = a.pinnedAt;
+        const bp = b.pinnedAt;
+        if (ap !== undefined && bp !== undefined) return ap - bp;
+        if (ap !== undefined) return -1;
+        if (bp !== undefined) return 1;
+        return b.lastUsedAt - a.lastUsedAt;
+      });
   }
 
   // -- lifecycle -----------------------------------------------------------
