@@ -116,7 +116,22 @@ export function unlockDevMode(key: string): UnlockOutcome {
   if (!isDevModeAvailable()) return 'unavailable';
 
   const typed = key ?? '';
-  if (!matches(typed) && !matches(typed.trim())) return 'mismatch';
+  if (!matches(typed) && !matches(typed.trim())) {
+    // SAY SOMETHING ABOUT THE MISS. A bare "does not match" sent us chasing
+    // IMEs and stray newlines for two rounds while the real question — what
+    // actually arrived — was unanswerable from outside the process.
+    //
+    // The length and a SHORT PREFIX of the candidate digest leak nothing: the
+    // digest is of whatever was typed (usually a wrong value), and a prefix of
+    // a SHA-256 is not invertible. It is enough to tell "wrong characters"
+    // apart from "wrong length" apart from "someone pasted the hash".
+    const digest = sha256(typed.trim());
+    console.error(
+      `[devmode] key mismatch: received ${typed.length} chars ` +
+        `(${typed.trim().length} trimmed), digest ${digest.slice(0, 8)}…`,
+    );
+    return 'mismatch';
+  }
 
   try {
     mkdirSync(dirname(markerPath()), { recursive: true });
