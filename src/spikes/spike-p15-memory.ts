@@ -42,7 +42,7 @@ import {
 } from '../runtime/memory-inject.js';
 import { makeGate, scriptedPolicy } from '../runtime/gate.js';
 import { MemoryStore } from '../runtime/store/memory-store.js';
-import { SqliteStore } from '../runtime/store/sqlite-store.js';
+import { SCHEMA_VERSION, SqliteStore } from '../runtime/store/sqlite-store.js';
 import type {
   InjectedMemory,
   MemoryItem,
@@ -198,8 +198,8 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(c) LOSSLESS MIGRATION v2->v6: legacy memory rows back-fill into memory_items; both read paths return them; version stamped 6',
-    started === 2 && after === 6 && legacyIntact && scopedIntact,
+    `(c) LOSSLESS MIGRATION v2 -> current: legacy memory rows back-fill into memory_items; both read paths return them; version stamped ${SCHEMA_VERSION}`,
+    started === 2 && after === SCHEMA_VERSION && legacyIntact && scopedIntact,
     `user_version ${started}->${after}; legacy getAllMemory=${JSON.stringify(legacy)} intact=${legacyIntact}; scoped rows=${scoped.length} mapped-correctly=${scopedIntact} (${JSON.stringify(scoped.map((m) => ({ k: m.key, scope: m.scope, type: m.type, src: m.provenance.source, status: m.status, conf: m.confidence })))})`,
   );
 }

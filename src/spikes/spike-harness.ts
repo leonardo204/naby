@@ -42,7 +42,7 @@ import { join } from 'node:path';
 
 import { decideHarnessImport } from '../runtime/harness-gate.js';
 import { MemoryStore } from '../runtime/store/memory-store.js';
-import { SqliteStore } from '../runtime/store/sqlite-store.js';
+import { SCHEMA_VERSION, SqliteStore } from '../runtime/store/sqlite-store.js';
 import type { HarnessImportRequest, Store } from '../runtime/store/store.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -448,8 +448,13 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(g) LOSSLESS MIGRATION v5->v6: harness_items added and usable; memory_items + golden_items + session SURVIVE; version stamped 6',
-    started === 5 && after === 6 && memorySurvived && goldenSurvived && sessionSurvived && harnessUsable,
+    `(g) LOSSLESS MIGRATION v5 -> current: harness_items added and usable; memory_items + golden_items + session SURVIVE; version stamped ${SCHEMA_VERSION}`,
+    started === 5 &&
+      after === SCHEMA_VERSION &&
+      memorySurvived &&
+      goldenSurvived &&
+      sessionSurvived &&
+      harnessUsable,
     `user_version ${started}->${after}; memorySurvived=${memorySurvived} goldenSurvived=${goldenSurvived} sessionSurvived=${sessionSurvived} harnessUsable=${harnessUsable}`,
   );
 }

@@ -40,7 +40,7 @@ import { join } from 'node:path';
 
 import { retrieveForInjection } from '../runtime/memory-inject.js';
 import { MemoryStore } from '../runtime/store/memory-store.js';
-import { SqliteStore } from '../runtime/store/sqlite-store.js';
+import { SCHEMA_VERSION, SqliteStore } from '../runtime/store/sqlite-store.js';
 import type { GoldenItem, Store } from '../runtime/store/store.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -337,8 +337,8 @@ function checkMigration(checks: Check[], dbPath: string): void {
 
   record(
     checks,
-    '(e) LOSSLESS MIGRATION v4->v6: golden_items added and usable; memory_items + session SURVIVE; version stamped 6',
-    started === 4 && after === 6 && memorySurvived && sessionSurvived && goldenUsable,
+    `(e) LOSSLESS MIGRATION v4 -> current: golden_items added and usable; memory_items + session SURVIVE; version stamped ${SCHEMA_VERSION}`,
+    started === 4 && after === SCHEMA_VERSION && memorySurvived && sessionSurvived && goldenUsable,
     `user_version ${started}->${after}; userMem=${JSON.stringify(userMem.map((m) => ({ k: m.key, v: m.value, s: m.status })))} legacyTone=${legacySess.tone} sessionSurvived=${sessionSurvived}; golden usable=${goldenUsable} (rows=${golden.length})`,
   );
 }
