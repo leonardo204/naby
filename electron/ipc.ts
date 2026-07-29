@@ -428,8 +428,15 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
   // Returns WHICH way the attempt went, not just whether it worked: the renderer
   // has to tell a mismatch apart from a match that could not be persisted, and
   // it cannot see the exception that distinguishes them.
-  handle('devmode:unlock', (_e, key: unknown) =>
-    ok(unlockDevMode(typeof key === 'string' ? key : '')),
+  //
+  // NOTE THE ARGUMENT ORDER. `handle` calls `fn(payload, event)` — payload
+  // first, like every other handler here. This one was written `(_e, key)`, as
+  // if it were a raw `ipcMain.handle` listener, so the key landed in `_e`, the
+  // event landed in `key`, `typeof key === 'string'` was false, and the empty
+  // string reached the compare. Every correct key was rejected, and the two
+  // `unknown` parameters made it invisible to the type checker.
+  handle('devmode:unlock', (payload: unknown) =>
+    ok(unlockDevMode(typeof payload === 'string' ? payload : '')),
   );
 
   handle('devmode:lock', () => {

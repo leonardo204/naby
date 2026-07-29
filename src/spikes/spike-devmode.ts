@@ -32,6 +32,13 @@
 //   (g) LOCK CLOSES IT, and is idempotent when nothing is open.
 //   (h) applyDevModeToEnv() ONLY EVER TURNS THE SEAL ON, and never overrides an
 //       explicit NABY_ENABLE_CHATGPT_OAUTH set by whoever launched the app.
+//   (i) THE IPC HANDLER PASSES THE KEY. `handle(channel, fn)` calls
+//       `fn(payload, event)`; the unlock handler was written `(_e, key)` as if
+//       it were a raw ipcMain listener, so the key landed in the ignored
+//       parameter and an EMPTY STRING reached the compare. Every correct key was
+//       rejected. Both parameters are `unknown`, so nothing above catches it —
+//       (a)-(h) all pass with the wiring inverted, because they call
+//       unlockDevMode directly.
 //
 // NO NETWORK, NO KEYS, NO REAL ~/.naby — NABY_HOME is pointed at a temp dir for
 // the whole run. Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
@@ -41,7 +48,10 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 type Check = { name: string; pass: boolean; evidence: string };
 
@@ -240,6 +250,17 @@ async function main(): Promise<void> {
       '(h) an explicit NABY_ENABLE_CHATGPT_OAUTH=0 is never overridden',
       process.env.NABY_ENABLE_CHATGPT_OAUTH === '0',
       `seal=${process.env.NABY_ENABLE_CHATGPT_OAUTH}`,
+    );
+
+    // -- (i) the handler must forward the PAYLOAD, not the event -------------
+    const ipcSrc = readFileSync(join(REPO, 'electron', 'ipc.ts'), 'utf8');
+    const unlockHandler = /handle\('devmode:unlock',\s*\(([^)]*)\)/.exec(ipcSrc);
+    const firstParam = unlockHandler?.[1]?.split(',')[0]?.trim().split(':')[0]?.trim();
+    record(
+      checks,
+      '(i) the unlock IPC handler reads the payload, not the event',
+      firstParam === 'payload',
+      `first parameter = ${firstParam ?? '<handler not found>'}`,
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
