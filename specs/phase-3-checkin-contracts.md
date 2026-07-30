@@ -2,11 +2,11 @@
 id: phase-3-checkin-contracts
 title: Phase 3 P3-M5 — 체크인 원장 계약 (eval_events 실체화)
 type: interface
-version: 0.3.0
+version: 0.4.0
 status: active
 scope: 나비 신뢰 지표가 읽고 쓰는 이벤트 원장의 계약. P15-03이 예약해 둔 `eval_events` 스키마를 체크인·자율행동·트립와이어 세 종류 이벤트로 실체화하고, 스토어 메서드와 불변식을 정의한다. 지표 계산 알고리즘 자체는 butterfly-trust-meter가 다룬다.
-related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
-updated: 2026-07-26
+related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-3-continuous-learning, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
+updated: 2026-07-30
 ---
 
 # 체크인 원장 계약 — `eval_events` 실체화
@@ -84,10 +84,16 @@ appendEvalEvent(event: EvalEventInput): EvalEvent;   // id/at are store-owned wh
 listEvalEvents(agentId: string, opts?: {
   kind?: EvalEventKind;
   taskType?: string;
+  /** Reflection reads one session's autonomous rows (0.4.0, M8a). */
+  sessionId?: string;
   /** Newest N — the growth window reads this rather than the whole history. */
   limit?: number;
 }): EvalEvent[];
 deleteEvalEvents(selector: { agentId: string } | { sessionId: string }): void;
+/** The ONLY after-the-fact mutation the ledger allows (0.4.0, M8a).
+ *  Flips payload.correctedAfter on an 'autonomous' row; any other kind is a no-op
+ *  returning false. Written by the session-reflection pass, never by an agent turn. */
+markEvalEventCorrected(id: string): boolean;
 ```
 
 `deleteEvalEvents`는 사용자가 세션이나 에이전트를 지울 때 원장도 함께 지우기 위한 것이다. **성장 기록은 사용자의 행동 기록이므로 지울 수 있어야 한다** — 메모리의 delete-by-source와 같은 원칙이다.
@@ -101,6 +107,7 @@ deleteEvalEvents(selector: { agentId: string } | { sessionId: string }): void;
 5. **에이전트는 이 테이블을 읽을 수 없다.** 도구로도, 주입으로도 노출하지 않는다. 자기 점수를 보면 그것을 최적화한다(§7).
 6. **아무도 답하지 않은 체크인은 행이 되지 않는다.** 턴이 중단되거나 프롬프트가 만료된 것은 관측이 아니다. 빗나감으로 적으면 사용자가 자리를 비운 것을 에이전트 탓으로 돌리고, 제외 행으로 적어도 커버리지를 같은 이유로 끌어내린다. "모두 남긴다"가 틀리는 유일한 경우다 — 남기는 사건 자체가 지어낸 것이기 때문이다.
 7. **`autonomous`와 `tripwire`는 에이전트가 아니라 게이트가 쓴다.** 결과적 행동(`isConsequentialTool`)이 통과하면 `autonomous`, 거부되면 `tripwire`다. 에이전트는 묻지 않기를 고를 수 있어도 **집계되지 않기를 고를 수는 없다**(지표 §4.5).
+8. **원장 행은 기록 후 불변이되, `correctedAfter` 하나만 예외다.** 세션 회고 패스([`phase-3-continuous-learning`](phase-3-continuous-learning.md) §4)가 `autonomous` 행에 한해 `markEvalEventCorrected`로 뒤집는다. `hit`·`chosen` 같은 라벨은 여전히 기록 시점에 확정되고 다시 계산되지 않는다(불변식 1). 이 예외가 필드 하나로 좁은 이유는, 사후 변경 가능한 필드가 늘수록 "원장을 나중에 유리하게 고친다"는 게이밍 표면이 함께 늘기 때문이다.
 
 ## 5. API
 

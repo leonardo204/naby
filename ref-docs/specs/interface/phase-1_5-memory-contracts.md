@@ -2,11 +2,11 @@
 id: phase-1_5-memory-contracts
 title: Phase 1.5 — Memory Contracts (scoped schema, write gate, injection, Store extension)
 type: interface
-version: 0.2.0
+version: 0.3.0
 status: draft
 scope: The on-disk and in-process contracts for Phase 1.5 scoped memory — the memory record shape (scope/type/provenance/confidence/status), the keying model and how it extends (not violates) the Phase-1 sessionId-only invariant, the cascade-exemption rules, the deterministic memory write-gate contract, the turn-time retrieval + token-budget injection contract, and the Store interface additions.
-related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl]
-updated: 2026-07-23
+related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl, phase-3-continuous-learning]
+updated: 2026-07-30
 ---
 
 # Phase 1.5 — Memory Contracts
@@ -246,7 +246,7 @@ interface Store {
 
 ## 8. Open questions (shared with impl §9)
 
-- Update/conflict/forgetting policy — `updatedAt` and `status` make it expressible; the policy (latest-wins vs. supersede, per-type expiry) is deferred.
+- Update/conflict/forgetting policy — `updatedAt` and `status` make it expressible; the policy (latest-wins vs. supersede, per-type expiry) is deferred. **Partially resolved by P3-M8b** (`phase-3-continuous-learning` §5, 2026-07-30): cross-session corroboration is tracked in `memory_observations` (recorded by `putMemory` when `provenance.sessionId` is present; reset when the value materially changes), and an opt-in setting may auto-confirm artifact-tier rows corroborated by ≥3 distinct sessions. Invariant 1 stands — `external` never auto-confirms, setting or no setting.
 - Token-budget default and per-type injection priority — tunables, set with real data.
 - `app.db` encryption at rest — now sharpened to a decision (design §6, contracts §6, phase-2 §9); scoped memory is personal work content.
 - Whether `userId`/`orgId` are real identifiers or (single-user machine) constants until multi-user/in-house rollout.
