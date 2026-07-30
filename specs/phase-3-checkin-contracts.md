@@ -2,7 +2,7 @@
 id: phase-3-checkin-contracts
 title: Phase 3 P3-M5 — 체크인 원장 계약 (eval_events 실체화)
 type: interface
-version: 0.4.0
+version: 0.5.0
 status: active
 scope: 나비 신뢰 지표가 읽고 쓰는 이벤트 원장의 계약. P15-03이 예약해 둔 `eval_events` 스키마를 체크인·자율행동·트립와이어 세 종류 이벤트로 실체화하고, 스토어 메서드와 불변식을 정의한다. 지표 계산 알고리즘 자체는 butterfly-trust-meter가 다룬다.
 related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-3-continuous-learning, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
@@ -66,6 +66,11 @@ type EvalEvent = {
   /** Set true when the user later corrected the result — the miss signal for
    *  the covered region, without which coverage would be free to inflate. */
   correctedAfter?: boolean;
+  /** Epoch ms when the reflection pass put this event before the judge
+   *  (0.5.0, M8d). Present + no correctedAfter = a WEAK implicit accept —
+   *  the user had a chance to react and did not. Absent = never reviewed;
+   *  "unseen" and "seen, uncorrected" must not be conflated. */
+  reviewedAt?: number;
 
   // -- kind: 'tripwire' ----------------------------------------------------
   toolName?: string;
@@ -94,6 +99,13 @@ deleteEvalEvents(selector: { agentId: string } | { sessionId: string }): void;
  *  Flips payload.correctedAfter on an 'autonomous' row; any other kind is a no-op
  *  returning false. Written by the session-reflection pass, never by an agent turn. */
 markEvalEventCorrected(id: string): boolean;
+/** The SECOND (and last) after-the-fact mutation (0.5.0, M8d). Stamps
+ *  payload.reviewedAt on an 'autonomous' row for every action the reflection pass
+ *  put before its judge — corrected ones included. Any other kind is a no-op
+ *  returning false, and a row that already carries a timestamp KEEPS THE FIRST
+ *  one (returning true): a re-sweep must not slide an old action into the recent
+ *  implicit window. */
+markEvalEventReviewed(id: string, reviewedAt: number): boolean;
 ```
 
 `deleteEvalEvents`는 사용자가 세션이나 에이전트를 지울 때 원장도 함께 지우기 위한 것이다. **성장 기록은 사용자의 행동 기록이므로 지울 수 있어야 한다** — 메모리의 delete-by-source와 같은 원칙이다.
@@ -107,7 +119,7 @@ markEvalEventCorrected(id: string): boolean;
 5. **에이전트는 이 테이블을 읽을 수 없다.** 도구로도, 주입으로도 노출하지 않는다. 자기 점수를 보면 그것을 최적화한다(§7).
 6. **아무도 답하지 않은 체크인은 행이 되지 않는다.** 턴이 중단되거나 프롬프트가 만료된 것은 관측이 아니다. 빗나감으로 적으면 사용자가 자리를 비운 것을 에이전트 탓으로 돌리고, 제외 행으로 적어도 커버리지를 같은 이유로 끌어내린다. "모두 남긴다"가 틀리는 유일한 경우다 — 남기는 사건 자체가 지어낸 것이기 때문이다.
 7. **`autonomous`와 `tripwire`는 에이전트가 아니라 게이트가 쓴다.** 결과적 행동(`isConsequentialTool`)이 통과하면 `autonomous`, 거부되면 `tripwire`다. 에이전트는 묻지 않기를 고를 수 있어도 **집계되지 않기를 고를 수는 없다**(지표 §4.5).
-8. **원장 행은 기록 후 불변이되, `correctedAfter` 하나만 예외다.** 세션 회고 패스([`phase-3-continuous-learning`](phase-3-continuous-learning.md) §4)가 `autonomous` 행에 한해 `markEvalEventCorrected`로 뒤집는다. `hit`·`chosen` 같은 라벨은 여전히 기록 시점에 확정되고 다시 계산되지 않는다(불변식 1). 이 예외가 필드 하나로 좁은 이유는, 사후 변경 가능한 필드가 늘수록 "원장을 나중에 유리하게 고친다"는 게이밍 표면이 함께 늘기 때문이다.
+8. **원장 행은 기록 후 불변이되, 회고가 소유한 `correctedAfter`·`reviewedAt` 둘만 예외다**(0.5.0에서 `reviewedAt` 추가). 세션 회고 패스([`phase-3-continuous-learning`](phase-3-continuous-learning.md) §4·§7)가 `autonomous` 행에 한해 쓴다 — 교정은 `markEvalEventCorrected`, 리뷰 표시는 judge에 올린 모든 사건에. `hit`·`chosen` 같은 라벨은 여전히 기록 시점에 확정되고 다시 계산되지 않는다(불변식 1). 예외를 회고 소유 필드로 좁게 유지하는 이유는, 사후 변경 가능한 필드가 늘수록 "원장을 나중에 유리하게 고친다"는 게이밍 표면이 함께 늘기 때문이다. 에이전트 턴은 두 필드 어느 쪽도 쓸 수 없다.
 
 ## 5. API
 
@@ -127,7 +139,7 @@ markEvalEventCorrected(id: string): boolean;
 - `taskType`을 누가 정하는가. 모델이 붙이면 게이밍 표면이 늘고, 도구 조합에서 유도하면 거칠다. 1차는 **모델이 제시하되 원장에 그대로 기록하고**, 유형별 질문율 상한으로 남용을 잡는다.
 - `domain` 태그는 P15-03이 예약했으나 M5에서 쓰지 않는다. 필드만 두고 비워 둔다(나중에 마이그레이션이 필요 없게).
 - **커버리지는 호출 단위로 센다.** 체크인 한 번 뒤에 쓰기 세 번이면 `autonomous` 세 행이다. 지금은 커버리지를 **보고만 하고 게이트로 쓰지 않으므로** 성립하지만, 커버리지 하한을 실제로 걸려면 "체크인이 자기 결정을 수행하는 호출들을 어떻게 자기 것으로 주장하는가"를 먼저 정해야 한다.
-- **MCP 도구는 분류되지 않는다.** `isConsequentialTool`은 하네스 내장 도구와 우리 도구만 안다. 메일을 보내는 서드파티 MCP 도구는 실제로 결과적이지만 행을 남기지 않는다. 도구 이름으로 위험을 추측하는 것이 더 나쁘다 — 선언된 주석이나 사용자 정책 규칙 같은 실제 신호가 필요하다.
+- ✅ **MCP 도구 분류 해소(0.5.0, M8d).** 이름으로 추측하지 않고 선언을 읽는다 — MCP 주석 `readOnlyHint: true`로 선언된 도구만 관찰(비결과적)이고, 그 외(주석 없음 포함)는 **결과적으로 취급한다(fail-closed).** 사용자가 ask/deny 정책 규칙을 건 도구는 주석과 무관하게 결과적이다. 상세 → [`phase-3-continuous-learning`](phase-3-continuous-learning.md) §7.4.
 - ✅ **체크인 텔레그램 에스컬레이션 완료(2026-07-26).** 한 폴링 루프가 두 종류의 질문을 처리한다 — 승인은 허용/거부, 체크인은 번호 버튼(`nbchk:<index>:<ref>`)이다. 루프를 둘 돌리면 `getUpdates`가 둘 떠서 텔레그램이 409로 답하고 양쪽이 다 깨지므로, 워터마크와 백로그 드레인을 공유한다.
   - **여기서 잠재 버그를 잡았다.** `callback_data`는 64바이트가 한계인데, 승인 콜백이 id를 그대로 박고 있었다. 실측하니 Agent SDK의 UUID 세션이면 **78바이트**로 넘쳐서 sendMessage 자체가 실패한다 — 버튼이 아예 안 뜨고 에스컬레이션이 조용히 "앱에서 답하세요"로 퇴화한다. 이제 짧은 **ref 토큰**을 쓰며, 승인·체크인 모두 구조적으로 한계 안에 들어온다.
   - **추천안은 전화기로 보내지 않는다.** 인앱 프롬프트가 답한 뒤에 공개하는 이유(지표가 UI 순응도를 재게 된다)가 전화기에서 더 강하게 적용된다. 사용자가 가장 덜 숙고하는 화면이다.

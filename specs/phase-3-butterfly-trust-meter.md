@@ -2,11 +2,11 @@
 id: phase-3-butterfly-trust-meter
 title: Phase 3 P3-M5 — 나비 신뢰 지표 (알고리즘 설계)
 type: design
-version: 0.5.0
+version: 0.6.0
 status: active
 scope: 페르소나 에이전트를 얼마나 믿고 맡길 수 있는지를 측정해 알·애벌레·번데기·나비로 표시하는 알고리즘. 체크인 적중률의 Wilson 하한, 커버리지, 물음 트리거, 창 관리, 보정, 트립와이어, 작업유형별 범위, 후퇴 진단, 게이밍 방어를 정한다. 이벤트 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
-related: [phase-3-persona-agent, phase-3-checkin-contracts, phase-3-agent-export, personalization-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
-updated: 2026-07-25
+related: [phase-3-persona-agent, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, personalization-strategy, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
+updated: 2026-07-30
 ---
 
 # Phase 3 P3-M5 — 나비 신뢰 지표 (알고리즘 설계)
@@ -132,6 +132,20 @@ Claude Code 권한 모델의 핵심은 **graduated trust**다. 이진 허용이 
 
 Google ADK/Vertex 에이전트 평가는 **trajectory 평가와 final response 평가를 따로** 낸다(`trajectory_exact_match`, `in_order_match`, `any_order_match`, `precision`, `recall`). 우연히 결과만 맞은 것과 접근까지 맞은 것을 구분하려는 설계다. 체크인에서 사용자가 **어느 선택지를 골랐는지**까지 기록해 "결과는 받아들였지만 접근은 달랐다"를 구분한다.
 
+### 4.11 암묵 라벨의 가중 편입 (P3-M8d, 2026-07-30)
+
+세션 회고([`phase-3-continuous-learning`](phase-3-continuous-learning.md) §4·§7)가 만든 암묵 라벨을 정확도 축에 가중 합산한다. 리뷰된 자율 행동(`reviewedAt` 있음)에서 사후 교정이 없으면 약한 적중, 있으면 약한 빗나감이다.
+
+```
+s = s_checkin + w·s_implicit      n = n_checkin + w·n_implicit      w = IMPLICIT_WEIGHT = 0.25
+```
+
+- **w = 0.25인 이유**: 무교정은 사용자가 결과를 확인했다는 보장이 없는 약한 라벨이다. 무교정 4건이 명시 체크인 적중 1건과 같다.
+- **창은 분리한다**: 명시 창 20(기존 그대로), 암묵 창은 최근 리뷰된 40건 — 가중 후 유효 표본 최대 10이라 암묵이 명시를 압도할 수 없다.
+- **표본 최소치(`GROWTH_MIN_SAMPLE=5`)는 명시 체크인만 센다.** 암묵 라벨만으로는 알을 벗어날 수 없다. 검증의 바닥은 여전히 "먼저 묻고 맞혔는가"다.
+- **ADWIN은 명시 시퀀스로 감지하고**, 잘린 시각 이후의 암묵 이벤트만 편입한다.
+- **회귀 불변**: 리뷰된 이벤트가 0이면 이 절 도입 전과 모든 숫자가 동일하다.
+
 ## 5. 나비 게이트 (다섯 축 동시 성립)
 
 | 축 | 조건 |
@@ -192,6 +206,7 @@ Google ADK/Vertex 에이전트 평가는 **trajectory 평가와 final response �
 - ✅ **내보내기(P3-M6)** — 상세 → [`phase-3-agent-export`](phase-3-agent-export.md). **단계는 주장이 아니라 출처**라서, 내보낸 파일이 다른 기기에서 멘션 권한을 선언할 수 없다.
 - ✅ **임포트(P3-M7)** — 파일은 신뢰를 선언할 수 없다. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md) §7.
 - ✅ **2차 축** — Brier 보정과 물음 판단 정밀도·재현율. **측정하고 보여주되 게이트에 넣지 않는다**(§11의 결정 그대로).
+- ✅ **암묵 라벨의 가중 편입(P3-M8d)** — §4.11 구현 완료. `IMPLICIT_WEIGHT=0.25`·`IMPLICIT_WINDOW=40`이 `src/runtime/growth.ts`에 있고, 리뷰된 이벤트가 0이면 모든 숫자가 이전과 동일하다는 회귀 불변을 `spike:growth`가 M8d 이전 구현 사본과 대조해 증명한다(27/27 PASS). 상세 → [`phase-3-continuous-learning`](phase-3-continuous-learning.md) §7.6.
 
 ### 9.2 2차 축을 어떻게 보여주는가
 
