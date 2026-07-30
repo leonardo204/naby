@@ -135,7 +135,7 @@ Agent {
     - 도구의 기본 스코프는 `agent.memoryScope`다. **읽기(주입)는 계속 전 스코프 합집합으로 둔다** — 좁히면 품질만 떨어진다. `memoryScope`는 "어디에 쓰는가"를 정한다.
   - 검증: 신규 스파이크 `spike:learn` **10/10 PASS**. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌려 **루프를 닫는 것까지** 확인한다. 캡처가 `proposed`+`artifact`로 안착 → **proposed는 다음 턴에 주입되지 않음** → 사용자 confirm → **같은 사실이 다음 턴 시스템 프롬프트에 등장**. 여기에 라우팅 없는 턴은 도구·지시 모두 없음, 시크릿 거부 후 미기록, `org` 거부, cwd 없는 턴의 `project` 거부까지 본다. 회귀: `spike:02` 5/5, `spike:autonomy` 10/10, `spike:agents`·`spike:p15`(11/11) PASS, 셸 281/281, 타입체크 clean(양 트리), `build:app` exit 0. **미검증: 라이브 모델이 무엇을 기억할 만하다고 판단하는지의 품질(모델 필요), Settings 검토 UI 시각 렌더.**
   - 남음(M4c): 모델 판단이 아니라 **편집·승인 신호에서 선호를 추출**하는 루프. 전략 문서가 Phase 2b(추출·검증)에 배치했고, 북극성 지표(편집률 감소 곡선)를 실제로 움직이는 부분이다. → **P3-M8(연속 학습)로 승계** — [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
-- **P3-M8** 🔶 **M8a·M8b 완료(2026-07-30)** — 연속 학습. 모든 세션의 대화록을 학습 증거로 바꾸는 루프. M8a(세션 회고 1차 — 암묵 교정 `correctedAfter` 기록)와 M8b(기억 제안 + 교차 세션 확증·옵트인 자동 confirm)를 구현·검증했다. 상세와 M8c~M8d → [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
+- **P3-M8** 🔶 **M8a·M8b·M8c 완료(2026-07-30)** — 연속 학습. 모든 세션의 대화록을 학습 증거로 바꾸는 루프. M8a(세션 회고 1차 — 암묵 교정 `correctedAfter` 기록), M8b(기억 제안 + 교차 세션 확증·옵트인 자동 confirm), M8c(어휘 관련도 주입 랭킹 + 학습 깊이 패널 + 순수 대화 세션 회고)를 구현·검증했다. 상세와 M8d → [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
 
 ## 8. 결정 사항 (2026-07-25 확정)
 

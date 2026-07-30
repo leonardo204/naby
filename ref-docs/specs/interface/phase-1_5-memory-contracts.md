@@ -2,7 +2,7 @@
 id: phase-1_5-memory-contracts
 title: Phase 1.5 — Memory Contracts (scoped schema, write gate, injection, Store extension)
 type: interface
-version: 0.3.0
+version: 0.4.0
 status: draft
 scope: The on-disk and in-process contracts for Phase 1.5 scoped memory — the memory record shape (scope/type/provenance/confidence/status), the keying model and how it extends (not violates) the Phase-1 sessionId-only invariant, the cascade-exemption rules, the deterministic memory write-gate contract, the turn-time retrieval + token-budget injection contract, and the Store interface additions.
 related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl, phase-3-continuous-learning]
@@ -121,6 +121,10 @@ type MemoryInjectionQuery = {
   sessionId: string;
   cwd?: string;             // project scope, if the session is projected
   taskType?: string;        // hint from the turn (aligns with eval_events.task_type)
+  /** The turn's user text, for relevance ranking (P3-M8c, additive 0.4.0).
+   *  Absent or unmatched ⇒ ranking falls back to the scope/type/recency order —
+   *  a turn without a relevance signal is byte-for-byte what it was before. */
+  queryText?: string;
   tokenBudget: number;      // HARD cap on injected memory tokens for this turn
 };
 
