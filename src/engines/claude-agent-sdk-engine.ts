@@ -228,6 +228,37 @@ export function resolveClaudeAgentSdkPath(): string | null {
 /** The SDK's own option/server types, derived from the real package so they
  *  cannot drift from it silently. */
 type QueryOptions = NonNullable<Parameters<AgentSdk['query']>[0]['options']>;
+
+/**
+ * The Agent SDK's NATIVE "ask the user" tool, named so it can be TAKEN AWAY.
+ *
+ * THE BUG THIS EXISTS TO CLOSE. Built-ins are enabled here on purpose (see the
+ * header), and the SDK's built-in set includes `AskUserQuestion` — a tool that
+ * asks the user a multiple-choice question. Naby already has one of those:
+ * `naby_checkin` (`mcp__nabytools__naby_checkin`), which is not a duplicate but
+ * a DIFFERENT KIND OF THING. A check-in renders in Naby's own UI, records the
+ * agent's recommendation against the user's answer, and writes the eval-event
+ * row that the trust meter reads. It is how the persona is scored.
+ *
+ * With both live, the model reached for the native one — it is a first-class
+ * built-in, and its description reads like the obvious way to ask something. The
+ * consequences were both silent:
+ *
+ *   * this shell renders no UI for it, so the call came back as an error
+ *     ("Answer questions?") and the user was never actually asked; and
+ *   * `AskUserQuestion` is an OBSERVATION tool (runtime/checkin.ts
+ *     `OBSERVATION_RUNTIME_TOOLS`), so it leaves NO ledger row — the agent had
+ *     asked nothing, and nothing said so.
+ *
+ * The net effect on a subscription machine was that check-ins simply never
+ * happened while everything looked healthy. Denying the native tool leaves
+ * `naby_checkin` as the ONLY way to ask, which is the property the meter needs.
+ *
+ * NOTE: this is about AVAILABILITY GOING FORWARD, not about history. Transcripts
+ * recorded before this change still contain `AskUserQuestion` calls, and the
+ * shell's viewer still renders them; nothing here rewrites the past.
+ */
+export const NATIVE_ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
 type SdkMcpServer = ReturnType<AgentSdk['createSdkMcpServer']>;
 
 /**
@@ -250,6 +281,23 @@ export function buildQueryOptions(args: {
   preToolUse: HookCallback;
   abortController: AbortController;
   onStderr: (data: string) => void;
+  /**
+   * HEADLESS MODE — for a call that is not a user's turn.
+   *
+   * A background caller (the reflection judge) asks the model one question and
+   * reads one JSON answer. It has no project, no cwd worth naming, and no reason
+   * to inherit a harness. Omitting `cwd` is NOT enough to get that: the SDK
+   * documents `cwd` as defaulting to `process.cwd()`, and `settingSources` below
+   * is set unconditionally — so an "absent cwd" call would silently load the
+   * CLAUDE.md, settings and HOOKS of whatever directory the Electron main process
+   * happens to sit in (naby's own checkout, in development). A hook there could
+   * delay or interfere with a call the user never asked for and cannot see.
+   *
+   * `isolated` says so explicitly: no setting sources at all. Everything else —
+   * the gate, the disallowed built-in, the MCP restriction — is unchanged,
+   * because a background call has LESS licence than a turn, not more.
+   */
+  isolated?: boolean;
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
   return {
@@ -263,6 +311,14 @@ export function buildQueryOptions(args: {
     // built-in call — including calls issued INSIDE a spawned subagent — and can
     // authoritatively deny mutation/exec before it runs. See the header block.
     mcpServers: { [MCP_SERVER_NAME]: mcpServer },
+    // THE ONE BUILT-IN WE TAKE BACK. `tools` stays unset (above) so the harness
+    // built-ins stay live, but `disallowedTools` removes this single name from
+    // the model's context entirely — the SDK documents it as "removed from the
+    // model's context and cannot be used, even if they would otherwise be
+    // allowed", which is stronger than a gate denial: the model never sees a
+    // second way to ask, so it cannot prefer one. See
+    // `NATIVE_ASK_USER_QUESTION_TOOL` for what went wrong when it could.
+    disallowedTools: [NATIVE_ASK_USER_QUESTION_TOOL],
     hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
     // deny is authoritative even here:
     permissionMode: 'bypassPermissions',
@@ -294,7 +350,10 @@ export function buildQueryOptions(args: {
     // is only TRUE now that `cwd` above points at the opened project; with
     // the old inherited cwd this same setting was actively harmful. The two
     // lines are a pair: do not keep this one without that one.
-    settingSources: ['user', 'project', 'local'],
+    //
+    // …EXCEPT for a headless call, which names no directory and must not adopt
+    // one's harness. See `isolated` on this function's argument.
+    settingSources: args.isolated ? [] : ['user', 'project', 'local'],
     // NABY OWNS MCP. Without this the SDK MERGES the user's global MCP servers
     // (`~/.claude` settings, project `.mcp.json`, plugins) into the session, so a
     // server the user configured for Claude Code elsewhere leaks in as
@@ -977,6 +1036,15 @@ export class ClaudeAgentSdkEngine implements Engine {
   /** Diagnostics from the most recent run(); the spike asserts on this. */
   diagnostics: ClaudeEngineDiagnostics = { stderr: [], shadowWarningSeen: false };
 
+  /** See `isolated` on `buildQueryOptions`. Set by background callers (the
+   *  reflection judge) that are not answering a user and must not adopt any
+   *  directory's harness. Defaults to false: a turn behaves exactly as before. */
+  private readonly isolated: boolean;
+
+  constructor(opts: { isolated?: boolean } = {}) {
+    this.isolated = opts.isolated === true;
+  }
+
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
     // The SDK is loaded HERE, inside run(), so that constructing the engine is
     // always safe. A packaged build can hold a reference to this class without
@@ -1177,6 +1245,7 @@ export class ClaudeAgentSdkEngine implements Engine {
           diagnostics.stderr.push(data);
           if (data.includes(SHADOW_WARNING)) diagnostics.shadowWarningSeen = true;
         },
+        ...(this.isolated ? { isolated: true } : {}),
       }),
     });
 

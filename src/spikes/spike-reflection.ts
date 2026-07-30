@@ -22,6 +22,14 @@
 //       the user never typed. The cursor still advances (the session WAS read).
 //   (e) The active session is excluded, and one sweep stops at REFLECTION_SWEEP_CAP.
 //   (f) A FAILING judge leaves the cursor untouched, so the evidence is retried.
+//   (y) An UNAVAILABLE judge — no provider key and no local Claude sign-in — is
+//       not the same thing as a judge that read the session and found nothing.
+//       It stamps no `reviewedAt` and advances no cursor, so no weak-accept
+//       evidence is manufactured out of an absence.
+//   (z) …and the next sweep, once a judge exists, judges exactly that backlog.
+//   (aa) The subscription fallback runs HEADLESS: `settingSources: []`, so a
+//       background judge call adopts no directory's CLAUDE.md or hooks. Omitting
+//       `cwd` is not enough — the SDK defaults it to `process.cwd()`.
 //   (g) `markEvalEventCorrected` refuses every kind but `autonomous`.
 //   (h) What it wrote reaches the meter: missedAsks rises, ask-recall falls below 1,
 //       and `correctedAfter` shows in the growth state.
@@ -90,8 +98,11 @@ import {
   type CheckinRecord,
 } from '../runtime/growth.js';
 import { DEFAULT_USER_ID, retrieveForInjection } from '../runtime/memory-inject.js';
+import { buildQueryOptions } from '../engines/claude-agent-sdk-engine.js';
+import type { EngineRunInput } from '../runtime/engine.js';
 import {
   MEMORY_AUTO_CONFIRM_KEY,
+  ReflectionJudgeUnavailableError,
   runReflectionSweep,
 } from '../../shell/packages/feature/agent/src/server/lib/reflection.js';
 
@@ -176,6 +187,14 @@ const hallucinatingJudge: ReflectionJudge = async (cases) => [
 
 const failingJudge: ReflectionJudge = async () => {
   throw new Error('provider unavailable');
+};
+
+/** A machine with NO judge on it: no provider key AND no local Claude sign-in.
+ *  Distinct from `failingJudge` on purpose — a failed CALL is one session's bad
+ *  luck, while this is a fact about the machine, and the two are handled
+ *  differently by the sweep. */
+const unavailableJudge: ReflectionJudge = async () => {
+  throw new ReflectionJudgeUnavailableError('no reflection judge is available (spike)');
 };
 
 function correctedFlag(store: Store, id: string): boolean {
@@ -294,6 +313,116 @@ async function checkJudgeFailure(store: Store, label: string): Promise<void> {
       retry.markedEvents === 1 &&
       correctedFlag(store, eventId),
     `afterFailure: swept=${failed.sweptSessions} cursor=${JSON.stringify(cursorAfterFailure)}; retry: marked=${retry.markedEvents} correctedAfter=${correctedFlag(store, eventId)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// (y) NO JUDGE AT ALL is not an empty answer
+// ---------------------------------------------------------------------------
+
+/**
+ * The regression this pins is the one that made the meter lie on every
+ * subscription-only machine.
+ *
+ * `modelReflectionJudge` used to answer "no provider credential" by returning
+ * `[]` — the SAME value it returns after reading a session and finding nothing
+ * wrong. The sweep cannot tell those apart, so it did what it does after a real
+ * answer: stamped every case `reviewedAt` and advanced the cursor. Since
+ * reviewed-and-uncorrected is the weak ACCEPT that M8d blends into the trust
+ * bound, the meter was fed evidence that no model had ever produced, and the
+ * cursor had moved past it so it could never be re-read.
+ *
+ * Asserted here on the REAL sweep: an unavailable judge stamps nothing, moves no
+ * cursor, and leaves the backlog for a sweep that can actually read it.
+ */
+async function checkJudgeUnavailable(store: Store, label: string): Promise<void> {
+  const eventId = seedActionSession(store, 'sess-nojudge', 4_500, CORRECTION);
+
+  const out = await runReflectionSweep(store, unavailableJudge, { now: LATER() });
+  const cursorAfter = store.getReflectionCursor('sess-nojudge');
+  const rowAfter = store.listEvalEvents(AGENT).find((e) => e.id === eventId);
+
+  record(
+    `(y) [${label}] an unavailable judge stamps no reviewedAt and advances no cursor`,
+    out.sweptSessions === 0 &&
+      out.reviewedEvents === 0 &&
+      out.markedEvents === 0 &&
+      cursorAfter === undefined &&
+      rowAfter?.reviewedAt === undefined &&
+      rowAfter?.correctedAfter === undefined,
+    `swept=${out.sweptSessions} reviewed=${out.reviewedEvents} marked=${out.markedEvents}; ` +
+      `cursor=${JSON.stringify(cursorAfter)}; row reviewedAt=${String(rowAfter?.reviewedAt)} correctedAfter=${String(rowAfter?.correctedAfter)}`,
+  );
+
+  // AND THE EVIDENCE IS STILL THERE. The next sweep — on a machine that now has
+  // a key, or a user who has signed in — judges exactly what the first one could
+  // not, which is the whole point of not advancing.
+  const calls: ReflectionCase[][] = [];
+  const retry = await runReflectionSweep(store, honestJudge(calls), { now: LATER() });
+  const rowRetried = store.listEvalEvents(AGENT).find((e) => e.id === eventId);
+  record(
+    `(z) [${label}] the same evidence is judged on the next sweep, once a judge exists`,
+    calls.length === 1 &&
+      retry.sweptSessions === 1 &&
+      retry.reviewedEvents === 1 &&
+      retry.markedEvents === 1 &&
+      typeof rowRetried?.reviewedAt === 'number' &&
+      rowRetried?.correctedAfter === true &&
+      store.getReflectionCursor('sess-nojudge') !== undefined,
+    `judge calls on retry=${calls.length}; swept=${retry.sweptSessions} reviewed=${retry.reviewedEvents} marked=${retry.markedEvents}; ` +
+      `row reviewedAt=${String(rowRetried?.reviewedAt)} correctedAfter=${String(rowRetried?.correctedAfter)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// (aa) the subscription fallback adopts nobody's harness
+// ---------------------------------------------------------------------------
+
+/**
+ * The judge's SECOND backend is `ClaudeAgentSdkEngine`, driven headlessly on a
+ * local Claude sign-in — which is what makes reflection work at all on a machine
+ * with no API key. Driving it for real needs that sign-in, so what is asserted
+ * here is the part that is a pure function of our own code and would otherwise be
+ * verified by nobody: WHAT THE ENGINE ASKS THE SDK FOR.
+ *
+ * The trap being pinned: "give it no cwd" does NOT mean "it loads no harness".
+ * The SDK documents `cwd` as defaulting to `process.cwd()`, and `settingSources`
+ * is set unconditionally — so a judge call that merely omits `cwd` would load the
+ * CLAUDE.md, settings and HOOKS of whatever directory the Electron main process
+ * happens to sit in (naby's own checkout, in development) into a background call
+ * the user never made and cannot see. `isolated` is what actually prevents it.
+ */
+function checkHeadlessJudgeIsolation(): void {
+  const input = {
+    model: { providerId: 'dev-claude' },
+    messages: [{ role: 'user' as const, content: 'judge this' }],
+    toolSchemas: [],
+    executors: {},
+    gate: async () => ({ behavior: 'deny' as const }),
+    signal: new AbortController().signal,
+  } as unknown as EngineRunInput;
+  const other = {
+    mcpServer: {} as never,
+    preToolUse: (async () => ({})) as never,
+    abortController: new AbortController(),
+    onStderr: () => {},
+  };
+  const headless = buildQueryOptions({ input, ...other, isolated: true });
+  const turn = buildQueryOptions({ input, ...other });
+
+  record(
+    '(aa) the headless judge loads NO setting sources, while an ordinary turn still loads all three',
+    JSON.stringify(headless.settingSources) === '[]' &&
+      JSON.stringify(turn.settingSources) === JSON.stringify(['user', 'project', 'local']) &&
+      // No cwd is named either way here — which is exactly why settingSources had
+      // to be the lever: absent cwd silently becomes process.cwd().
+      headless.cwd === undefined &&
+      // Isolation is not a licence: the gate hook and the disallowed native
+      // ask-the-user tool are unchanged on the background path.
+      headless.hooks !== undefined &&
+      (headless.disallowedTools ?? []).includes('AskUserQuestion'),
+    `headless settingSources=${JSON.stringify(headless.settingSources)} cwd=${String(headless.cwd)} ` +
+      `disallowedTools=${JSON.stringify(headless.disallowedTools)}; turn settingSources=${JSON.stringify(turn.settingSources)}`,
   );
 }
 
@@ -1165,6 +1294,9 @@ async function runDriverChecks(makeBase: () => Store, label: string): Promise<vo
   await checkJudgeFailure(s, label);
   s.close();
   s = make();
+  await checkJudgeUnavailable(s, label);
+  s.close();
+  s = make();
   checkKindGuard(s, label);
   s.close();
   s = make();
@@ -1206,6 +1338,7 @@ async function main(tmpDir: string): Promise<boolean> {
   await runDriverChecks(() => new MemoryStore(), 'MemoryStore');
   await runDriverChecks(() => new SqliteStore({ path: ':memory:' }), 'SqliteStore');
   checkValidatorDirectly();
+  checkHeadlessJudgeIsolation();
   checkMigration(join(tmpDir, 'v7.db'));
   checkMemoryMigration(join(tmpDir, 'v8.db'));
 

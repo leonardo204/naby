@@ -22,8 +22,12 @@
 //   (k) P3-M8d: an MCP tool is classified from DECLARATIONS, not from its name —
 //       `readOnlyHint: true` is an observation, anything undeclared counts, and a
 //       user's own ask/deny rule outranks whatever the server claims.
+//   (l) The dev engine DISALLOWS the SDK's native `AskUserQuestion`, so
+//       `naby_checkin` is the only way to ask the user — the thing that made
+//       check-ins vanish on subscription machines.
 //
 // No store and no engine: the sink is a fake, so this runs in milliseconds.
+// (l) reads the production query options as a value; still no model, no network.
 
 import {
   classifyToolConsequence,
@@ -34,6 +38,11 @@ import {
 } from '../runtime/checkin.js';
 import { makeCheckin, type CheckinLedgerRow } from '../runtime/tools.js';
 import { computeGrowth, type CheckinRecord } from '../runtime/growth.js';
+import {
+  buildQueryOptions,
+  NATIVE_ASK_USER_QUESTION_TOOL,
+} from '../engines/claude-agent-sdk-engine.js';
+import type { EngineRunInput } from '../runtime/engine.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 const checks: Check[] = [];
@@ -337,6 +346,49 @@ const TAKE_RECOMMENDED = (q: CheckinQuestion): CheckinAnswer => ({ chosen: q.rec
       !isReversibleAction('mail__send_email'),
     `readOnlyHint:true=${declaredReadOnly}; readOnlyHint:false=${declaredWritable}; no annotation=${undeclared}; ` +
       `read-only + ask rule=${underAskRule}; built-ins unmoved=${builtinsUnmoved}; MCP reversible=${isReversibleAction('mail__send_email')}`,
+  );
+}
+
+// -- (l) the SDK's native ask-the-user tool is taken away ------------------
+{
+  // THE REGRESSION THIS PINS. The dev/subscription engine leaves `tools` unset,
+  // so every SDK built-in is live — including the native `AskUserQuestion`. The
+  // model preferred it over `naby_checkin`, and because this shell renders no UI
+  // for it the user was never asked; worse, `AskUserQuestion` is an OBSERVATION
+  // tool, so the miss left no ledger row and the meter saw a silent, blameless
+  // agent that had in fact stopped checking in entirely.
+  //
+  // Asserted on the SAME function the engine calls (`buildQueryOptions`) and
+  // WITHOUT a model: this is the one flag that decides whether the check-in path
+  // has a competitor, so it is worth an assertion that cannot be skipped for
+  // want of a live sign-in.
+  const input = {
+    model: { providerId: 'dev-claude' },
+    messages: [{ role: 'user' as const, content: 'hi' }],
+    toolSchemas: [],
+    executors: {},
+    gate: async () => ({ behavior: 'allow' as const }),
+    signal: new AbortController().signal,
+  } as unknown as EngineRunInput;
+  const opts = buildQueryOptions({
+    input,
+    mcpServer: {} as never,
+    preToolUse: (async () => ({})) as never,
+    abortController: new AbortController(),
+    onStderr: () => {},
+  });
+  const disallowed = opts.disallowedTools ?? [];
+  // `tools` must STAY unset — denying one built-in is not an excuse to strip the
+  // harness (Task / Skill / Read), which is what `tools: []` used to do.
+  const builtinsStillLive = (opts as { tools?: unknown }).tools === undefined;
+  record(
+    '(l) the native AskUserQuestion is disallowed, so naby_checkin is the only way to ask',
+    disallowed.includes(NATIVE_ASK_USER_QUESTION_TOOL) &&
+      builtinsStillLive &&
+      // And it is still classified as an observation, so an OLD transcript that
+      // contains one is read exactly as before.
+      classifyToolConsequence(NATIVE_ASK_USER_QUESTION_TOOL) === 'observation',
+    `disallowedTools=${JSON.stringify(disallowed)}; tools left unset=${builtinsStillLive}`,
   );
 }
 
