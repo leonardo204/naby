@@ -202,6 +202,7 @@ export { runTurn, type RunTurnOptions } from './runtime/session.js';
 // shell seeds the persona at its composition root (idempotent) so a fresh install
 // always has exactly one persona to address with `@`.
 export {
+  builtinPersonaMatchesSeed,
   BUILTIN_PERSONA_ID,
   BUILTIN_PERSONA_NAME,
   BUILTIN_PERSONA_SEED,

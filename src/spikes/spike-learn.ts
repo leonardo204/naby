@@ -178,13 +178,32 @@ function toolResults(events: RunEvent[]): string[] {
 }
 
 function makeAgent(name: string, scope: 'session' | 'project' | 'user' | 'org'): string {
-  getStore().putAgent({
+  const agent = getStore().putAgent({
     name,
     kind: 'custom',
     systemPrompt: `You are ${name}.`,
     memoryScope: scope,
     autonomy: { escalation: 'inline' },
   });
+  // P3-M9 (G2): the engine now applies the same butterfly gate the `@` palette
+  // does, so a brand-new agent is an EGG and `@name` would quietly run unrouted.
+  // The routed checks below would still pass — the persona picks the turn up —
+  // but they would have stopped testing ROUTING, which is the thing they name.
+  // So the agent earns the stage the only way it can: a clean check-in record
+  // (8 straight hits clears the 0.60 Wilson lower bound — runtime/growth.ts).
+  for (let i = 0; i < 8; i += 1) {
+    getStore().appendEvalEvent({
+      kind: 'checkin',
+      agentId: agent.id,
+      sessionId: `grow-${i}`,
+      taskType: 'writing',
+      at: 1_000 + i,
+      options: ['a', 'b'],
+      recommended: 0,
+      chosen: 0,
+      hit: true,
+    });
+  }
   return `@${name} remember that I prefer metric units.`;
 }
 

@@ -28,6 +28,20 @@
 //       before M3c — one step, one result, no autonomy instruction in the system
 //       prompt, no step bars.
 //
+// P3-M9 adds two more wirings that only execution can prove:
+//
+//   (g) THE VERIFICATION STEP (G4). A run that tries to stop without saying what
+//       it checked gets exactly ONE nudge — a different continuation prompt, not
+//       the ordinary "carry on" — and the second stop always stops. A stop that
+//       DOES carry [[VERIFIED: ...]] is never nudged, and the nudge can never
+//       push a run past its step budget.
+//   (h) THE `@` GATE (G2). An agent that is not a butterfly is not routed to: no
+//       identity is adopted, the turn runs as an ordinary one on the task text,
+//       and a muted harness pill says so. An agent that IS one still routes.
+//   (i) THE PERSONA'S DELEGATION SETTINGS (G1). A persona turn takes its step
+//       budget from the USER's settings rather than from its locked row — with
+//       the row provably untouched — while a custom agent still reads its own.
+//
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -46,6 +60,7 @@ import {
   createNabySpec,
   getStore,
 } from '../../shell/packages/feature/agent/src/server/engines/naby.js';
+import { BUILTIN_PERSONA_ID } from '../runtime-entry.js';
 import type {
   RunCtx,
   RunEvent,
@@ -152,21 +167,40 @@ function results(events: RunEvent[]): RunEvent[] {
   return events.filter((e) => typeOf(e) === 'result');
 }
 
-/** The muted autonomy step bars, in order. */
-function stepBars(events: RunEvent[]): string[] {
+/** The muted harness pills of one subtype, in order, as `detail` strings. */
+function harnessPills(events: RunEvent[], subtype: string): string[] {
   return events
     .filter(
       (e) =>
         typeOf(e) === 'system' &&
         e.subtype === 'harness' &&
-        (e as { harness_subtype?: string }).harness_subtype === 'autonomy',
+        (e as { harness_subtype?: string }).harness_subtype === subtype,
     )
     .map((e) => String((e as { harness_detail?: string }).harness_detail ?? ''));
 }
 
-/** Register an agent and return the `@name <task>` prompt that routes to it. */
-function makeAgent(name: string, maxSteps: number | undefined): string {
-  getStore().putAgent({
+/** The muted autonomy step bars, in order. */
+function stepBars(events: RunEvent[]): string[] {
+  return harnessPills(events, 'autonomy');
+}
+
+/** Register an agent and return the `@name <task>` prompt that routes to it.
+ *
+ *  P3-M9 (G2): ROUTING NOW REQUIRES THE BUTTERFLY STAGE. The engine runs the same
+ *  gate the `@` palette does, so a freshly created agent — an egg, no measured
+ *  history — is deliberately NOT addressable and its turn runs unrouted. That is
+ *  the new contract, not an obstacle to work around, so an agent that is meant to
+ *  be delegated to EARNS the stage here the only way it can be earned: a clean
+ *  run of check-ins in its ledger. 8 straight hits puts the Wilson lower bound at
+ *  ~0.68, over the 0.60 butterfly line (runtime/growth.ts).
+ *
+ *  `addressable:false` is the deliberate opposite, for the gate's own checks. */
+function makeAgent(
+  name: string,
+  maxSteps: number | undefined,
+  opts: { addressable?: boolean } = {},
+): string {
+  const agent = getStore().putAgent({
     name,
     kind: 'custom',
     systemPrompt: `You are ${name}, a test agent.`,
@@ -176,7 +210,25 @@ function makeAgent(name: string, maxSteps: number | undefined): string {
       ...(maxSteps !== undefined ? { maxSteps } : {}),
     },
   });
+  if (opts.addressable !== false) growUp(agent.id);
   return `@${name} send a message to alice, then keep going until done.`;
+}
+
+/** Take an agent to the butterfly stage by giving it the record that earns it. */
+function growUp(agentId: string): void {
+  for (let i = 0; i < 8; i += 1) {
+    getStore().appendEvalEvent({
+      kind: 'checkin',
+      agentId,
+      sessionId: `grow-${agentId}-${i}`,
+      taskType: 'testing',
+      at: 1_000 + i,
+      options: ['a', 'b'],
+      recommended: 0,
+      chosen: 0,
+      hit: true,
+    });
+  }
 }
 
 async function runOnce(
@@ -202,12 +254,17 @@ async function main(): Promise<void> {
   //
   // Each step is: tool call → (executor runs) → text. Step 1's text says nothing
   // about being done, so the loop continues; step 2's carries [[DONE]].
+  //
+  // P3-M9: step 2 also carries [[VERIFIED: ...]], because a model that declares
+  // itself done WITHOUT saying what it checked is now given one verification step
+  // (checked in run 5). This run is about the pre-M9 stop path, so it takes the
+  // exit a well-behaved agent takes — which is the point of the protocol.
   const prompt1 = makeAgent('autotwo', 4);
   const { h: h1, s: s1 } = await runOnce(prompt1, [
     toolCall('c1'),
     text('Step one done, continuing.'),
     toolCall('c2'),
-    text('Goal reached.\n[[DONE]]'),
+    text('Goal reached.\n[[VERIFIED: re-read the message log, it is there]]\n[[DONE]]'),
   ]);
 
   const bars1 = stepBars(h1.events);
@@ -259,8 +316,14 @@ async function main(): Promise<void> {
   );
 
   // ==== Run 2: a step that only talks ends the run =========================
+  //
+  // P3-M9: same treatment as run 1 — the verification marker keeps this run on
+  // the anti-chatter path it was written to exercise. The unverified no-tool stop
+  // is run 6's subject.
   const prompt2 = makeAgent('autotalk', 3);
-  const { h: h2, s: s2 } = await runOnce(prompt2, [text('Here is my opinion, no tools needed.')]);
+  const { h: h2, s: s2 } = await runOnce(prompt2, [
+    text('Here is my opinion, no tools needed. [[VERIFIED: nothing to check, this was a question]]'),
+  ]);
   const bars2 = stepBars(h2.events);
   record(
     checks,
@@ -309,6 +372,189 @@ async function main(): Promise<void> {
     '(f2) NO-OP: the autonomy instruction is absent from a non-autonomous prompt',
     s4.prompts.every((p) => !p.includes('AUTONOMOUS MODE')),
     `prompts mentioning it: ${s4.prompts.filter((p) => p.includes('AUTONOMOUS MODE')).length}`,
+  );
+
+  // ==== Run 5 (P3-M9 G4): stopping with no evidence buys ONE more step =====
+  //
+  // The agent declares [[DONE]] having said nothing about what it checked. The
+  // harness does not take its word for it: the run continues, but with the
+  // VERIFICATION prompt rather than the ordinary continuation — and when the
+  // agent stops again, still unverified, that is the end. One nudge per run is
+  // the whole bound; otherwise "verify first" would be a way never to finish.
+  const prompt5 = makeAgent('autoverify', 5);
+  const { h: h5, s: s5 } = await runOnce(prompt5, [
+    toolCall('v1'),
+    text('All finished.\n[[DONE]]'),
+    // The nudged step: it doubles down instead of checking.
+    toolCall('v2'),
+    text('Still finished, I promise.\n[[DONE]]'),
+    // A third stop must never be reached.
+    toolCall('v3'),
+    text('should never run'),
+  ]);
+  const bars5 = stepBars(h5.events);
+  record(
+    checks,
+    '(g) an unverified stop is nudged EXACTLY once, then stops',
+    bars5.length === 2 &&
+      bars5[0] === 'step 1/5 — verifying before it stops' &&
+      bars5[1] === 'step 2/5 — stopped (done-marker)' &&
+      s5.calls() === 4 &&
+      results(h5.events).length === 1,
+    `bars: ${JSON.stringify(bars5)}, model calls: ${s5.calls()} (a 3rd step would be 6)`,
+  );
+  const nudgeMsgs = getStore()
+    .getMessages(h5.sessionId())
+    .filter((m) => m.role === 'user')
+    .map((m) => String((m as { content?: unknown }).content ?? ''))
+    .filter((t) => t.includes('[naby autonomy]'));
+  record(
+    checks,
+    '(g2) the nudge asks the agent to VERIFY, not to carry on, and is in the transcript',
+    nudgeMsgs.length === 1 &&
+      nudgeMsgs[0]!.includes('You have not said what you checked') &&
+      nudgeMsgs[0]!.includes('[[VERIFIED:'),
+    `continuations: ${JSON.stringify(nudgeMsgs.map((t) => t.slice(0, 70)))}`,
+  );
+  record(
+    checks,
+    '(g3) the autonomy protocol asks for the verification marker',
+    s5.prompts.every((p) => p.includes('[[VERIFIED:')),
+    `prompts carrying the marker: ${s5.prompts.filter((p) => p.includes('[[VERIFIED:')).length}/${s5.prompts.length}`,
+  );
+
+  // ==== Run 6 (P3-M9 G4): the nudge never outruns the budget ===============
+  //
+  // maxSteps 2, and step 2 wants to stop unverified. A nudge would be step 3,
+  // which the budget does not have — so the run stops. The nudge is an ordinary
+  // step and is counted like one; the cap outranks the protocol.
+  const prompt6 = makeAgent('autoverifycap', 2);
+  const { h: h6, s: s6 } = await runOnce(prompt6, [
+    toolCall('w1'),
+    text('working'),
+    // Step 2: no tool, no verification — the nudge case, with no budget for it.
+    text('I think that is everything.'),
+    toolCall('w3'),
+    text('should never run'),
+  ]);
+  const bars6 = stepBars(h6.events);
+  record(
+    checks,
+    '(g4) the nudge respects the step budget — no room, no nudge',
+    bars6.length === 2 &&
+      bars6[1] === 'step 2/2 — stopped (no-tool-use)' &&
+      s6.calls() === 3 &&
+      results(h6.events).length === 1,
+    `bars: ${JSON.stringify(bars6)}, model calls: ${s6.calls()}`,
+  );
+
+  // ==== Run 7 (P3-M9 G2): the `@` gate, driven through the real engine =====
+  //
+  // A fresh agent is an EGG — no measured history — so `@`-addressing it must not
+  // adopt its identity. What the palette has always shown, routing now honours.
+  const prompt7 = makeAgent('autoegg', 4, { addressable: false });
+  const { h: h7, s: s7 } = await runOnce(prompt7, [text('Answered as a plain turn.')]);
+  const gatePills = harnessPills(h7.events, 'routing-gate');
+  record(
+    checks,
+    '(h) a non-butterfly agent is NOT routed to — no identity, no autonomy',
+    // No persona prompt adopted, and no autonomy: its maxSteps=4 is ignored
+    // because there is no routed agent to read it from.
+    s7.prompts.every((p) => !p.includes('You are autoegg, a test agent.')) &&
+      s7.prompts.every((p) => !p.includes('AUTONOMOUS MODE')) &&
+      stepBars(h7.events).length === 0 &&
+      results(h7.events).length === 1,
+    `prompts adopting the persona: ${s7.prompts.filter((p) => p.includes('You are autoegg')).length}, step bars: ${stepBars(h7.events).length}`,
+  );
+  record(
+    checks,
+    '(h2) the refused turn still RUNS, on the task text with the @name stripped',
+    s7.calls() === 1 &&
+      s7.prompts.some((p) => p.includes('send a message to alice')) &&
+      s7.prompts.every((p) => !p.includes('@autoegg')),
+    `model calls: ${s7.calls()}, prompts naming the handle: ${s7.prompts.filter((p) => p.includes('@autoegg')).length}`,
+  );
+  record(
+    checks,
+    '(h3) the user is told, on a muted harness pill carrying a locale-free code',
+    gatePills.length === 1 && gatePills[0] === 'not-butterfly:autoegg',
+    `routing-gate pills: ${JSON.stringify(gatePills)}`,
+  );
+  // …and the same agent, once it has earned the stage, routes exactly as before.
+  growUp(getStore().getAgentByName('autoegg')!.id);
+  const { h: h8, s: s8 } = await runOnce(prompt7, [toolCall('g1'), text('Routed.\n[[VERIFIED: sent]]\n[[DONE]]')]);
+  record(
+    checks,
+    '(h4) the SAME agent routes once it is a butterfly — the gate is the only thing that changed',
+    s8.prompts.every((p) => p.includes('You are autoegg, a test agent.')) &&
+      s8.prompts.every((p) => p.includes('AUTONOMOUS MODE')) &&
+      harnessPills(h8.events, 'routing-gate').length === 0 &&
+      results(h8.events).length === 1,
+    `prompts adopting the persona: ${s8.prompts.filter((p) => p.includes('You are autoegg')).length}/${s8.prompts.length}, gate pills: ${harnessPills(h8.events, 'routing-gate').length}`,
+  );
+
+  // ==== Run 9 (P3-M9 G1): the PERSONA reads the user's settings ============
+  //
+  // The persona row is read-only and its seed pins `escalation:'inline'` with no
+  // maxSteps, so if the engine read the ROW the product's own promise ("keep
+  // going until the tests pass") would be permanently unreachable. It reads the
+  // user's settings instead — and the row stays exactly as the seed left it,
+  // which is the invariant that made this necessary in the first place.
+  const store = getStore();
+  const personaRow = store.getAgent(BUILTIN_PERSONA_ID)!;
+  growUp(BUILTIN_PERSONA_ID);
+  store.setSetting('persona.autonomy.maxSteps', '3');
+  store.setSetting('persona.autonomy.escalation', 'inline');
+  const { h: h9, s: s9 } = await runOnce('@persona keep working until it is done.', [
+    toolCall('p1'),
+    text('step one'),
+    toolCall('p2'),
+    text('Done.\n[[VERIFIED: checked the log]]\n[[DONE]]'),
+  ]);
+  const bars9 = stepBars(h9.events);
+  record(
+    checks,
+    '(i) a persona turn takes its step budget from the USER SETTING, not the locked row',
+    personaRow.autonomy.maxSteps === undefined &&
+      bars9.length === 2 &&
+      bars9[0] === 'step 1/3 — continuing' &&
+      bars9[1] === 'step 2/3 — stopped (done-marker)' &&
+      s9.calls() === 4,
+    `row maxSteps: ${String(personaRow.autonomy.maxSteps)}, bars: ${JSON.stringify(bars9)}, model calls: ${s9.calls()}`,
+  );
+  const personaAfter = store.getAgent(BUILTIN_PERSONA_ID)!;
+  record(
+    checks,
+    '(i2) …and the read-only persona row was not touched to make that happen',
+    JSON.stringify(personaAfter.autonomy) === JSON.stringify(personaRow.autonomy) &&
+      personaAfter.systemPrompt === personaRow.systemPrompt &&
+      personaAfter.updatedAt === personaRow.updatedAt,
+    `autonomy: ${JSON.stringify(personaAfter.autonomy)}, updatedAt unchanged: ${personaAfter.updatedAt === personaRow.updatedAt}`,
+  );
+  // Turning the setting back off restores single-turn behaviour on the very next
+  // message — the setting IS the switch, with no rebuild and no row write.
+  store.setSetting('persona.autonomy.maxSteps', '1');
+  const { h: h10, s: s10 } = await runOnce('@persona one more thing.', [
+    toolCall('p3'),
+    text('answered'),
+  ]);
+  record(
+    checks,
+    '(i3) setting it back to 1 turns autonomy off again, immediately',
+    stepBars(h10.events).length === 0 &&
+      s10.prompts.every((p) => !p.includes('AUTONOMOUS MODE')) &&
+      results(h10.events).length === 1 &&
+      s10.calls() === 2,
+    `bars: ${stepBars(h10.events).length}, prompts with the protocol: ${s10.prompts.filter((p) => p.includes('AUTONOMOUS MODE')).length}`,
+  );
+  // A CUSTOM agent is unaffected: its row is editable, so it keeps reading it.
+  const prompt11 = makeAgent('autocustom', 2);
+  const { h: h11 } = await runOnce(prompt11, [toolCall('q1'), text('one'), toolCall('q2'), text('two')]);
+  record(
+    checks,
+    '(i4) a custom agent still reads its OWN row — the persona setting does not leak',
+    stepBars(h11.events).length === 2 && stepBars(h11.events)[1] === 'step 2/2 — stopped (max-steps)',
+    `bars: ${JSON.stringify(stepBars(h11.events))} (persona setting is 1, this agent's row says 2)`,
   );
 
   // ---- report -------------------------------------------------------------

@@ -587,8 +587,20 @@ export type PolicyRuleInput = Omit<PolicyRule, 'id' | 'createdAt' | 'updatedAt'>
 //
 // THE BUILT-IN PERSONA (spec §4): exactly one row of kind='persona' is seeded on
 // first run (seedBuiltinPersona, agents.ts). It is UNDELETABLE (removeAgent
-// no-ops a persona row) but fully EDITABLE (putAgent updates it). Users only ever
-// create kind='custom' agents, so kind='persona' uniquely identifies the built-in.
+// no-ops a persona row) and, since 2026-07-30, NOT EDITABLE EITHER: putAgent
+// refuses to write a persona row at all, and the seed is the only thing that
+// may — through `restoreBuiltinPersona`, the one narrow door. Users only ever
+// create kind='custom' agents, so kind='persona' uniquely identifies the
+// built-in.
+//
+// WHY THE REVERSAL. "Editable but undeletable" was the M1 decision, and it made
+// the persona a thing the user could quietly break: its system prompt IS the
+// persona contract that P3-M2..M8 build on (memory injection, escalation, the
+// autonomy budget, everything the trust meter scores). A half-edited prompt
+// produced an agent that behaved unlike the one being measured, with no way back
+// short of deleting a row the product refuses to delete. Making it built-in and
+// read-only means the contract is the product's to keep — and the seed HEALS a
+// row an older build let the user edit (agents.ts `seedBuiltinPersona`).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -978,8 +990,27 @@ export interface Store {
 
   /** Insert (no `id`) or update (existing `id`) an agent. THROWS if `name`
    *  collides with a DIFFERENT agent (names are unique — they address turns).
+   *
+   *  ALSO THROWS on any attempt to write the built-in persona: an update whose
+   *  target row is kind='persona', or an insert asking for kind='persona'. The
+   *  persona is built-in and read-only, and this is where that is enforced —
+   *  below every caller, so a shell route, an import plan or a future feature
+   *  cannot reach around it. The seed uses `restoreBuiltinPersona` instead.
+   *
    *  Returns the stored row. */
   putAgent(input: AgentInput): Agent;
+
+  /** THE ONLY WRITE PATH TO THE BUILT-IN PERSONA, and it exists for exactly one
+   *  caller: `seedBuiltinPersona` (agents.ts). It inserts the seed when the
+   *  persona is absent and OVERWRITES the stored row back to the seed when it is
+   *  present but has drifted — which is how a persona edited by an older build
+   *  heals on the next boot. `id` and `createdAt` are preserved; everything else
+   *  becomes the seed.
+   *
+   *  It is a separate method rather than a flag on `putAgent` so the exception is
+   *  named, greppable and impossible to pass by accident. THROWS if `input.kind`
+   *  is not 'persona', or if a DIFFERENT agent already holds `input.name`. */
+  restoreBuiltinPersona(input: AgentInput): Agent;
 
   /** Delete one agent by id. NO-OP for the built-in persona (kind='persona' is
    *  undeletable, spec §4) and no-op if absent. */

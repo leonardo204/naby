@@ -4,6 +4,13 @@
 // its invariants (unique name, undeletable persona, idempotent seed, persona-
 // first ordering), and behaves IDENTICALLY on the in-memory store and SQLite so
 // the two drivers agree. Exit 0 = pass, non-zero = fail.
+//
+// 2026-07-30: the persona became BUILT-IN AND READ-ONLY, which turns two of those
+// invariants over. `putAgent` now THROWS on a persona row instead of updating it,
+// and the seed ENFORCES itself — a persona edited under an older build is written
+// back to the seed on the next boot, keeping only its id and createdAt. Both are
+// asserted below, on both drivers, because a heal that works on one store and not
+// the other would leave half the installs off-contract.
 
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,8 +18,10 @@ import { join } from 'node:path';
 import {
   MemoryStore,
   SqliteStore,
+  builtinPersonaMatchesSeed,
   BUILTIN_PERSONA_ID,
   BUILTIN_PERSONA_NAME,
+  BUILTIN_PERSONA_SEED,
   parseAgentAddress,
   seedBuiltinPersona,
   computeGrowth,
@@ -84,22 +93,109 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
   check('old name now free', store.getAgentByName('drafter') === undefined);
   check('new name resolves', store.getAgentByName('composer')?.id === drafter.id);
 
-  // Persona is EDITABLE (putAgent updates it) …
-  const editedPersona = store.putAgent({
+  // Persona is NOT EDITABLE (2026-07-30 decision, replacing M1's "editable but
+  // undeletable"). putAgent THROWS rather than no-oping: a silent no-op would let
+  // a caller believe it had saved something.
+  let editThrew = false;
+  try {
+    store.putAgent({
+      id: BUILTIN_PERSONA_ID,
+      name: 'aria',
+      kind: 'persona',
+      systemPrompt: 'edited',
+      memoryScope: 'user',
+      autonomy: { escalation: 'telegram', maxSteps: 20 },
+    });
+  } catch {
+    editThrew = true;
+  }
+  check('persona edit rejected', editThrew);
+  check('persona unchanged after refused edit', store.getAgent(BUILTIN_PERSONA_ID)?.systemPrompt === BUILTIN_PERSONA_SEED.systemPrompt);
+  check('persona kept its name', store.getAgentByName(BUILTIN_PERSONA_NAME)?.id === BUILTIN_PERSONA_ID);
+
+  // Nor can the shape be laundered: an update that DROPS kind='persona' still
+  // targets a persona row, and a fresh insert asking for kind='persona' would
+  // mint a second built-in. Both refused, on the STORED kind and on the input.
+  let launderThrew = false;
+  try {
+    store.putAgent({ id: BUILTIN_PERSONA_ID, name: 'aria', kind: 'custom', systemPrompt: 'edited', memoryScope: 'user', autonomy: { escalation: 'inline' } });
+  } catch {
+    launderThrew = true;
+  }
+  check('persona edit disguised as kind=custom is rejected', launderThrew);
+  let secondPersonaThrew = false;
+  try {
+    store.putAgent({ name: 'persona-two', kind: 'persona', systemPrompt: 'me too', memoryScope: 'user', autonomy: { escalation: 'inline' } });
+  } catch {
+    secondPersonaThrew = true;
+  }
+  check('a second kind=persona row is rejected', secondPersonaThrew);
+  check('no extra agent was added', store.listAgents().length === 2);
+
+  // … and UNDELETABLE (removeAgent no-ops a persona).
+  store.removeAgent(BUILTIN_PERSONA_ID);
+  check('persona survives removeAgent', store.getAgent(BUILTIN_PERSONA_ID) !== undefined);
+
+  // THE HEAL. An install that ran an OLDER build may hold a persona the user
+  // edited, so the seed must write it back — through the one door the store
+  // opens for it. Driven here with `restoreBuiltinPersona` standing in for that
+  // older build's edit, then healed by an ordinary `seedBuiltinPersona`.
+  const beforeDrift = store.getAgent(BUILTIN_PERSONA_ID)!;
+  store.restoreBuiltinPersona({
     id: BUILTIN_PERSONA_ID,
     name: 'aria',
     kind: 'persona',
-    systemPrompt: 'edited',
-    memoryScope: 'user',
+    description: 'hand-edited',
+    systemPrompt: 'edited by an older build',
+    model: 'some-model',
+    toolRefs: ['Read'],
+    memoryScope: 'project',
     autonomy: { escalation: 'telegram', maxSteps: 20 },
   });
-  check('persona edit applied', editedPersona.systemPrompt === 'edited');
-  check('persona rename applied', store.getAgentByName('aria')?.id === BUILTIN_PERSONA_ID);
-  check('persona autonomy round-trips', editedPersona.autonomy.escalation === 'telegram' && editedPersona.autonomy.maxSteps === 20);
-
-  // … but UNDELETABLE (removeAgent no-ops a persona).
-  store.removeAgent(BUILTIN_PERSONA_ID);
-  check('persona survives removeAgent', store.getAgent(BUILTIN_PERSONA_ID) !== undefined);
+  check('drift detected', !builtinPersonaMatchesSeed(store.getAgent(BUILTIN_PERSONA_ID)!, BUILTIN_PERSONA_SEED));
+  const healed = seedBuiltinPersona(store);
+  check('seed restored the prompt', healed.systemPrompt === BUILTIN_PERSONA_SEED.systemPrompt);
+  // P3-M9 (G3): the heal is the PROTOCOL DELIVERY CHANNEL. An install that ran an
+  // older build carries the pre-M9 prompt, and since the row is read-only the
+  // user cannot add these rules themselves — so what matters is not merely that
+  // the prompt was restored but that the restored text actually carries the four
+  // operating protocols. Asserted on the HEALED row (what the engine will read),
+  // not on the seed constant, because a heal that dropped them would still make
+  // the equality check above pass on a stale seed.
+  for (const marker of [
+    'MEMORY FIRST',
+    'CLARIFY EARLY',
+    'VERIFY BEFORE DONE',
+    'REPORT in four parts',
+  ]) {
+    check(`healed prompt carries the "${marker}" protocol`, healed.systemPrompt.includes(marker));
+  }
+  // The pre-M9 contract lines survive alongside them — the protocols were ADDED,
+  // not swapped in for the persona's original job description.
+  check(
+    'healed prompt keeps the act-on-behalf contract',
+    healed.systemPrompt.includes("ON THE USER'S BEHALF"),
+  );
+  check(
+    'healed prompt keeps the escalate-only-critical contract',
+    healed.systemPrompt.includes('Escalate ONLY genuinely critical or irreversible'),
+  );
+  check('seed restored the name', healed.name === BUILTIN_PERSONA_NAME);
+  check('seed restored the description', healed.description === BUILTIN_PERSONA_SEED.description);
+  check('seed restored memoryScope', healed.memoryScope === 'user');
+  check('seed restored autonomy', healed.autonomy.escalation === 'inline' && healed.autonomy.maxSteps === undefined);
+  // An absent seed field must come back ABSENT, not left over from the edit.
+  check('seed cleared the model the user set', healed.model === undefined);
+  check('seed cleared the toolRefs the user set', healed.toolRefs === undefined);
+  // Identity and age survive the heal — the ledger, memory and growth history all
+  // hang off this id, and a persona that claims to be new would reset its own age.
+  check('heal kept the id', healed.id === BUILTIN_PERSONA_ID);
+  check('heal kept createdAt', healed.createdAt === beforeDrift.createdAt);
+  check('heal added no row', store.listAgents().length === 2);
+  check('seed is a no-op once the row matches', (() => {
+    const again = seedBuiltinPersona(store);
+    return again.updatedAt === healed.updatedAt && store.listAgents().length === 2;
+  })());
 
   // Custom agent IS deletable.
   store.removeAgent(drafter.id);

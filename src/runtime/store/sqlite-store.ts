@@ -1789,6 +1789,20 @@ export class SqliteStore implements Store {
   }
 
   putAgent(input: AgentInput): Agent {
+    return this.writeAgent(input, { allowPersona: false });
+  }
+
+  restoreBuiltinPersona(input: AgentInput): Agent {
+    if (input.kind !== 'persona') {
+      throw new Error('restoreBuiltinPersona only writes a kind=persona row');
+    }
+    return this.writeAgent(input, { allowPersona: true });
+  }
+
+  /** The single agent write. `allowPersona` is the ONE door to a kind='persona'
+   *  row, and only `restoreBuiltinPersona` opens it — see the Store interface for
+   *  why the built-in persona is not editable. */
+  private writeAgent(input: AgentInput, opts: { allowPersona: boolean }): Agent {
     this.assertOpen();
     const now = Date.now();
     const existing = input.id
@@ -1796,6 +1810,17 @@ export class SqliteStore implements Store {
           | AgentRow
           | undefined)
       : undefined;
+    if (!opts.allowPersona) {
+      // Two ways to touch the built-in, both refused: editing the row that IS the
+      // persona, and minting a second one. Checked on the STORED kind, not on the
+      // id, so a renamed or hand-migrated persona is still protected.
+      if (existing?.kind === 'persona') {
+        throw new Error('the built-in persona is read-only and cannot be edited');
+      }
+      if (input.kind === 'persona') {
+        throw new Error('the built-in persona is the only kind=persona agent and it is created by naby');
+      }
+    }
     // Names are the @-routing handle and must be unique. Reject a name already
     // held by a DIFFERENT agent (same-row rename is fine).
     const nameHolder = this.db

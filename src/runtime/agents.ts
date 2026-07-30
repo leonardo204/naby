@@ -10,28 +10,56 @@
 //
 // WHY A STABLE, WELL-KNOWN ID: seeding must be IDEMPOTENT across restarts (we do
 // not want a second persona on every boot), and the persona must stay
-// addressable for its lifetime even as the user edits it. A fixed id gives both:
-// seedBuiltinPersona checks for the id and only inserts when it is absent, and it
-// never overwrites the row afterwards (the user's edits win).
+// addressable for its lifetime. A fixed id gives both: seedBuiltinPersona keys
+// on it, and every later feature (memory injection, growth, export) points at
+// the same row for the life of the install.
 //
-// THE UNDELETABLE INVARIANT (spec §4) is enforced in the store — removeAgent
-// no-ops a kind='persona' row — not here, so a stray shell call cannot bypass it.
+// THE PERSONA IS BUILT-IN AND READ-ONLY (user decision, 2026-07-30 — it replaces
+// M1's "editable but undeletable"). Two invariants, both enforced in the STORE so
+// a stray shell call cannot bypass either:
+//
+//   * UNDELETABLE — removeAgent no-ops a kind='persona' row.
+//   * UNEDITABLE  — putAgent THROWS on any write to a persona row (and on any
+//     attempt to mint a second persona). The one exception is
+//     `store.restoreBuiltinPersona`, which exists for the seed below and for
+//     nothing else.
+//
+// So seeding is no longer merely "insert when absent": it ENFORCES the seed. An
+// install that ran an older build may carry a persona the user edited, and that
+// row is exactly the drift the read-only rule exists to prevent — so the seed
+// writes it back on the next boot rather than leaving one machine permanently
+// off-contract. Only `id` and `createdAt` survive.
 
 import type { Agent, AgentInput, Store } from './store/store.js';
 
-/** The built-in persona's stable id. Seeding keys on it (idempotent) and it is
- *  the persona's permanent handle even after the user renames/edits it. */
+/** The built-in persona's stable id. Seeding keys on it, and it is the persona's
+ *  permanent handle for the life of the install — the ledger, its memory and its
+ *  growth history all hang off it. */
 export const BUILTIN_PERSONA_ID = 'agent-persona-builtin';
 
-/** The default `@name` the built-in persona is addressed by. The user may rename
- *  it; this is only the seed value. */
+/** The `@name` the built-in persona is addressed by. It is part of the seed, so
+ *  it is what the persona is called; the only way it differs is the collision
+ *  corner described on `seedBuiltinPersona`. */
 export const BUILTIN_PERSONA_NAME = 'persona';
 
 /** The seed row for the built-in persona. Deliberately conservative: no tool
  *  restriction (inherits the turn's toolset), memory scoped to the user (so what
  *  it learns outlives any one session/project), and INLINE escalation until the
  *  telegram channel is wired in P3-M3. The prompt states the persona contract in
- *  plain terms; learned context is injected at turn time (P3-M2), never inlined. */
+ *  plain terms; learned context is injected at turn time (P3-M2), never inlined.
+ *
+ *  P3-M9 (G3): THE SEED IS NOW THE PERSONA'S ONLY WRITABLE SURFACE. Locking the
+ *  row (read-only, 2026-07-30) means the user can no longer add an operating rule
+ *  by editing the prompt, so the prompt itself has to carry the operating
+ *  protocols the persona needs to be delegable — memory-first, clarify early,
+ *  verify before done, and a report format. They are written at the "right
+ *  altitude": heuristics the model applies with judgment, not an exhaustive
+ *  rulebook it pattern-matches against.
+ *
+ *  Because `seedBuiltinPersona` ENFORCES this text (see below), editing it here
+ *  is also how an already-installed persona is upgraded: the lock mechanism is
+ *  the prompt's delivery channel. Add a protocol here and every install picks it
+ *  up on its next boot. */
 export const BUILTIN_PERSONA_SEED: AgentInput = {
   id: BUILTIN_PERSONA_ID,
   name: BUILTIN_PERSONA_NAME,
@@ -50,24 +78,113 @@ export const BUILTIN_PERSONA_SEED: AgentInput = {
     '  deleting data, sending outward-facing communication, anything you are not',
     '  confident the user would want) — surface these for approval rather than',
     '  guessing.',
-    '- When you finish, report concisely: what you did, what you decided, and',
-    '  anything you deliberately left for the user.',
+    '',
+    'Operating protocols:',
+    '- MEMORY FIRST. Read the injected memory before you plan, and let it decide',
+    '  how you work. A confirmed procedural memory is a STANDING RULE — follow it',
+    '  unless the user overrides it in this turn. This is how you get better: your',
+    '  instructions never change, what you have learned does.',
+    '- CLARIFY EARLY. If the goal or the definition of done is ambiguous, ask',
+    '  within your FIRST few steps — never once the work is largely finished,',
+    '  where the answer only buys a rewrite. Routine, low-risk steps still do not',
+    '  warrant a question.',
+    '- VERIFY BEFORE DONE. Do not declare a task finished until you have checked',
+    '  the result against its success criteria. What you checked, and how, is part',
+    '  of the report — not an afterthought.',
+    '- REPORT in four parts, concisely: what you DID, what you DECIDED, what you',
+    '  VERIFIED, and what you deliberately LEFT for the user.',
   ].join('\n'),
   memoryScope: 'user',
+  // P3-M9 (G1): SHAPE COMPATIBILITY ONLY. How much the user delegates to the
+  // persona is the USER's setting, not the agent definition's, so the engine
+  // reads `persona.autonomy.*` from settings for a kind='persona' turn and
+  // ignores this field. It stays because `Agent` requires it and because a
+  // custom agent — whose row IS editable — still reads its own.
   autonomy: { escalation: 'inline' },
 };
 
-/** Ensure the built-in persona exists. IDEMPOTENT: inserts the seed only when the
- *  persona id is absent, and NEVER overwrites an existing row (the user's edits
- *  are preserved). Returns the persona as it now stands in the store. */
+/** The fields the seed OWNS. `id` and `createdAt` are deliberately absent —
+ *  those are the row's identity and its age, and healing a drifted persona must
+ *  not mint a new agent or pretend it was created today. `updatedAt` is the
+ *  store's. */
+const SEEDED_FIELDS = [
+  'name',
+  'kind',
+  'description',
+  'systemPrompt',
+  'model',
+  'toolRefs',
+  'memoryScope',
+  'autonomy',
+] as const;
+
+/**
+ * Does the stored persona still say exactly what the seed says?
+ *
+ * Compared by VALUE over the seeded fields, with `toolRefs`/`autonomy` compared
+ * structurally (a stored `{escalation:'inline'}` is a different object every
+ * read). `undefined` in the seed must match `undefined` in the row: the seed
+ * pins NO model and NO tool restriction, so a stored model is drift, not a
+ * default.
+ */
+export function builtinPersonaMatchesSeed(agent: Agent, seed: AgentInput): boolean {
+  return SEEDED_FIELDS.every((field) => {
+    const want = seed[field];
+    const got = (agent as Record<string, unknown>)[field];
+    if (want === undefined || got === undefined) return want === undefined && got === undefined;
+    if (typeof want === 'object') return JSON.stringify(want) === JSON.stringify(got);
+    return want === got;
+  });
+}
+
+/**
+ * Ensure the built-in persona exists AND matches the seed. Returns it as it now
+ * stands in the store.
+ *
+ * Three outcomes, in order of how often they happen:
+ *
+ *   1. the row is already the seed  -> nothing is written (still idempotent: a
+ *      second call in the same boot does no work);
+ *   2. the row is absent            -> the seed is inserted;
+ *   3. the row DRIFTED              -> it is written back to the seed. This is
+ *      the heal for installs that edited their persona under an older build; the
+ *      row keeps its id and createdAt, so its ledger, memory and growth history
+ *      all stay attached.
+ *
+ * THE ONE CONCESSION, and it is about not damaging the user's own data. Restoring
+ * the seed restores the seed NAME, and an old install could have renamed the
+ * persona to `@aria` and then created a custom agent called `@persona`. Taking
+ * that name back would either throw (breaking boot) or require renaming an agent
+ * the user made. Neither is worth it for a handle, so in that one case the row is
+ * restored in full EXCEPT its name, which stays as the user left it. Everything
+ * that governs behaviour — the prompt, the scope, the autonomy — is still the
+ * seed's.
+ */
 export function seedBuiltinPersona(store: Store): Agent {
   const existing = store.getAgent(BUILTIN_PERSONA_ID);
-  if (existing) return existing;
-  return store.putAgent(BUILTIN_PERSONA_SEED);
+  if (existing && builtinPersonaMatchesSeed(existing, BUILTIN_PERSONA_SEED)) return existing;
+
+  const nameHolder = store.getAgentByName(BUILTIN_PERSONA_SEED.name);
+  const nameTaken = nameHolder !== undefined && nameHolder.id !== BUILTIN_PERSONA_ID;
+  const seed: AgentInput = nameTaken
+    ? { ...BUILTIN_PERSONA_SEED, name: existing ? existing.name : freeName(store) }
+    : BUILTIN_PERSONA_SEED;
+  return store.restoreBuiltinPersona(seed);
+}
+
+/** A handle nobody holds, for the corner where the seed name is taken and there
+ *  is no persona row to inherit a name from. Bounded, and it never returns a name
+ *  already in use — the store would throw on it. */
+function freeName(store: Store): string {
+  for (let n = 2; n < 100; n += 1) {
+    const candidate = `${BUILTIN_PERSONA_NAME}-${n}`;
+    if (!store.getAgentByName(candidate)) return candidate;
+  }
+  return `${BUILTIN_PERSONA_NAME}-${Date.now()}`;
 }
 
 /** True when an agent is the built-in persona (kind='persona'). The store keys
- *  the undeletable invariant on the same predicate. */
+ *  BOTH invariants on this same predicate: undeletable and uneditable. */
 export function isBuiltinPersona(agent: Agent): boolean {
   return agent.kind === 'persona';
 }

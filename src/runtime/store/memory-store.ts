@@ -741,8 +741,31 @@ export class MemoryStore implements Store {
   }
 
   putAgent(input: AgentInput): Agent {
+    return this.writeAgent(input, { allowPersona: false });
+  }
+
+  restoreBuiltinPersona(input: AgentInput): Agent {
+    if (input.kind !== 'persona') {
+      throw new Error('restoreBuiltinPersona only writes a kind=persona row');
+    }
+    return this.writeAgent(input, { allowPersona: true });
+  }
+
+  /** The single agent write. `allowPersona` is the ONE door to a kind='persona'
+   *  row, and only `restoreBuiltinPersona` opens it — see the Store interface for
+   *  why the built-in persona is not editable. Mirrors sqlite-store exactly; the
+   *  two drivers are asserted against each other in spike-agents. */
+  private writeAgent(input: AgentInput, opts: { allowPersona: boolean }): Agent {
     const now = Date.now();
     const existing = input.id ? this.agents.get(input.id) : undefined;
+    if (!opts.allowPersona) {
+      if (existing?.kind === 'persona') {
+        throw new Error('the built-in persona is read-only and cannot be edited');
+      }
+      if (input.kind === 'persona') {
+        throw new Error('the built-in persona is the only kind=persona agent and it is created by naby');
+      }
+    }
     // Names are the @-routing handle and must be unique across agents.
     const nameHolder = [...this.agents.values()].find((x) => x.name === input.name);
     if (nameHolder && nameHolder.id !== (existing?.id ?? '')) {
