@@ -282,6 +282,36 @@ const updates = {
   },
 };
 
+/**
+ * The three file operations the web shell cannot do for itself, for the chat
+ * file browser's rows and right-click menu.
+ *
+ * PROJECT-RELATIVE ON PURPOSE. All of them take `{cwd, rel}` and never an
+ * absolute path: main joins them and checks containment before it calls
+ * `shell`, so this bridge cannot be used to reveal, open or trash anything
+ * outside the project the user has open. There is no `read`, no `write` and no
+ * `move` here — only the operations the browser genuinely lacks.
+ *
+ * The renderer FEATURE-DETECTS this (`window.naby?.fsOps`): in a plain browser
+ * it is absent, "Open" and "Reveal in Finder" are not rendered at all,
+ * double-click does nothing, and delete falls back to the server's permanent
+ * `/api/fs-op` delete.
+ */
+const fsOps = {
+  /** Open the OS file manager with the item selected. */
+  reveal: (target: { cwd: string; rel: string }): Promise<Result<void>> =>
+    ipcRenderer.invoke('fs:reveal', target),
+
+  /** Hand the file to the OS default application for its extension. Fails as a
+   *  Result (never a rejection) when the OS has no handler for it. */
+  open: (target: { cwd: string; rel: string }): Promise<Result<void>> =>
+    ipcRenderer.invoke('fs:open', target),
+
+  /** Move the item to the OS trash — recoverable, unlike the server's `rm`. */
+  trash: (target: { cwd: string; rel: string }): Promise<Result<void>> =>
+    ipcRenderer.invoke('fs:trash', target),
+};
+
 contextBridge.exposeInMainWorld('naby', {
   /** Per-launch session token (design §5.4). Required on every request. */
   sessionToken,
@@ -304,6 +334,10 @@ contextBridge.exposeInMainWorld('naby', {
   /** CO-05 — DEV-ONLY ChatGPT subscription sign-in. `available:false` unless the
    *  dev seal is open; no read path to the stored tokens. */
   chatgptOauth,
+  /** Reveal-in-Finder, open-with-default-app and move-to-trash for the file
+   *  browser, all scoped to the open project by a containment check in the main
+   *  process. */
+  fsOps,
   /** Resolve a File dropped from the OS (Finder/Explorer) to its absolute path.
    *  `File.path` was removed in Electron 32, so this is the only supported way to
    *  recover the on-disk path of a dragged file — used to insert an absolute path

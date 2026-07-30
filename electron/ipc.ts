@@ -27,7 +27,8 @@
 // second boot in the same process (the spike does this) does not hit
 // "Attempted to register a second handler".
 
-import { ipcMain, webContents, type IpcMainInvokeEvent } from 'electron';
+import { ipcMain, shell, webContents, type IpcMainInvokeEvent } from 'electron';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import type { CredentialVault } from './credentials.js';
 import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
@@ -148,6 +149,32 @@ export const CHANNELS = [
   'devmode:status',
   'devmode:unlock',
   'devmode:lock',
+
+  // FILE-BROWSER OS OPERATIONS — the file operations that only the main process
+  // can perform, for the chat file browser's rows and right-click menu. All
+  // three take `{cwd, rel}`, never an absolute path from the renderer: the join
+  // and the containment check happen HERE, in the trusted process, so a
+  // renderer that is compromised (or simply buggy) cannot name a target outside
+  // the project the user opened. This mirrors the `withinCwd` guard the shell's
+  // /api/fs-op applies on the server side.
+  //
+  //   fs:reveal — `shell.showItemInFolder`. Opens Finder/Explorer at the item.
+  //   fs:open   — `shell.openPath`. Hands the file to the OS default app for its
+  //               extension, which is what a double-click on a file row means.
+  //               Deliberately NOT an in-app viewer: the app has no business
+  //               deciding it renders PSDs better than the user's own tools.
+  //   fs:trash  — `shell.trashItem`. The RECOVERABLE delete, and the reason the
+  //               renderer prefers this channel over /api/fs-op's `delete`
+  //               (which is a permanent `fs.rm` and exists only for the
+  //               plain-browser shell where this bridge is absent).
+  //
+  // None of them can read a file, list a directory, or reach anything the file
+  // browser could not already display. `fs:open` hands a path to the OS, which
+  // then applies its own handler rules — the containment check is what keeps
+  // that path inside the project.
+  'fs:reveal',
+  'fs:open',
+  'fs:trash',
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
@@ -449,6 +476,51 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     return ok(undefined as void);
   });
 
+  // -- file-browser OS operations ------------------------------------------
+  //
+  // The renderer sends `{cwd, rel}` and NEVER an absolute path. `absWithin`
+  // does the join and the containment check on this side; a payload that
+  // escapes the project is refused here rather than handed to `shell`.
+
+  handle('fs:reveal', (payload) => {
+    const abs = absWithin(payload);
+    if (!abs) return fail('INTERNAL', 'refused: that path is outside the project');
+    // Fire-and-forget by design: showItemInFolder has no result, and whether
+    // the user then closes the Finder window is not ours to report.
+    shell.showItemInFolder(abs);
+    return ok(undefined as void);
+  });
+
+  handle('fs:open', async (payload) => {
+    const abs = absWithin(payload);
+    if (!abs) return fail('INTERNAL', 'refused: that path is outside the project');
+    // `openPath` DOES NOT REJECT. It resolves with a string: empty on success,
+    // and the OS's reason on failure ("Failed to open path", no registered
+    // handler, and so on). Awaiting it without reading that string is how a
+    // double-click that opened nothing reports success — so the string is the
+    // result, and a non-empty one becomes a failed Result the renderer can put
+    // in a toast.
+    const problem = await shell.openPath(abs);
+    if (problem) return fail('INTERNAL', problem);
+    return ok(undefined as void);
+  });
+
+  handle('fs:trash', async (payload) => {
+    const abs = absWithin(payload);
+    if (!abs) return fail('INTERNAL', 'refused: that path is outside the project');
+    // Containment alone would ALLOW the project root, since the root is inside
+    // itself. Trashing it would take every file the user has open with it, so
+    // the one destructive channel says no.
+    if (isProjectRoot(payload, abs)) {
+      return fail('INTERNAL', 'refused: the project root cannot be trashed');
+    }
+    // `trashItem` rejects when the item is gone or the OS refuses; the wrapper
+    // above turns that into a Result the renderer can show, and the file
+    // browser then leaves the row alone rather than pretending it was deleted.
+    await shell.trashItem(abs);
+    return ok(undefined as void);
+  });
+
   // The M→R half of contract §1.3. Broadcast to every live webContents rather
   // than to a remembered window handle: the window can be closed and reopened
   // (macOS `activate`), and a stale handle would silently stop updating the UI.
@@ -497,4 +569,40 @@ function isAllowedFrame(event: IpcMainInvokeEvent, allowedOrigin: string): boole
 /** Structured clone gives us `unknown`; narrow it once, in one place. */
 function asObject(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+}
+
+// ---------------------------------------------------------------------------
+// Project containment for the fs channels
+// ---------------------------------------------------------------------------
+
+/**
+ * `{cwd, rel}` → the absolute path, or null if it is not inside `cwd`.
+ *
+ * This is the main-process twin of the shell's `withinCwd`
+ * (shell/src/lib/fsScope.ts), and it is deliberately a SECOND implementation
+ * rather than a shared import: the shell is a separate repository (a submodule)
+ * and the main process must not depend on it to know what it is allowed to
+ * touch. The rule is the one the shell states — the target is the project root
+ * itself or strictly inside it — and the `+ sep` is what stops `/work/proj-old`
+ * from passing as `/work/proj`.
+ *
+ * `resolve` collapses any `..` BEFORE the comparison, so the check cannot be
+ * walked around by a `rel` that climbs and comes back.
+ */
+function absWithin(payload: unknown): string | null {
+  const { cwd, rel } = asObject(payload);
+  if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd)) return null;
+  if (typeof rel !== 'string') return null;
+  const base = resolve(cwd);
+  const target = resolve(join(base, rel));
+  if (target !== base && !target.startsWith(base + sep)) return null;
+  return target;
+}
+
+/** True when `{cwd, rel}` names the project root itself rather than something
+ *  in it. Revealing the root is useful; TRASHING it would take the whole
+ *  project, so only the destructive channel refuses it. */
+function isProjectRoot(payload: unknown, abs: string): boolean {
+  const { cwd } = asObject(payload);
+  return typeof cwd === 'string' && resolve(cwd) === abs;
 }
