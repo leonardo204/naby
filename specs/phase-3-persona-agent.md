@@ -2,10 +2,10 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.9.0
+version: 0.11.0
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
-related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
+related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
 updated: 2026-07-30
 ---
 
@@ -52,7 +52,9 @@ Agent {
   createdAt, updatedAt
 }
 ```
-- 최초 실행 때 **built-in 페르소나 에이전트 하나를 시드로 넣는다**. 삭제할 수 없고, 편집할 수 있다.
+- 최초 실행 때 **built-in 페르소나 에이전트 하나를 시드로 넣는다**. **삭제도 편집도 할 수 없다**(2026-07-30 사용자 결정, §8 참조). 시드가 기본값을 강제한다 — 부팅할 때마다 저장된 행을 `BUILTIN_PERSONA_SEED`와 비교해 한 필드라도 어긋나면 시드 값으로 되돌린다. `id`와 `createdAt`만 남기므로 원장·기억·성장 이력은 그대로 붙어 있다.
+  - 강제는 스토어에서 한다. `putAgent`는 kind='persona' 행에 쓰려는 모든 시도를 **throw로 거절**하고, 시드만 쓰는 `restoreBuiltinPersona`가 유일한 통로다. 셸 라우트(`agent.put`)도 같은 거절을 사람이 읽을 문장으로 먼저 답한다.
+  - 페르소나 카드는 읽기 전용이다. Edit·Remove 버튼이 없고, 배지·설명·성장 패널·내보내기만 남는다.
 
 ## 5. 호출 라우팅 (`@`)
 
@@ -69,7 +71,7 @@ Agent {
 ## 7. 마일스톤 (Phase 3)
 
 - **P3-M1** ✅ **구현 완료(2026-07-25, 커밋 대기)** — 데이터 모델(`agents` 스토어), built-in 페르소나 시드, Settings "에이전트" 섹션, 메모리 이동, 커맨드를 하네스로 흡수. 구조만 재편하고 실행은 없다.
-  - 런타임: `store.ts`에 Agent/AgentInput/AgentKind/AgentEscalation/AgentAutonomy와 `listAgents/getAgent/getAgentByName/putAgent/removeAgent`를 두 드라이버 모두에 넣었다. `agents.ts`(BUILTIN_PERSONA_ID/SEED/seedBuiltinPersona)에서 페르소나 삭제 금지를 store가 강제한다. runtime-entry로 내보내고, `spike-agents`가 30체크 × 2드라이버와 재오픈 시 중복 없음을 PASS로 확인했다.
+  - 런타임: `store.ts`에 Agent/AgentInput/AgentKind/AgentEscalation/AgentAutonomy와 `listAgents/getAgent/getAgentByName/putAgent/removeAgent`를 두 드라이버 모두에 넣었다. `agents.ts`(BUILTIN_PERSONA_ID/SEED/seedBuiltinPersona)에서 페르소나 삭제 금지를 store가 강제한다. **(2026-07-30 개정: 편집 금지도 store가 강제하고, 시드가 기본값을 되돌린다 — §4·§8.1.)** runtime-entry로 내보내고, `spike-agents`가 30체크 × 2드라이버와 재오픈 시 중복 없음을 PASS로 확인했다.
   - 셸: `getStore()` 합성 루트에 `seedBuiltinPersona`를 멱등으로 연결했다. `api/naby.ts`에 `agent.list/put/remove` 액션, `NabyAgentManager.tsx`(신규), Settings `agents` 섹션(메모리 이동)과 `harness` 섹션(커맨드 흡수), i18n `agentManager.*`(en/ko)를 추가했다.
   - 검증: 타입체크 clean(두 트리, 베이스라인 노이즈만), `build:app` exit 0. 실서버를 띄우고 `/api/naby`로 agent.list 시드 확인, put, 페르소나 삭제 거부, 중복 이름 거부를 모두 통과했다. **미검증: Settings UI가 실제로 어떻게 보이는지(라이브 창이 필요하다).**
   - 결정: 페르소나는 kind='persona' 하나뿐이고 사용자는 custom만 만든다. name은 `@` 라우팅 핸들이라 UNIQUE이고 공백을 쓸 수 없다. memoryScope는 학습 스코프이며 주입 연결은 P3-M2에서 한다. escalation은 inline으로 두고 텔레그램은 P3-M3에서 붙인다.
@@ -135,11 +137,21 @@ Agent {
     - 도구의 기본 스코프는 `agent.memoryScope`다. **읽기(주입)는 계속 전 스코프 합집합으로 둔다** — 좁히면 품질만 떨어진다. `memoryScope`는 "어디에 쓰는가"를 정한다.
   - 검증: 신규 스파이크 `spike:learn` **10/10 PASS**. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌려 **루프를 닫는 것까지** 확인한다. 캡처가 `proposed`+`artifact`로 안착 → **proposed는 다음 턴에 주입되지 않음** → 사용자 confirm → **같은 사실이 다음 턴 시스템 프롬프트에 등장**. 여기에 라우팅 없는 턴은 도구·지시 모두 없음, 시크릿 거부 후 미기록, `org` 거부, cwd 없는 턴의 `project` 거부까지 본다. 회귀: `spike:02` 5/5, `spike:autonomy` 10/10, `spike:agents`·`spike:p15`(11/11) PASS, 셸 281/281, 타입체크 clean(양 트리), `build:app` exit 0. **미검증: 라이브 모델이 무엇을 기억할 만하다고 판단하는지의 품질(모델 필요), Settings 검토 UI 시각 렌더.**
   - 남음(M4c): 모델 판단이 아니라 **편집·승인 신호에서 선호를 추출**하는 루프. 전략 문서가 Phase 2b(추출·검증)에 배치했고, 북극성 지표(편집률 감소 곡선)를 실제로 움직이는 부분이다. → **P3-M8(연속 학습)로 승계** — [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
+- **P3-M9** ✅ **완료(2026-07-30)** — 페르소나 하드닝. 편집 잠금(§4) 이후 위임 비전을 실행 가능하게 만들었다: 자율 설정의 사용자 소유권 이동(`persona.autonomy.*` 설정), `@` 게이트 일원화(`isAddressable` 한 함수를 팔레트·엔진이 공유), 시드 프롬프트 운영 프로토콜 4종, 자율 루프 검증 촉구. 상세 → [`phase-3-persona-hardening`](phase-3-persona-hardening.md).
 - **P3-M8** ✅ **M8a~M8d 완료(2026-07-30)** — 연속 학습. 모든 세션의 대화록을 학습 증거로 바꾸는 루프. M8a(세션 회고 — 암묵 교정 `correctedAfter` 기록), M8b(기억 제안 + 교차 세션 확증·옵트인 자동 confirm), M8c(어휘 관련도 주입 랭킹 + 학습 깊이 패널 + 순수 대화 세션 회고), M8d(암묵 라벨 가중 편입 w=0.25 + MCP 결과성 분류)를 구현·검증했다. 남은 M8e(골든셋 재채점)는 라이브 judge 품질 실측 뒤로 보류. 상세 → [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
 
 ## 8. 결정 사항 (2026-07-25 확정)
 
-- ✅ **페르소나 에이전트는 별도 `agents` 스토어의 1급 엔티티다**(§4). 하네스 subagent를 재사용하지 않는다. "에이전트는 하네스가 아니다"라는 구분을 코드로 못박는다. built-in 페르소나 하나를 시드로 넣고(삭제 불가, 편집 가능) 사용자는 custom을 추가한다.
+- ✅ **페르소나 에이전트는 별도 `agents` 스토어의 1급 엔티티다**(§4). 하네스 subagent를 재사용하지 않는다. "에이전트는 하네스가 아니다"라는 구분을 코드로 못박는다. built-in 페르소나 하나를 시드로 넣고 사용자는 custom을 추가한다.
+  - ⚠️ **2026-07-30 개정**: 원래 결정은 "삭제 불가, 편집 가능"이었다. **삭제·편집 모두 불가로 바꾼다**(아래 결정 참조).
+
+## 8.1. 결정 사항 (2026-07-30 사용자 결정)
+
+- ✅ **built-in 페르소나는 삭제도 편집도 할 수 없다. 시드가 기본값을 강제한다.**
+  - 왜 뒤집는가: 페르소나의 systemPrompt는 M2~M8이 그 위에 쌓은 **계약 그 자체**다. 기억 주입, 에스컬레이션, 자율 단계 예산, 신뢰 지표가 재는 대상이 전부 이 프롬프트를 전제한다. 사용자가 절반쯤 고친 프롬프트는 **측정 대상과 다르게 행동하는 에이전트**를 만들고, 그 행을 지울 수도 없으니 되돌릴 길이 없었다. 내장·읽기 전용으로 두면 계약을 제품이 지킨다.
+  - 페르소나는 **고쳐 써서** 자라지 않는다. **배워서** 자란다 — 기억(P15/M8b)과 원장(M5)이 그 통로이고, 그쪽은 그대로 열려 있다.
+  - 이전 빌드에서 이미 편집된 행은 다음 부팅의 시드가 **되돌린다**(§4). 한 기계만 계약 밖에 남는 상태를 만들지 않는다.
+  - 예외 하나: 시드 이름(`persona`)을 다른 custom 에이전트가 이미 쥐고 있으면 이름만 그대로 두고 나머지를 되돌린다. 사용자가 만든 행을 건드리거나 부팅을 깨뜨리는 쪽이 더 나쁘다.
 - ✅ **구현은 새 세션에서 한다**(컨텍스트를 넉넉히 두려고). 이 문서가 착수 스펙이다.
 
 ### 착수 시 남은 세부 결정 (P3-M1에서 확정)

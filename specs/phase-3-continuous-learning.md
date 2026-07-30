@@ -2,7 +2,7 @@
 id: phase-3-continuous-learning
 title: Phase 3 P3-M8 — 연속 학습 (세션 회고와 암묵 라벨)
 type: design
-version: 0.8.0
+version: 0.9.0
 status: active
 scope: 모든 세션의 대화록을 학습 증거로 바꾸는 연속 학습 루프. 세션 회고 패스, 암묵 교정(correctedAfter) 기록, 기억 통합, 원장 확장, 학습 깊이 표시를 M8a~M8d로 나눈다. 신뢰 판정 알고리즘 자체는 butterfly-trust-meter가, 원장 계약은 checkin-contracts가 계속 소유한다.
 related: [phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-checkin-contracts, personalization-strategy, phase-1_5-memory-contracts]
@@ -100,9 +100,24 @@ UI 작업은 없다. GrowthPanel이 이미 `correctedAfter`를 표시하고 있�
 `npm run spike:reflection` **18/18 PASS**(두 드라이버), 회귀 spike 4종 전부 PASS, 셸 테스트 453/453, 타입체크 clean(양 트리, 기존 베이스라인 4건 제외), `build:app` exit 0. 구현하며 확정된 설계가 넷 있다.
 
 - **사건↔메시지 결합은 시간이 아니라 구조로 한다.** `messages`에는 타임스탬프가 없어 이벤트의 `at`과 비교할 수 없다. 대신 게이트가 결과적 호출마다 정확히 한 행을 쓰고 `runTurn`이 호출마다 tool 메시지 하나를 쓰는 대응을 이용해, 같은 도구 이름의 n번째 이벤트를 n번째 tool 메시지에 앵커한다. 앵커를 못 찾는 이벤트는 추측하지 않고 사건에서 뺀다.
-- **judge는 ai-sdk(API 키) 경로만 쓴다.** `resolveProviderCredential` + `makeModelResolver`를 재사용하되 `runTurn`을 거치지 않아 사용자 세션에 트랜스크립트·usage 행을 남기지 않는다. 로컬 Claude 로그인만 있는 기기에서는 자격 해석이 실패하고 회고는 로그 한 줄과 함께 건너뛴다 — 엔진 선택 분기를 복제하지 않는다.
+- **judge는 ai-sdk(API 키)를 먼저 쓰고, 없으면 Claude Agent SDK(구독)로 폴백한다. 둘 다 없으면 세션을 건너뛰되 커서를 전진시키지 않고 리뷰 표시도 남기지 않는다.** (2026-07-30 개정 — 아래 §4.9.)
+  - 어느 경로든 `runTurn`을 거치지 않는다. 사용자 세션에 트랜스크립트나 usage 행을 남기지 않는 성질은 그대로다.
+  - 1순위는 `resolveProviderCredential` + `makeModelResolver` + `AiSdkEngine`이다. 사용자가 이미 고른 프로바이더에 붙는 작고 싼 곁호출이고, 구독 rate limit이 아니라 토큰으로 계량된다.
+  - 2순위는 `isClaudeAgentSdkAvailable()`이 참일 때 `ClaudeAgentSdkEngine`을 **헤드리스로** 모는 것이다. 같은 메시지·시스템 프롬프트, `toolSchemas: []`, 전부 거절하는 게이트, 세션당 1회, 같은 엄격 JSON 파싱. 가용 판정은 **기존 술어 하나**를 그대로 쓴다 — 사본을 만들면 UI가 틀린 쪽을 믿게 된다.
+  - 헤드리스 호출은 `isolated`로 돈다(`settingSources: []`). `cwd`를 안 준다고 하네스를 안 읽는 게 아니다 — SDK는 `cwd`를 `process.cwd()`로 기본값 처리하므로, 그냥 두면 Electron 메인 프로세스가 앉은 디렉터리(개발 중에는 naby 자기 체크아웃)의 CLAUDE.md·설정·**훅**을 사용자가 시키지도 않은 배경 호출에 끌어들인다.
 - **멱등 장치가 두 겹이다.** `markEvalEventCorrected`는 이미 표시된 행에 재호출해도 쓰기 없이 true를 돌려주고, 스윕은 프로세스당 single-flight라 연속 턴이 커서 경쟁을 만들지 않는다. judge 실패 시 커서는 전진하지 않아 다음 스윕이 재시도한다.
 - **사건은 커서 이후의 사용자 메시지가 있을 때만 성립한다.** 휴지 판정과 별개의 안전벨트로, 이미 판정한 구간이 모델 호출을 두 번 쓰지 못하게 한다.
+
+### 4.9 judge 부재는 빈 답이 아니다 (2026-07-30 수정)
+
+M8a가 남긴 버그 하나를 고친다. **"judge가 없다"와 "judge가 읽었는데 고칠 게 없다"를 같은 값으로 보고했다.**
+
+- 자격 해석이 실패하면 judge는 `[]`를 돌려줬다. 그런데 `[]`는 세션을 읽고 아무 문제도 못 찾았을 때 돌려주는 값과 **똑같다**. 스윕은 둘을 구분할 수 없으니 진짜 답을 받았을 때 하는 일을 했다 — 올린 사건 전부에 `reviewedAt`을 찍고(§7.2) 커서를 전진시켰다.
+- 결과가 나쁜 쪽으로 정확히 맞물렸다. `reviewedAt`이 찍힌 무교정은 M8d가 신뢰 구간에 w=0.25로 섞는 **약한 accept**다(§7). 그래서 API 키 없이 구독만 쓰는 기기에서는, 모델이 한 번도 본 적 없는 자율 행동들이 "누군가 보고 그냥 뒀다"로 계속 쌓였다. 신뢰 하한이 빈 방을 근거로 올라갔다. 게다가 커서가 이미 지나가서 다시 읽힐 수도 없었다.
+- 고친 모양: 판정자가 아예 없으면 `ReflectionJudgeUnavailableError`를 **throw한다**. 스윕의 세션별 catch가 이미 옳게 동작하므로 — 표시도 없고 커서도 안 움직인다 — 증거는 판정할 수 있는 다음 스윕까지 그대로 남는다.
+- 이 예외 하나만 스윕 전체를 멈춘다(`break`). 판정자가 없는 기계는 모든 세션에서 똑같이 실패하니 나머지를 도는 건 무의미한 호출과 경고만 늘린다. 통합(consolidation)은 모델이 필요 없으므로 그 뒤에 그대로 돈다.
+- 프로바이더 **오류**(401, 타임아웃)는 종전대로 그 세션만 건너뛴다. 실패한 시도도 아무것도 읽지 않았다는 점은 같지만, 다음 세션은 성공할 수 있다.
+- 검증: `spike:reflection` (y)(z) — 판정자 부재 시 `reviewedAt` 무기록·커서 불변, 그리고 다음 스윕이 바로 그 백로그를 판정한다. 셸 `reflection.test.ts`에 같은 네 갈래(무표시, 재시도, 스윕 중단, 일반 실패와의 대비)를 둔다.
 
 ## 5. M8b — 세션 회고 2차 (기억 제안과 통합)
 
