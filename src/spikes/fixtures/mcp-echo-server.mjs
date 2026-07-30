@@ -23,10 +23,18 @@ function record(event) {
   appendFileSync(LOG, `${JSON.stringify(event)}\n`);
 }
 
+// The two tools differ in ONE further way since P3-M8d: `mcp_echo` DECLARES
+// itself read-only through the spec's `annotations.readOnlyHint`, and
+// `mcp_danger` declares nothing at all. That pair is the whole input to the
+// consequentiality classification (continuous-learning §7.4) — a declared
+// read-only tool is an observation, an undeclared one is treated as
+// consequential — and putting it in the fixture means the annotation is proven
+// to survive the REAL wire, not just our own object literals.
 const TOOLS = [
   {
     name: 'mcp_echo',
     description: 'Echo text back. Read-safe; used to prove MCP calls are gated.',
+    annotations: { title: 'Echo', readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: { text: { type: 'string', description: 'Text to echo.' } },
@@ -36,6 +44,8 @@ const TOOLS = [
   {
     name: 'mcp_danger',
     description: 'Pretends to do something irreversible. Used to prove deny blocks it.',
+    // NO annotations, deliberately: the common case in the wild, and the one the
+    // fail-closed rule exists for.
     inputSchema: {
       type: 'object',
       properties: { target: { type: 'string', description: 'What to act on.' } },

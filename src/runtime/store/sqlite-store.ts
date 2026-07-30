@@ -1979,6 +1979,40 @@ export class SqliteStore implements Store {
     return true;
   }
 
+  /**
+   * The ledger's SECOND permitted after-the-fact edit (checkin-contracts 0.5.0
+   * invariant 8, P3-M8d): record WHEN the reflection pass put this autonomous
+   * action before its judge.
+   *
+   * FIRST WRITE WINS. A row already carrying `reviewedAt` is left exactly as it
+   * is and reported as marked, so a re-sweep cannot move an old action's review
+   * time forward into the current window. Same narrowness as the corrected
+   * marker: the `kind` is re-read from the row, and nothing else in the payload
+   * is touched.
+   */
+  markEvalEventReviewed(id: string, reviewedAt: number): boolean {
+    this.assertOpen();
+    const row = this.db.prepare('SELECT kind, payload FROM eval_events WHERE id = ?').get(id) as
+      | { kind: string; payload: string }
+      | undefined;
+    if (!row || row.kind !== 'autonomous') return false;
+    let payload: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(row.payload) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        payload = parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* a corrupt payload is rewritten as just the stamp rather than blocking it */
+    }
+    if (typeof payload.reviewedAt === 'number') return true; // the first review stands
+    payload.reviewedAt = Math.trunc(reviewedAt);
+    this.db
+      .prepare('UPDATE eval_events SET payload = ? WHERE id = ?')
+      .run(JSON.stringify(payload), id);
+    return true;
+  }
+
   deleteEvalEvents(selector: EvalEventDeleteSelector): void {
     this.assertOpen();
     if ('agentId' in selector) {

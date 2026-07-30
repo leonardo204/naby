@@ -1,42 +1,21 @@
-// src/runtime/growth.ts
+// src/spikes/fixtures/growth-pre-m8d.ts
 //
-// THE TRUST METER (Phase 3, P3-M5) — how far can this agent be trusted to act
-// for its user, measured rather than accumulated.
+// THE METER AS IT WAS BEFORE P3-M8d — a verbatim copy of `src/runtime/growth.ts`
+// at commit c3a6613, kept so `spike:growth` can prove the regression invariant
+// (trust-meter §4.11: "with zero reviewed events every number is identical to
+// today") against something OTHER THAN THE NEW CODE ITSELF.
 //
-// WHY NOT A COUNTER. The obvious "learning rate" is a tally: memories stored,
-// turns taken. It is worthless as a trust signal — an agent that stored fifty
-// wrong facts would read as fully grown. The strategy doc already rejected this
-// (§2.2): the north-star is the EDIT-RATE DECLINE, and edit distance is "a loss
-// function, not a dashboard number".
+// A check that recomputes the blend and asserts it equals the blend proves
+// nothing — the same trap M8c's ranking spike avoided by copying the pre-M8c
+// comparator. This file is that copy: it does not know what `reviewedAt` is, so
+// agreement with it is real evidence that a ledger with no reviewed rows scores
+// exactly as it did before.
 //
-// WHAT WE MEASURE INSTEAD. The agent CHECKS IN mid-task: it states how it plans
-// to proceed and asks. The user either takes the recommendation or picks
-// something else. That single interaction is a labelled prediction —
+// DO NOT "FIX" THIS FILE. It is a historical record, not live code. If the meter
+// changes deliberately, the check that compares against it is what has to be
+// re-argued.
 //
-//     hit  = the user took naby's recommended option unchanged
-//     miss = the user chose differently, or corrected it
-//
-// so the hit rate is literally "how often naby already knows what I want". This
-// is PRELUDE/CIPHER's metric (Gao et al., NeurIPS 2024 — total edit distance and
-// the share of ZERO-EDIT examples, 60% for CIPHER vs 76.7% for an oracle)
-// applied to proposals instead of documents. It needs no holdout corpus, no
-// consent flow and no second scoring model: the app's own conversation produces
-// the labels, which is the same insight as "the approval button is the training
-// signal" (strategy §3.1), generalized from tool gates to task decisions.
-//
-// WHY A CONFIDENCE BOUND, NOT THE RAW RATE. Three-for-three is not 100%. Using
-// the raw proportion would let an agent reach "fully grown" on a handful of easy
-// calls, which is exactly the false confidence that would make the meter a lie.
-// So every stage keys on the WILSON SCORE INTERVAL's lower bound: with little
-// evidence it sits far below the observed rate, and it converges upward only as
-// the sample grows. Growth therefore has to be EARNED twice — by being right,
-// and by being right often enough to prove it.
-//
-// AND IT CAN GO DOWN. A user's patterns shift; when they do, recent
-// recommendations start missing and the bound falls, so the stage regresses.
-// That is a feature, not a bug — a meter that only rises is decoration. What the
-// UI owes the user then is an honest reason, which is what `diagnoseChange`
-// produces (as structured codes; the shell renders them in the user's language).
+// ---------------------------------------------------------------------------
 
 /** The four visible stages. Only a butterfly may be addressed with `@`. */
 export type GrowthStage = 'egg' | 'larva' | 'pupa' | 'butterfly';
@@ -72,11 +51,6 @@ export type CheckinRecord = {
   /** kind='autonomous': the user corrected the result afterwards. The miss
    *  signal for the covered region — without it coverage inflates for free. */
   correctedAfter?: boolean;
-  /** kind='autonomous': epoch ms the session-reflection pass put this action
-   *  before its judge (P3-M8d). Set + no `correctedAfter` = a WEAK implicit
-   *  accept; absent = never looked at, which is NOT the same thing and must not
-   *  be scored as one. Mirrors `EvalEvent.reviewedAt`. */
-  reviewedAt?: number;
   /** Excluded from scoring as degenerate (near-duplicate question, one real
    *  option). Kept and counted, never silently dropped (§7 anti-gaming). */
   excludedFromScoring?: boolean;
@@ -133,34 +107,6 @@ export const GROWTH_WINDOW = 20;
 //  17 of 20  → 0.64  butterfly  (the realistic route: high rate, real sample)
 export const PUPA_THRESHOLD = 0.45;
 export const BUTTERFLY_THRESHOLD = 0.6;
-
-// ---------------------------------------------------------------------------
-// Implicit labels (P3-M8d) — trust-meter §4.11
-// ---------------------------------------------------------------------------
-//
-// THE SECOND LABEL SOURCE, AND WHY IT IS WORTH A QUARTER. Session reflection
-// (continuous-learning §4) reads finished conversations and stamps `reviewedAt`
-// on every autonomous action it put before its judge. A reviewed action the user
-// never corrected is evidence — they had the result in front of them and a
-// chance to push back, and did not — but WEAK evidence: silence is not the same
-// as approval, and nothing proves they read it closely. So it enters the same
-// Wilson bound the check-ins do, at a quarter of their weight:
-//
-//     s = s_checkin + w·s_implicit     n = n_checkin + w·n_implicit
-//
-// Four uncorrected actions therefore say as much as one check-in the user
-// actually answered.
-
-/** What one uncorrected reviewed action is worth against one answered check-in.
- *  A quarter, because "they did not object" is not "they agreed" (§4.11). */
-export const IMPLICIT_WEIGHT = 0.25;
-
-/** How many reviewed actions the implicit pool holds — its OWN window, separate
- *  from `GROWTH_WINDOW`. 40 at weight 0.25 is an effective sample of at most 10,
- *  which is the ceiling that keeps the weak signal from ever outweighing the
- *  explicit one: a full implicit window still counts for less than a full
- *  check-in window. */
-export const IMPLICIT_WINDOW = 40;
 
 /** z for a 95% interval. */
 const Z_95 = 1.96;
@@ -351,10 +297,7 @@ export type GrowthState = {
    *  `lowerBound / BUTTERFLY_THRESHOLD`, capped. The panel shows the underlying
    *  rate next to it so the gauge is never the only number on screen. */
   percent: number;
-  /** Wilson lower bound over the recent window — what the stage keys on. Since
-   *  P3-M8d it is computed over the check-ins PLUS the implicit pool at
-   *  `IMPLICIT_WEIGHT`; with nothing reviewed the implicit terms are 0 and this
-   *  is the same number it always was. */
+  /** Wilson lower bound over the recent window — what the stage keys on. */
   lowerBound: number;
   /** Raw observed rate over the recent window (always ≥ lowerBound). */
   observedRate: number;
@@ -378,26 +321,6 @@ export type GrowthState = {
   tripwires: number;
   /** Check-ins dropped as degenerate. Surfaced so the exclusion is visible. */
   excluded: number;
-
-  // -- the implicit axis (§4.11, P3-M8d) ------------------------------------
-  //
-  // RAW COUNTS, plus the weight they entered at. The panel needs all three to
-  // say something true: "14 of 15 reviewed actions stood, and they count for a
-  // quarter each" is checkable, while a pre-multiplied 3.5 is a number nobody
-  // can tie back to anything they remember doing.
-  //
-  // ABSENT WHEN NOTHING HAS BEEN REVIEWED, deliberately: with an empty pool this
-  // state is deep-equal to the pre-M8d one, so the regression invariant ("zero
-  // reviewed events ⇒ every number identical") is a property of the shape rather
-  // than a promise in a comment.
-  /** Reviewed autonomous actions in the implicit window. */
-  implicitTrials?: number;
-  /** Of those, the ones the user never corrected — the weak accepts. */
-  implicitHits?: number;
-  /** What each of them counted for against one answered check-in. Sent rather
-   *  than hardcoded in the UI: a sentence with a hand-typed 0.25 in it goes
-   *  quietly wrong the day the constant is retuned. */
-  implicitWeight?: number;
   /** Where the surviving window starts, if a pattern change was detected. */
   changePointAt?: number;
   /** True when accuracy alone would have earned butterfly but a safety refusal in
@@ -416,35 +339,6 @@ export type GrowthState = {
 /** Sort newest-last, then take the recent window. */
 function recentWindow(records: readonly CheckinRecord[], window: number): CheckinRecord[] {
   return [...records].sort((a, b) => a.at - b.at).slice(-Math.max(1, window));
-}
-
-/**
- * The rows the implicit half of the bound is computed over (§4.11): autonomous
- * actions that reflection has REVIEWED, newest `IMPLICIT_WINDOW` of them.
- *
- * @param ordered  the agent's rows, oldest first, imported ones already dropped
- * @param afterAt  the ADWIN cut's timestamp when a pattern change was detected.
- *   Rows at or before it are stale for exactly the reason the explicit ones are:
- *   the change point says the user's preferences moved, and an accept from
- *   before the move is evidence about a person who has since changed their mind.
- *
- * Returns [] when nothing has been reviewed — which is what makes the regression
- * invariant structural rather than a special case: an empty pool contributes
- * 0 to both s and n, so every number is arithmetically identical to what it was
- * before this section existed.
- */
-function implicitPool(ordered: readonly CheckinRecord[], afterAt?: number): CheckinRecord[] {
-  const pool = ordered.filter(
-    (r) =>
-      r.kind === 'autonomous' &&
-      typeof r.reviewedAt === 'number' &&
-      // A row excluded from scoring is excluded from BOTH halves. The exclusion
-      // exists so a degenerate observation cannot buy score, and an implicit
-      // accept is score.
-      !r.excludedFromScoring &&
-      (afterAt === undefined || r.at > afterAt),
-  );
-  return pool.slice(-IMPLICIT_WINDOW);
 }
 
 /**
@@ -475,24 +369,7 @@ export function computeGrowth(
 
   const trials = recent.length;
   const hits = recent.filter((r) => r.hit).length;
-
-  // THE IMPLICIT HALF (§4.11, P3-M8d). Its own window, drawn from the same
-  // change-point cut: the ADWIN test runs on the EXPLICIT sequence only (the
-  // labels a user actually gave), and whatever it declares stale for them is
-  // stale for the weak labels too. The cut's timestamp is the last row the
-  // detector threw away, so an action taken after the pattern moved still counts.
-  const cutAt = cut > 0 ? scorableRows[cut - 1]?.at : undefined;
-  const implicit = implicitPool(ordered, cutAt);
-  const implicitTrials = implicit.length;
-  const implicitHits = implicit.filter((r) => !r.correctedAfter).length;
-
-  // The blend. `hits`/`trials` stay the EXPLICIT counts, because they are what
-  // the panel prints as "guessed right, N of M" and what the stage's minimum
-  // sample counts — only the bound is blended.
-  const lowerBound = wilsonLowerBound(
-    hits + IMPLICIT_WEIGHT * implicitHits,
-    trials + IMPLICIT_WEIGHT * implicitTrials,
-  );
+  const lowerBound = wilsonLowerBound(hits, trials);
   const observedRate = trials > 0 ? hits / trials : 0;
 
   // The other axes read the SAME time span as accuracy, so the panel never
@@ -545,9 +422,6 @@ export function computeGrowth(
     correctedAfter: autonomous.filter((r) => r.correctedAfter).length,
     tripwires,
     excluded: spanRows.filter((r) => r.excludedFromScoring).length,
-    ...(implicitTrials > 0
-      ? { implicitTrials, implicitHits, implicitWeight: IMPLICIT_WEIGHT }
-      : {}),
     ...(cut > 0 ? { changePointAt: cut } : {}),
     ...(blockedByTripwire ? { blockedByTripwire: true } : {}),
     // Computed over the SAME span as accuracy, so the panel never mixes a recent

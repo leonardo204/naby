@@ -48,6 +48,13 @@
 //       things: the proposal lands and the cursor advances.
 //   (t) Below the threshold the judge is NOT called (counted, not inferred) and the
 //       cursor advances anyway — the span is spent either way.
+// M8d (§7.2) — the `reviewedAt` writer, against BOTH drivers:
+//   (u) The second mutable field is as narrow as the first: `autonomous` only, and
+//       FIRST-WINS, so a re-sweep cannot move an old action's review time forward.
+//   (w) The sweep stamps EVERY action it put to the judge, the corrected ones
+//       included, and leaves an action that never reached the judge unstamped.
+//   (x) Those stamps arrive in the meter as the implicit half of the bound, with
+//       the raw counts reported and the check-in record untouched.
 // And once, against a real file:
 //   (i) LOSSLESS MIGRATION v7 -> current: reflection_state appears and works, and
 //       the pre-existing session / messages / ledger rows all survive.
@@ -76,7 +83,12 @@ import {
   type ReflectionJudge,
   type ReflectionMemoryCandidate,
 } from '../runtime/reflection.js';
-import { askDecisionQuality, computeGrowth, type CheckinRecord } from '../runtime/growth.js';
+import {
+  askDecisionQuality,
+  computeGrowth,
+  IMPLICIT_WEIGHT,
+  type CheckinRecord,
+} from '../runtime/growth.js';
 import { DEFAULT_USER_ID, retrieveForInjection } from '../runtime/memory-inject.js';
 import {
   MEMORY_AUTO_CONFIRM_KEY,
@@ -101,7 +113,12 @@ const LATER = (): number => Date.now() + REFLECTION_IDLE_MS * 2;
  * writes one (user → assistant tool-call → tool result → assistant → user), which
  * is what the case-builder's anchoring depends on.
  */
-function seedCorrectedSession(store: Store, sessionId: string, at: number): string {
+function seedActionSession(
+  store: Store,
+  sessionId: string,
+  at: number,
+  finalUserMessage: string,
+): string {
   store.touchSession(sessionId, 'test-provider');
   store.appendMessage(sessionId, { role: 'user', content: 'update the config for me' });
   store.appendMessage(sessionId, {
@@ -116,7 +133,7 @@ function seedCorrectedSession(store: Store, sessionId: string, at: number): stri
     output: { content: 'wrote config/dev.yaml' },
   });
   store.appendMessage(sessionId, { role: 'assistant', content: 'Updated config/dev.yaml.' });
-  store.appendMessage(sessionId, { role: 'user', content: CORRECTION });
+  store.appendMessage(sessionId, { role: 'user', content: finalUserMessage });
   const row = store.appendEvalEvent({
     kind: 'autonomous',
     agentId: AGENT,
@@ -126,6 +143,10 @@ function seedCorrectedSession(store: Store, sessionId: string, at: number): stri
     at,
   });
   return row.id;
+}
+
+function seedCorrectedSession(store: Store, sessionId: string, at: number): string {
+  return seedActionSession(store, sessionId, at, CORRECTION);
 }
 
 /** A judge that marks a case corrected when the user's own words say so, quoting
@@ -314,13 +335,28 @@ function checkKindGuard(store: Store, label: string): void {
   const missingRefused = store.markEvalEventCorrected('no-such-id') === false;
   const autonomousAccepted = store.markEvalEventCorrected(autonomous.id) === true;
 
+  // P3-M8d: the SECOND mutable field obeys the same narrowness, plus first-wins.
+  const reviewRefusals =
+    store.markEvalEventReviewed(checkin.id, 5_500) === false &&
+    store.markEvalEventReviewed(tripwire.id, 5_500) === false &&
+    store.markEvalEventReviewed('no-such-id', 5_500) === false;
+  const reviewAccepted = store.markEvalEventReviewed(autonomous.id, 5_500) === true;
+  // A second review reports success and changes NOTHING: the first review is
+  // when the user's chance to object began, and letting a later sweep push that
+  // forward would slide an old action into the current implicit window.
+  const reviewRepeated = store.markEvalEventReviewed(autonomous.id, 9_999) === true;
+
   const rows = store.listEvalEvents(AGENT, { sessionId: 'sess-kinds' });
   const checkinRow = rows.find((r) => r.id === checkin.id);
   const tripwireRow = rows.find((r) => r.id === tripwire.id);
+  const autonomousRow = rows.find((r) => r.id === autonomous.id);
   const untouched =
     checkinRow?.correctedAfter === undefined &&
     checkinRow?.hit === true &&
-    tripwireRow?.correctedAfter === undefined;
+    checkinRow?.reviewedAt === undefined &&
+    tripwireRow?.correctedAfter === undefined &&
+    tripwireRow?.reviewedAt === undefined;
+  const firstReviewStands = autonomousRow?.reviewedAt === 5_500;
   // The sessionId selector is exercised here too: three rows in, three rows out,
   // and none of the other sessions' rows.
   const selectorWorks = rows.length === 3 && rows.every((r) => r.sessionId === 'sess-kinds');
@@ -334,6 +370,12 @@ function checkKindGuard(store: Store, label: string): void {
       untouched &&
       selectorWorks,
     `checkin=${checkinRefused} tripwire=${tripwireRefused} missing=${missingRefused} autonomous=${autonomousAccepted} rowsUntouched=${untouched} sessionSelector=${rows.length} rows`,
+  );
+
+  record(
+    `(u) [${label}] reviewedAt is autonomous-only and FIRST-WINS: a second review reports success and moves nothing`,
+    reviewRefusals && reviewAccepted && reviewRepeated && firstReviewStands,
+    `refusedForOtherKinds=${reviewRefusals} accepted=${reviewAccepted} secondCall=${reviewRepeated} storedReviewedAt=${String(autonomousRow?.reviewedAt)} (re-review asked for 9999)`,
   );
 }
 
@@ -377,6 +419,79 @@ async function checkMeter(store: Store, label: string): Promise<void> {
       growthAfter.correctedAfter > growthBefore.correctedAfter,
     `before: missedAsks=${askBefore?.missedAsks} recall=${askBefore?.recall?.toFixed(3)} correctedAfter=${growthBefore.correctedAfter}` +
       ` → after: missedAsks=${askAfter?.missedAsks} recall=${askAfter?.recall?.toFixed(3)} correctedAfter=${growthAfter.correctedAfter}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// (w)+(x) M8d — what the sweep marks REVIEWED, and what that does to the meter
+// ---------------------------------------------------------------------------
+
+async function checkReviewedMarking(store: Store, label: string): Promise<void> {
+  // Two actions the user could have reacted to: one they pushed back on, one
+  // they simply moved past.
+  const correctedId = seedActionSession(store, 'sess-rev-1', 11_000, CORRECTION);
+  const acceptedId = seedActionSession(
+    store,
+    'sess-rev-2',
+    11_100,
+    'great, now do the staging one as well',
+  );
+  // And one nothing could have been said about: no tool message anchors it, so
+  // the case builder drops it BEFORE the judge call (§4.8). It must come back
+  // unreviewed — "we never asked about this" is exactly what the absence of
+  // `reviewedAt` has to keep meaning, or the implicit pool fills with actions
+  // nobody ever had a chance to object to.
+  const unjudgedId = store.appendEvalEvent({
+    kind: 'autonomous',
+    agentId: AGENT,
+    sessionId: 'sess-rev-2',
+    toolName: 'run_command',
+    reversible: false,
+    at: 11_150,
+  }).id;
+
+  const now = LATER();
+  const out = await runReflectionSweep(store, honestJudge([]), { now, cap: 10 });
+  const rows = store.listEvalEvents(AGENT);
+  const row = (id: string): CheckinRecord | undefined =>
+    rows.find((r) => r.id === id) as CheckinRecord | undefined;
+
+  record(
+    `(w) [${label}] every action put to the judge is stamped reviewedAt — the corrected one too — and one that was never judged is not`,
+    out.reviewedEvents === 2 &&
+      out.markedEvents === 1 &&
+      row(correctedId)?.reviewedAt === now &&
+      row(correctedId)?.correctedAfter === true &&
+      row(acceptedId)?.reviewedAt === now &&
+      row(acceptedId)?.correctedAfter === undefined &&
+      row(unjudgedId)?.reviewedAt === undefined,
+    `reviewed=${out.reviewedEvents} marked=${out.markedEvents}; corrected row: reviewedAt=${String(row(correctedId)?.reviewedAt)} correctedAfter=${String(row(correctedId)?.correctedAfter)}; ` +
+      `accepted row: reviewedAt=${String(row(acceptedId)?.reviewedAt)} correctedAfter=${String(row(acceptedId)?.correctedAfter)}; ` +
+      `never-judged row: reviewedAt=${String(row(unjudgedId)?.reviewedAt)}`,
+  );
+
+  // AND IT REACHES THE METER (trust-meter §4.11). The same rows, read by the
+  // real `computeGrowth`: one weak accept and one weak miss, at a quarter each.
+  const growth = computeGrowth(rows as CheckinRecord[]);
+  const withoutReview = computeGrowth(
+    (rows as CheckinRecord[]).map((r) => {
+      const { reviewedAt: _dropped, ...rest } = r;
+      return rest;
+    }),
+  );
+  record(
+    `(x) [${label}] the stamped rows become the implicit half of the bound: raw counts reported, and the same rows unreviewed score differently`,
+    growth.implicitTrials === 2 &&
+      growth.implicitHits === 1 &&
+      growth.implicitWeight === IMPLICIT_WEIGHT &&
+      withoutReview.implicitTrials === undefined &&
+      growth.lowerBound !== withoutReview.lowerBound &&
+      // The explicit record is untouched by any of it.
+      growth.trials === withoutReview.trials &&
+      growth.hits === withoutReview.hits,
+    `implicit=${growth.implicitHits}/${growth.implicitTrials} at weight ${String(growth.implicitWeight)}; ` +
+      `bound with review=${growth.lowerBound.toFixed(4)} vs the same rows unreviewed=${withoutReview.lowerBound.toFixed(4)}; ` +
+      `check-ins unchanged at ${growth.hits}/${growth.trials}`,
   );
 }
 
@@ -1054,6 +1169,10 @@ async function runDriverChecks(makeBase: () => Store, label: string): Promise<vo
   s.close();
   s = make();
   await checkMeter(s, label);
+  s.close();
+  // M8d (§7.2) — the reviewedAt writer and its arrival in the meter.
+  s = make();
+  await checkReviewedMarking(s, label);
   s.close();
   // M8b (§5) — the memory half.
   s = make();

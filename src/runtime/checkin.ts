@@ -28,8 +28,8 @@
 // `computeGrowth`: padding must cost something, or the exclusion just makes it
 // cheap instead of impossible.
 
-import { DANGEROUS_BUILTINS } from './gate.js';
-import { MUTATING_TOOLS } from './fs-tools.js';
+import { DANGEROUS_BUILTINS, OBSERVATION_BUILTINS } from './gate.js';
+import { MUTATING_TOOLS, READONLY_TOOLS } from './fs-tools.js';
 
 // ---------------------------------------------------------------------------
 // Which actions are consequential enough to be scored
@@ -52,22 +52,119 @@ export const CONSEQUENTIAL_RUNTIME_TOOLS: readonly string[] = [
 ];
 
 /**
+ * Tools that are KNOWN to only look at things: our own read-only runtime tools,
+ * and the handful of harness built-ins that inspect or bookkeep without touching
+ * anything (P3-M8d).
+ *
+ * WHY THIS LIST HAD TO BE WRITTEN DOWN. Until M8d an unclassified name simply
+ * scored nothing, so a tool nobody listed cost nothing. Now the default is
+ * FAIL-CLOSED (see `classifyToolConsequence`), and under a fail-closed default
+ * every read-only tool that is not named here would be recorded as an
+ * unsupervised consequential act — `read_file` would read as the agent quietly
+ * doing something risky, and a plan-mode refusal of `ExitPlanMode` would land as
+ * a safety TRIPWIRE, hard-blocking butterfly on a call that changes nothing.
+ *
+ * These names are spelled out rather than imported from `tools.ts` because that
+ * module imports THIS one (`CHECKIN_TOOL_NAME`); an import back would be a cycle
+ * evaluated at module load.
+ */
+export const OBSERVATION_RUNTIME_TOOLS: readonly string[] = [
+  // Our workspace reads (`fs-tools.ts`) — the counterpart of MUTATING_TOOLS.
+  ...READONLY_TOOLS,
+  // The runtime's own non-mutating tools. `naby_add_mcp` only files a PROPOSED
+  // registry entry (the user approves before anything loads), `naby_delegate`
+  // spawns a subagent whose own calls are each gated and counted separately, and
+  // `naby_checkin` is the act of ASKING — recording it as an unasked action
+  // would make asking count as not asking.
+  'fetch_url',
+  'echo_note',
+  'naby_remember',
+  'naby_checkin',
+  'naby_add_mcp',
+  'naby_delegate',
+  // Harness built-ins that inspect or bookkeep. Deliberately NOT added to
+  // `OBSERVATION_BUILTINS` in gate.ts: that list is the Phase-1 permission
+  // allowlist, and widening what may RUN is a different decision from widening
+  // what is scored as harmless.
+  'ExitPlanMode',
+  'NotebookRead',
+  'SlashCommand',
+  'ListMcpResources',
+  'ReadMcpResource',
+  'AskUserQuestion',
+];
+
+/** What kind of act a tool call is, for the ledger. `observation` produces no
+ *  row at all; `consequential` produces an `autonomous` row when it ran and a
+ *  `tripwire` when the gate refused it. */
+export type ToolConsequence = 'observation' | 'consequential';
+
+/** The two signals M8d reads instead of guessing from a tool's name (spec
+ *  phase-3-continuous-learning §7.4). */
+export type ToolConsequenceSignals = {
+  /** The MCP tool annotation, when the server declared one. `true` is the ONLY
+   *  value that buys an exemption; `false` and `undefined` both fall through to
+   *  the fail-closed default. */
+  readOnlyHint?: boolean;
+  /** The user put an `ask`/`deny` policy rule on this tool. They have already
+   *  said it is worth watching, which outranks anything the server declares
+   *  about itself. */
+  policyForcesConsequential?: boolean;
+};
+
+/**
+ * Classify one call. THE single source of truth for "is this consequential" —
+ * `isConsequentialTool` is a thin wrapper, so the two can never disagree.
+ *
+ * The order of the checks is the order of who is entitled to decide:
+ *
+ *   1. THE USER. An `ask`/`deny` rule means "tell me about this one", so the row
+ *      is written whatever the tool claims about itself.
+ *   2. WHAT WE KNOW. The harness built-ins and our own tools keep exactly the
+ *      classification they had before M8d, so nothing already measured moves.
+ *   3. THE SERVER'S DECLARATION. `readOnlyHint: true` is an MCP tool saying, in
+ *      the protocol's own words, that it does not change anything.
+ *   4. FAIL CLOSED. Anything left — an unannotated MCP tool, a `destructiveHint`,
+ *      a tool nobody has ever heard of — counts. It is better for a declared-less
+ *      tool to show up in the ledger than to vanish from it: coverage that
+ *      silently omits third-party actions reads higher than the truth, which is
+ *      the one direction this meter must never round in.
+ *
+ * Pure, and it never decides PERMISSION — the gate does that, before this is
+ * ever consulted. A wrong answer here changes what is measured, never what runs.
+ */
+export function classifyToolConsequence(
+  bareName: string,
+  opts?: ToolConsequenceSignals,
+): ToolConsequence {
+  if (opts?.policyForcesConsequential === true) return 'consequential';
+  if (DANGEROUS_BUILTINS.includes(bareName) || CONSEQUENTIAL_RUNTIME_TOOLS.includes(bareName)) {
+    return 'consequential';
+  }
+  if (OBSERVATION_BUILTINS.includes(bareName) || OBSERVATION_RUNTIME_TOOLS.includes(bareName)) {
+    return 'observation';
+  }
+  if (opts?.readOnlyHint === true) return 'observation';
+  return 'consequential';
+}
+
+/**
  * Whether a call is the kind of action a check-in is ABOUT: it mutates the
  * filesystem, executes code, or leaves the machine. Reads and searches are not —
  * scoring them would flood the ledger with decisions nobody would ever have
  * wanted to be asked about.
  *
- * KNOWN LIMIT: this classifies the harness built-ins and our own tools. A
- * third-party MCP tool that sends an email is consequential in reality but
- * unclassified here, so it produces no ledger row. That is deliberate — inferring
- * danger from a tool name would be a guess, and a wrong guess either floods the
- * ledger or hard-blocks growth on a harmless call. Classifying MCP tools needs a
- * real signal (a declared annotation, or the user's own policy rule).
+ * THE M8d CHANGE (spec §7.4): a third-party MCP tool that sends an email used to
+ * produce no row, because inferring danger from a name is a guess. It is no
+ * longer a guess — `classifyToolConsequence` reads the tool's own
+ * `readOnlyHint` annotation and the user's own policy rules, and treats anything
+ * undeclared as consequential rather than as free.
  *
  * @param bareName the tool name the gate sees (`ToolCall.toolName`)
+ * @param opts the declared signals for this call, when the caller has them
  */
-export function isConsequentialTool(bareName: string): boolean {
-  return DANGEROUS_BUILTINS.includes(bareName) || CONSEQUENTIAL_RUNTIME_TOOLS.includes(bareName);
+export function isConsequentialTool(bareName: string, opts?: ToolConsequenceSignals): boolean {
+  return classifyToolConsequence(bareName, opts) === 'consequential';
 }
 
 /**

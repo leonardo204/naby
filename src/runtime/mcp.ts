@@ -189,12 +189,31 @@ function timeoutFor(entry: McpEntry): number {
   return t;
 }
 
+/**
+ * What a server DECLARED about one of its tools (P3-M8d, continuous-learning
+ * §7.4). Only the one hint the trust meter reads is modelled — narrowing rather
+ * than widening, exactly as `toRuntimeJsonSchema` does.
+ *
+ * `readOnlyHint: true` is the MCP spec's way for a tool to say it changes
+ * nothing, and it is the ONLY thing that exempts a third-party tool from being
+ * counted as a consequential act. An absent annotation is not evidence of
+ * harmlessness, so it stays absent here rather than being defaulted to `false` —
+ * `classifyToolConsequence` decides what to do with the silence.
+ */
+export type McpToolAnnotations = {
+  readOnlyHint?: boolean;
+};
+
 export type McpConnection = {
   entry: McpEntry;
   /** Execute-less schemas, namespaced. Safe to hand any engine. */
   toolSchemas: ToolSchema[];
   /** Executors keyed by the SAME namespaced names. The runtime gates each. */
   executors: Record<string, Executor>;
+  /** Declared annotations per NAMESPACED tool name — the key the gate sees, so
+   *  the observer can look a call up without re-deriving the name. Tools whose
+   *  server declared nothing are absent, not `{}`. */
+  toolAnnotations: Record<string, McpToolAnnotations>;
   /** Shape digest, for drift detection across reconnects. */
   fingerprint: string;
   /** The server's own reported name/version, for the UI. */
@@ -242,6 +261,7 @@ export async function connectMcpServer(entry: McpEntry): Promise<McpConnection> 
 
   const toolSchemas: ToolSchema[] = [];
   const executors: Record<string, Executor> = {};
+  const toolAnnotations: Record<string, McpToolAnnotations> = {};
 
   for (const t of listed.tools) {
     const qualified = qualifiedToolName(entry.name, t.name);
@@ -250,6 +270,16 @@ export async function connectMcpServer(entry: McpEntry): Promise<McpConnection> 
       description: t.description ?? `${t.name} (from MCP server "${entry.name}")`,
       parameters: toRuntimeJsonSchema(t.inputSchema),
     });
+
+    // What the server SAYS about this tool (P3-M8d). The MCP annotations object
+    // is transported loosely, so `readOnlyHint` arrives as an unknown key rather
+    // than a typed field; it is read with `=== true` so a string "true", a 1, or
+    // a missing annotations block all fall through to fail-closed rather than
+    // buying an exemption by accident.
+    const declared = (t as { annotations?: Record<string, unknown> }).annotations;
+    if (declared && declared.readOnlyHint === true) {
+      toolAnnotations[qualified] = { readOnlyHint: true };
+    }
 
     // The remote name is captured HERE, at load time, and is what callTool is
     // given. The model can only ever name the qualified alias, so it cannot
@@ -290,6 +320,7 @@ export async function connectMcpServer(entry: McpEntry): Promise<McpConnection> 
     entry,
     toolSchemas,
     executors,
+    toolAnnotations,
     fingerprint: fingerprintTools(toolSchemas),
     serverInfo: { ...(info.name ? { name: info.name } : {}), ...(info.version ? { version: info.version } : {}) },
     close: () => client.close(),
@@ -303,6 +334,9 @@ export async function connectMcpServer(entry: McpEntry): Promise<McpConnection> 
 export type McpLoadResult = {
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
+  /** Every connected server's declared annotations, merged on the namespaced
+   *  name (P3-M8d). Namespacing already guarantees the keys cannot collide. */
+  toolAnnotations: Record<string, McpToolAnnotations>;
   connections: McpConnection[];
   /** Servers that could not be reached. Never throws the turn away for one. */
   failures: { name: string; message: string }[];
@@ -336,14 +370,17 @@ export async function loadMcpToolset(
 
   const toolSchemas: ToolSchema[] = [];
   const executors: Record<string, Executor> = {};
+  const toolAnnotations: Record<string, McpToolAnnotations> = {};
   for (const c of connections) {
     toolSchemas.push(...c.toolSchemas);
     Object.assign(executors, c.executors);
+    Object.assign(toolAnnotations, c.toolAnnotations);
   }
 
   return {
     toolSchemas,
     executors,
+    toolAnnotations,
     connections,
     failures,
     closeAll: async (): Promise<void> => {

@@ -25,6 +25,15 @@
 //       same hit rate can score differently, and 0.5-always is exactly the line.
 //   (l) Ask precision and recall grade the decision to ask, and the tension with
 //       a high hit rate is real rather than a bug.
+// P3-M8d — the IMPLICIT half of the bound (trust-meter §4.11):
+//   (n) THE REGRESSION INVARIANT: with nothing reviewed, every number the meter
+//       exports is identical to what it was before the blend existed.
+//   (o) Uncorrected reviewed actions raise the bound; corrected ones lower it.
+//   (p) Implicit evidence alone cannot leave the egg — 40 clean actions and no
+//       check-in is still "not measured".
+//   (q) The implicit window caps at IMPLICIT_WINDOW, and the weight is real
+//       (40 clean actions move the bound by less than 10 check-ins would).
+//   (r) A detected change point drops the implicit rows from before the cut.
 //
 // Pure arithmetic, no store and no engine — runs in milliseconds.
 
@@ -35,6 +44,8 @@ import {
   BUTTERFLY_THRESHOLD,
   GROWTH_MIN_SAMPLE,
   GROWTH_WINDOW,
+  IMPLICIT_WEIGHT,
+  IMPLICIT_WINDOW,
   canBeAddressed,
   computeGrowth,
   diagnoseChange,
@@ -42,6 +53,13 @@ import {
   wilsonLowerBound,
   type CheckinRecord,
 } from '../runtime/growth.js';
+// THE METER AS IT WAS, verbatim at c3a6613 (see the file's own header). Checking
+// the blend against the code that implements the blend would prove nothing; this
+// is the independent witness the regression invariant is measured against.
+import {
+  computeGrowth as preComputeGrowth,
+  type CheckinRecord as PreCheckinRecord,
+} from './fixtures/growth-pre-m8d.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 const checks: Check[] = [];
@@ -408,6 +426,179 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
       askDecisionQuality([]) === undefined &&
       askDecisionQuality([{ at: 1, agentId: 'a', kind: 'tripwire' }]) === undefined,
     `precision=${q.precision.toFixed(2)} recall=${q.recall.toFixed(2)} (warranted ${q.warrantedAsks}, unnecessary ${q.unnecessaryAsks}, missed ${q.missedAsks}, silent ${q.correctSilences}); flawless precision=${flawless.precision}`,
+  );
+}
+
+// ===========================================================================
+// P3-M8d — the implicit half of the bound (trust-meter §4.11)
+// ===========================================================================
+
+/** `n` reviewed autonomous actions, the first `corrected` of them fixed by the
+ *  user afterwards. This is what session reflection leaves behind. */
+function reviewedOf(
+  n: number,
+  corrected: number,
+  opts?: { t0?: number; reviewedAt?: number },
+): CheckinRecord[] {
+  const t0 = opts?.t0 ?? 3_000;
+  return Array.from({ length: n }, (_, i) => ({
+    at: t0 + i,
+    agentId: 'a1',
+    kind: 'autonomous' as const,
+    reviewedAt: opts?.reviewedAt ?? t0 + i + 1,
+    ...(i < corrected ? { correctedAfter: true } : {}),
+  }));
+}
+
+// ---- (n) THE REGRESSION INVARIANT -----------------------------------------
+{
+  // Every population an existing check above builds, scored by BOTH meters: the
+  // one in the runtime today and the verbatim pre-M8d copy under fixtures/. If a
+  // ledger holds no reviewed rows the two must agree on every field, byte for
+  // byte — that is the whole promise §4.11 makes to an existing user.
+  const populations: Array<[string, CheckinRecord[]]> = [
+    ['3/3 perfect', runOf(3, 3)],
+    ['17/20', runOf(17, 20, { t0: 1_000 })],
+    ['regressed', [...runOf(20, 20, { t0: 1_000 }), ...runOf(0, 8, { t0: 5_000 })]],
+    [
+      'mixed with autonomous rows (never reviewed)',
+      [
+        ...runOf(8, 8, { t0: 1_000 }),
+        ...Array.from({ length: 12 }, (_, i) => ({
+          at: 2_000 + i,
+          agentId: 'a1',
+          kind: 'autonomous' as const,
+          correctedAfter: i < 2,
+        })),
+      ],
+    ],
+    [
+      'with a tripwire',
+      [...runOf(17, 20, { t0: 1_000 }), { at: 1_500, agentId: 'a1', kind: 'tripwire' as const }],
+    ],
+    [
+      'imported alongside real rows',
+      [...runOf(20, 20).map((r) => ({ ...r, imported: true })), ...runOf(4, 6, { t0: 900_000 })],
+    ],
+  ];
+  const disagreements: string[] = [];
+  for (const [name, rows] of populations) {
+    const now = JSON.stringify(computeGrowth(rows));
+    const then = JSON.stringify(preComputeGrowth(rows as PreCheckinRecord[]));
+    if (now !== then) disagreements.push(`${name}: ${now} !== ${then}`);
+    // The per-task-type reading takes the same path, so it is checked too.
+    const nowW = JSON.stringify(computeGrowth(rows, { window: 8 }));
+    const thenW = JSON.stringify(preComputeGrowth(rows as PreCheckinRecord[], { window: 8 }));
+    if (nowW !== thenW) disagreements.push(`${name} (window 8): ${nowW} !== ${thenW}`);
+  }
+  record(
+    '(n) with NOTHING reviewed, the meter is byte-for-byte the pre-M8d meter (6 populations, 2 windows each)',
+    disagreements.length === 0,
+    disagreements.length === 0
+      ? `${populations.length * 2} readings identical to the pre-M8d copy in fixtures/growth-pre-m8d.ts`
+      : disagreements.join(' | '),
+  );
+}
+
+// ---- (o) implicit accepts raise the bound, implicit corrections lower it ---
+{
+  const explicit = runOf(4, 5, { t0: 1_000 }); // 4 of 5, a larva
+  const alone = computeGrowth(explicit);
+  const withAccepts = computeGrowth([...explicit, ...reviewedOf(12, 0)]);
+  const withCorrections = computeGrowth([...explicit, ...reviewedOf(12, 12)]);
+  // Reviewed rows must not disturb what the panel prints as the CHECK-IN record.
+  const countsUntouched =
+    withAccepts.hits === alone.hits &&
+    withAccepts.trials === alone.trials &&
+    withAccepts.observedRate === alone.observedRate &&
+    withCorrections.trials === alone.trials;
+  record(
+    '(o) uncorrected reviewed actions raise the bound and corrections lower it, without touching the check-in counts',
+    withAccepts.lowerBound > alone.lowerBound &&
+      withCorrections.lowerBound < alone.lowerBound &&
+      countsUntouched &&
+      withAccepts.implicitTrials === 12 &&
+      withAccepts.implicitHits === 12 &&
+      withAccepts.implicitWeight === IMPLICIT_WEIGHT &&
+      withCorrections.implicitHits === 0 &&
+      alone.implicitTrials === undefined,
+    `4/5 alone bound=${alone.lowerBound.toFixed(4)} → +12 uncorrected=${withAccepts.lowerBound.toFixed(4)}` +
+      ` → +12 corrected=${withCorrections.lowerBound.toFixed(4)}; check-in counts stayed ${withAccepts.hits}/${withAccepts.trials}` +
+      `; implicit reported raw as ${withAccepts.implicitHits}/${withAccepts.implicitTrials} at weight ${withAccepts.implicitWeight}`,
+  );
+}
+
+// ---- (p) implicit evidence alone cannot leave the egg ----------------------
+{
+  // A full implicit window, perfectly clean, and not one answered check-in. The
+  // floor of the meter is still "did it ask, and was it right" — so this is an
+  // egg, at 0%, needing all GROWTH_MIN_SAMPLE answers.
+  const implicitOnly = computeGrowth(reviewedOf(IMPLICIT_WINDOW, 0));
+  // And four check-ins plus a mountain of clean implicit evidence is still short
+  // of the minimum sample: the blend cannot buy the fifth answer.
+  const almost = computeGrowth([...runOf(4, 4, { t0: 1_000 }), ...reviewedOf(IMPLICIT_WINDOW, 0)]);
+  record(
+    `(p) ${IMPLICIT_WINDOW} clean reviewed actions and no check-in is still an egg — the minimum sample counts EXPLICIT answers only`,
+    implicitOnly.stage === 'egg' &&
+      implicitOnly.percent === 0 &&
+      implicitOnly.trials === 0 &&
+      implicitOnly.needsMoreSamples === GROWTH_MIN_SAMPLE &&
+      implicitOnly.implicitTrials === IMPLICIT_WINDOW &&
+      almost.stage === 'egg' &&
+      almost.needsMoreSamples === 1,
+    `implicit-only: stage=${implicitOnly.stage} percent=${implicitOnly.percent}% trials=${implicitOnly.trials}` +
+      ` needsMore=${implicitOnly.needsMoreSamples} (implicit ${implicitOnly.implicitHits}/${implicitOnly.implicitTrials});` +
+      ` 4 check-ins + ${IMPLICIT_WINDOW} clean: stage=${almost.stage} needsMore=${almost.needsMoreSamples}`,
+  );
+}
+
+// ---- (q) the implicit window caps, and the weight is really a quarter ------
+{
+  const explicit = runOf(5, 5, { t0: 1_000 });
+  const capped = computeGrowth([...explicit, ...reviewedOf(IMPLICIT_WINDOW + 25, 0)]);
+  const exactly = computeGrowth([...explicit, ...reviewedOf(IMPLICIT_WINDOW, 0)]);
+  // THE DISCOUNT IS REAL: the same 40 actions, had they been answered check-ins,
+  // would push the bound visibly higher. (They would also be worth exactly 10
+  // check-ins after weighting — which is the ceiling §4.11 chose, not a
+  // coincidence — so the comparison that means something is against 40 EXPLICIT
+  // labels, not against 10.)
+  const asExplicit = computeGrowth([...explicit, ...runOf(IMPLICIT_WINDOW, IMPLICIT_WINDOW, { t0: 3_000 })]);
+  const effective = wilsonLowerBound(
+    5 + IMPLICIT_WEIGHT * IMPLICIT_WINDOW,
+    5 + IMPLICIT_WEIGHT * IMPLICIT_WINDOW,
+  );
+  record(
+    `(q) the implicit pool stops at ${IMPLICIT_WINDOW}, and those actions count for a quarter each rather than as labels`,
+    capped.implicitTrials === IMPLICIT_WINDOW &&
+      Math.abs(capped.lowerBound - exactly.lowerBound) < 1e-12 &&
+      capped.lowerBound < asExplicit.lowerBound &&
+      Math.abs(capped.lowerBound - effective) < 1e-12,
+    `${IMPLICIT_WINDOW + 25} reviewed rows → implicitTrials=${capped.implicitTrials} bound=${capped.lowerBound.toFixed(4)}` +
+      ` (identical to exactly ${IMPLICIT_WINDOW}: ${exactly.lowerBound.toFixed(4)}, and to a hand-computed ${effective.toFixed(4)});` +
+      ` the same ${IMPLICIT_WINDOW} as ANSWERED check-ins instead → ${asExplicit.lowerBound.toFixed(4)}`,
+  );
+}
+
+// ---- (r) the change point drops stale implicit rows too --------------------
+{
+  // A perfect run, then a sharp collapse — the same shape check (d)/(h) uses, so
+  // the detector really does fire. The implicit rows sit in the OLD era and are
+  // clean, i.e. exactly the evidence that would prop the stage up if the cut did
+  // not apply to them.
+  const stale = [...runOf(20, 20, { t0: 1_000 }), ...runOf(0, 8, { t0: 5_000 })];
+  const withOldImplicit = computeGrowth([...stale, ...reviewedOf(20, 0, { t0: 1_500 })]);
+  const withNewImplicit = computeGrowth([...stale, ...reviewedOf(20, 0, { t0: 9_000 })]);
+  const withoutImplicit = computeGrowth(stale);
+  record(
+    '(r) implicit rows from before a detected change point are dropped; rows from after it count',
+    withOldImplicit.changePointAt !== undefined &&
+      withOldImplicit.implicitTrials === undefined &&
+      withOldImplicit.lowerBound === withoutImplicit.lowerBound &&
+      withNewImplicit.implicitTrials === 20 &&
+      withNewImplicit.lowerBound > withoutImplicit.lowerBound,
+    `cut=${String(withOldImplicit.changePointAt)}; 20 clean actions BEFORE the cut → implicit=${String(withOldImplicit.implicitTrials)}` +
+      ` bound=${withOldImplicit.lowerBound.toFixed(4)} (unchanged from ${withoutImplicit.lowerBound.toFixed(4)});` +
+      ` the same 20 AFTER it → implicit=${String(withNewImplicit.implicitTrials)} bound=${withNewImplicit.lowerBound.toFixed(4)}`,
   );
 }
 

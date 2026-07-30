@@ -62,6 +62,7 @@ import {
   normalizeAgentSdkUsage,
 } from '../engines/claude-agent-sdk-engine.js';
 import { selectEngine } from '../engines/select.js';
+import { classifyToolConsequence } from '../runtime/checkin.js';
 import type { Executor, ToolSchema } from '../runtime/engine.js';
 import { makeGate, scriptedPolicy } from '../runtime/gate.js';
 import {
@@ -509,6 +510,41 @@ async function checkMcp(dbPath: string, logPath: string): Promise<void> {
       problems.length === 0
         ? `${load.toolSchemas.length} schema(s), none carrying an execute; every one has a runtime executor`
         : problems.join('; '),
+    );
+
+    // (d2b) P3-M8d — the DECLARATION survives the wire, and decides the class.
+    //
+    // This is the check that could not be replaced by a unit test with a hand-made
+    // object: `annotations` is transported as an open field by the MCP client, so
+    // "we read readOnlyHint correctly" is a claim about a real server's JSON-RPC
+    // reply, not about our own literal. The fixture declares it on `mcp_echo` and
+    // says nothing about `mcp_danger`, which is exactly the pair §7.4 defines the
+    // rule over: declared read-only is an observation, undeclared is consequential.
+    const echoHint = load.toolAnnotations['spike__mcp_echo']?.readOnlyHint;
+    const dangerAnnotation = load.toolAnnotations['spike__mcp_danger'];
+    const echoClass = classifyToolConsequence('spike__mcp_echo', {
+      ...(echoHint !== undefined ? { readOnlyHint: echoHint } : {}),
+    });
+    const dangerClass = classifyToolConsequence('spike__mcp_danger', {
+      ...(dangerAnnotation?.readOnlyHint !== undefined
+        ? { readOnlyHint: dangerAnnotation.readOnlyHint }
+        : {}),
+    });
+    // And the USER outranks the server: an ask/deny rule on the read-only tool
+    // makes it consequential anyway — they have said they want to see it.
+    const echoUnderAskRule = classifyToolConsequence('spike__mcp_echo', {
+      readOnlyHint: true,
+      policyForcesConsequential: true,
+    });
+    record(
+      '(d2b) a declared readOnlyHint survives the real wire and reads as an observation; an undeclared tool is consequential; a user rule overrides both',
+      echoHint === true &&
+        dangerAnnotation === undefined &&
+        echoClass === 'observation' &&
+        dangerClass === 'consequential' &&
+        echoUnderAskRule === 'consequential',
+      `spike__mcp_echo: readOnlyHint=${String(echoHint)} → ${echoClass} (with an ask rule → ${echoUnderAskRule}); ` +
+        `spike__mcp_danger: annotations=${JSON.stringify(dangerAnnotation)} → ${dangerClass}`,
     );
 
     // -- drive real turns through the runtime --------------------------------

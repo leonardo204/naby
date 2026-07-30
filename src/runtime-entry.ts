@@ -419,6 +419,7 @@ export {
   validateMcpEntry,
   type McpConnection,
   type McpLoadResult,
+  type McpToolAnnotations,
 } from './runtime/mcp.js';
 
 export {
@@ -471,6 +472,8 @@ export {
   diagnoseChange,
   GROWTH_MIN_SAMPLE,
   GROWTH_WINDOW,
+  IMPLICIT_WEIGHT,
+  IMPLICIT_WINDOW,
   PUPA_THRESHOLD,
   BUTTERFLY_THRESHOLD,
   type GrowthStage,
@@ -551,7 +554,7 @@ export {
 // -- the check-in itself (Phase 3, P3-M5) ------------------------------------
 // What the meter measures: the agent's own proposal, the user's pick, and the
 // deterministic rules that keep a padded or repeated question from counting.
-// `isConsequentialTool` is the classifier the gate path shares, so "when a
+// `classifyToolConsequence` is the classifier the gate path shares, so "when a
 // check-in was owed" is decided by the action, never by the agent.
 export {
   CHECKIN_TOOL_NAME,
@@ -559,7 +562,9 @@ export {
   CHECKIN_MAX_OPTIONS,
   CHECKIN_QUESTION_MAX,
   CONSEQUENTIAL_RUNTIME_TOOLS,
+  OBSERVATION_RUNTIME_TOOLS,
   DEGENERATE_SIMILARITY,
+  classifyToolConsequence,
   isConsequentialTool,
   isReversibleAction,
   validateCheckinInput,
@@ -571,6 +576,8 @@ export {
   type CheckinQuestion,
   type CheckinAnswer,
   type DegenerateCode,
+  type ToolConsequence,
+  type ToolConsequenceSignals,
 } from './runtime/checkin.js';
 
 // -- session reflection (Phase 3, P3-M8a) ------------------------------------

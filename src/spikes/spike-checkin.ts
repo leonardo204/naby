@@ -19,10 +19,14 @@
 //   (h) A check-in is owed by ACTION CLASS: mutation/exec/outbound yes, reads no.
 //   (i) End to end: recorded check-ins take an egg to a butterfly.
 //   (j) A padded question buys no accuracy but still costs coverage.
+//   (k) P3-M8d: an MCP tool is classified from DECLARATIONS, not from its name —
+//       `readOnlyHint: true` is an observation, anything undeclared counts, and a
+//       user's own ask/deny rule outranks whatever the server claims.
 //
 // No store and no engine: the sink is a fake, so this runs in milliseconds.
 
 import {
+  classifyToolConsequence,
   isConsequentialTool,
   isReversibleAction,
   type CheckinAnswer,
@@ -224,11 +228,13 @@ const TAKE_RECOMMENDED = (q: CheckinQuestion): CheckinAnswer => ({ chosen: q.rec
   const notOwed = ['Read', 'Glob', 'Grep', 'WebSearch', 'echo_note', 'naby_remember'];
   record(
     '(h) mutation / exec / outbound calls are consequential; reads are not',
-    owed.every(isConsequentialTool) &&
+    owed.every((t) => isConsequentialTool(t)) &&
       notOwed.every((t) => !isConsequentialTool(t)) &&
       isReversibleAction('Write') &&
       !isReversibleAction('Bash'),
-    `owed=${owed.filter(isConsequentialTool).join(',')} | notOwed leaks=${notOwed.filter(isConsequentialTool).join(',') || 'none'}`,
+    `owed=${owed.filter((t) => isConsequentialTool(t)).join(',')} | notOwed leaks=${
+      notOwed.filter((t) => isConsequentialTool(t)).join(',') || 'none'
+    }`,
   );
 }
 
@@ -294,6 +300,43 @@ const TAKE_RECOMMENDED = (q: CheckinQuestion): CheckinAnswer => ({ chosen: q.rec
     '(j) padded questions cannot raise the hit rate, and they lower coverage',
     h.hits === p.hits && h.trials === p.trials && p.coverage < h.coverage && p.excluded === 3,
     `honest ${h.hits}/${h.trials} coverage ${h.coverage.toFixed(2)} → padded ${p.hits}/${p.trials} coverage ${p.coverage.toFixed(2)} (excluded ${p.excluded})`,
+  );
+}
+
+// -- (k) MCP tools are classified from declarations (P3-M8d, §7.4) ---------
+{
+  // The classifier, over the four cases the spec names. `mcp__mail__send_email`
+  // is the tool the old comment called a documented gap: a third-party action
+  // that leaves the machine and produced no ledger row at all, because guessing
+  // from the name was refused. It is no longer a guess and no longer free.
+  const declaredReadOnly = classifyToolConsequence('jira__search_issues', { readOnlyHint: true });
+  const declaredWritable = classifyToolConsequence('jira__create_issue', { readOnlyHint: false });
+  const undeclared = classifyToolConsequence('mail__send_email');
+  const underAskRule = classifyToolConsequence('jira__search_issues', {
+    readOnlyHint: true,
+    policyForcesConsequential: true,
+  });
+  // The built-ins keep exactly the classification they had before M8d: an
+  // annotation cannot talk `Bash` into being an observation, and our own
+  // read-only tools do not become consequential just because nobody annotated
+  // them (they are named in OBSERVATION_RUNTIME_TOOLS instead).
+  const builtinsUnmoved =
+    classifyToolConsequence('Bash', { readOnlyHint: true }) === 'consequential' &&
+    classifyToolConsequence('Write', { readOnlyHint: true }) === 'consequential' &&
+    classifyToolConsequence('Read') === 'observation' &&
+    classifyToolConsequence('read_file') === 'observation' &&
+    classifyToolConsequence('naby_checkin') === 'observation';
+  record(
+    "(k) an MCP tool counts unless it DECLARES itself read-only, and the user's own rule outranks the declaration",
+    declaredReadOnly === 'observation' &&
+      declaredWritable === 'consequential' &&
+      undeclared === 'consequential' &&
+      underAskRule === 'consequential' &&
+      builtinsUnmoved &&
+      // An unknown third-party tool is never assumed to be undoable.
+      !isReversibleAction('mail__send_email'),
+    `readOnlyHint:true=${declaredReadOnly}; readOnlyHint:false=${declaredWritable}; no annotation=${undeclared}; ` +
+      `read-only + ask rule=${underAskRule}; built-ins unmoved=${builtinsUnmoved}; MCP reversible=${isReversibleAction('mail__send_email')}`,
   );
 }
 

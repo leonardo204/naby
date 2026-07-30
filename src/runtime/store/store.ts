@@ -653,6 +653,14 @@ export type EvalEvent = {
   /** Set when the user later fixed the result: the miss signal for the covered
    *  region, without which coverage would inflate for free. */
   correctedAfter?: boolean;
+  /** Epoch ms the reflection pass put this action before its judge (P3-M8d,
+   *  checkin-contracts 0.5.0). Present WITHOUT `correctedAfter` is the weak
+   *  implicit accept the meter blends in at `IMPLICIT_WEIGHT`: the user had a
+   *  chance to react to it and did not. Absent means never reviewed — "unseen"
+   *  and "seen and let stand" must not be counted as the same thing, which is
+   *  exactly what this field exists to separate. Lives in the payload JSON, so
+   *  it needed no schema migration. */
+  reviewedAt?: number;
 
   // -- kind: 'tripwire' — the gate refused a safety-relevant call ------------
   toolName?: string;
@@ -1003,6 +1011,20 @@ export interface Store {
    * write observable rather than silent.
    */
   markEvalEventCorrected(id: string): boolean;
+
+  /**
+   * Stamp `reviewedAt` on one `autonomous` row — the SECOND (and last) mutation
+   * the ledger allows (checkin-contracts 0.5.0 invariant 8, P3-M8d). Written by
+   * the session-reflection pass for every action it actually put before its
+   * judge, corrected or not.
+   *
+   * Returns false and writes NOTHING for a missing id or any other `kind`, and
+   * KEEPS THE FIRST timestamp when one is already recorded (returning true). The
+   * first review is when the user's chance to object began; letting a later sweep
+   * push that forward would slide an old action into a recent window, which is
+   * the one way this field could be used to flatter the meter.
+   */
+  markEvalEventReviewed(id: string, reviewedAt: number): boolean;
 
   /** Erase growth history for an agent or a session. */
   deleteEvalEvents(selector: EvalEventDeleteSelector): void;

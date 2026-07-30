@@ -810,6 +810,16 @@ export class MemoryStore implements Store {
     return true;
   }
 
+  /** The ledger's SECOND permitted after-the-fact edit (P3-M8d). Observationally
+   *  identical to SqliteStore's: `autonomous` only, first timestamp wins. */
+  markEvalEventReviewed(id: string, reviewedAt: number): boolean {
+    const row = this.evalEvents.find((e) => e.id === id);
+    if (!row || row.kind !== 'autonomous') return false;
+    if (typeof row.reviewedAt === 'number') return true; // first review stands
+    row.reviewedAt = Math.trunc(reviewedAt);
+    return true;
+  }
+
   deleteEvalEvents(selector: EvalEventDeleteSelector): void {
     const keep = (e: EvalEvent): boolean =>
       'agentId' in selector ? e.agentId !== selector.agentId : e.sessionId !== selector.sessionId;
