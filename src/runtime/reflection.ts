@@ -101,6 +101,25 @@ export const REFLECTION_USER_MESSAGE_CAP = 24;
 export const REFLECTION_MEMORY_CAP = 5;
 
 /**
+ * How many NEW user messages a case-less session needs before it is worth a
+ * judge call of its own (M8c, spec §6.4).
+ *
+ * THE GAP THIS CLOSES. Through M8b a session that never triggered an autonomous
+ * action produced no cases, and no cases meant no call — so the conversations
+ * where a person actually says how they work ("always give me the SQL first",
+ * "our team calls that a rollup") taught nothing, because nothing had been done
+ * without asking in them. Those are the sessions memory extraction is FOR.
+ *
+ * TWO IS A FLOOR, NOT A TARGET. A one-message session is "thanks" or "what time
+ * is it"; putting a model call behind every one of those would attach a cost to
+ * closing a window. Two messages is the smallest exchange that can carry a
+ * durable fact and its context. The COST ceiling is unchanged and still belongs
+ * to the sweep cap (§4.3): whatever the threshold, one sweep spends at most
+ * REFLECTION_SWEEP_CAP calls.
+ */
+export const REFLECTION_MIN_USER_MESSAGES = 2;
+
+/**
  * How many DISTINCT sessions must agree with a memory's CURRENT value before the
  * opt-in consolidation step may confirm it on its own (spec §5.3/§5.4).
  *
@@ -511,6 +530,48 @@ export function collectReflectionUserMessages(
   return out.slice(-cap);
 }
 
+/**
+ * How many user messages the session has said that the last reflection did not
+ * see. `sinceSeq` is the cursor (-1 for a session never reflected on), and the
+ * same `userText` filter the case builder uses decides what counts — an empty or
+ * non-user row is not something a person said.
+ */
+export function countUserMessagesSince(
+  messages: readonly RuntimeMessage[],
+  sinceSeq: number,
+): number {
+  let count = 0;
+  for (let i = Math.max(0, sinceSeq + 1); i < messages.length; i += 1) {
+    const msg = messages[i];
+    if (!msg) continue;
+    if (userText(msg)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Whether a session with NO judgeable cases still earns a judge call, for the
+ * memory task alone (M8c, spec §6.4).
+ *
+ * This is the whole widening, stated in one place so the cost of the decision is
+ * findable: a purely conversational session — no autonomous action, therefore no
+ * case — is read for durable facts once it has said `REFLECTION_MIN_USER_MESSAGES`
+ * new things. Below that it is still SWEPT (the cursor advances; the span is
+ * spent), it simply is not worth a model call.
+ *
+ * It does NOT widen the per-session budget: a session that has cases already gets
+ * its one call and asks both tasks in it (§5.2), so this can only ever turn a
+ * session that would have made ZERO calls into one that makes one.
+ */
+export function shouldExtractMemoryOnly(
+  messages: readonly RuntimeMessage[],
+  sinceSeq: number,
+  opts?: { threshold?: number },
+): boolean {
+  const threshold = Math.max(1, opts?.threshold ?? REFLECTION_MIN_USER_MESSAGES);
+  return countUserMessagesSince(messages, sinceSeq) >= threshold;
+}
+
 /** A candidate that cleared BOTH the evidence check and the write guards, with
  *  the two things a store write needs added: the normalized slug, and the exact
  *  message coordinate its evidence came from. */
@@ -699,22 +760,32 @@ export function buildReflectionPrompt(
   context?: ReflectionSessionContext,
 ): ReflectionPrompt {
   const wantsMemory = context !== undefined && context.userMessages.length > 0;
+  // MEMORY-ONLY (M8c, spec §6.4). A purely conversational session has nothing
+  // that was done without asking, so the correction task has no case to put and
+  // its instructions are dropped rather than sent with "0 case(s)" under them:
+  // a model told to judge nothing tends to invent something to judge, and every
+  // line it costs is a line of a call that exists only to read memory.
+  const wantsCorrections = cases.length > 0;
 
   const system = [
     'You review a finished conversation between a user and an assistant.',
-    '',
-    'TASK 1 — corrections. For each case you are given the tool the assistant ran WITHOUT asking, and',
-    'the user messages that came after it. Decide ONLY this: did the user correct that action — undo',
-    'it, redo it differently, or say it was wrong?',
-    '',
-    '- Asking for the NEXT thing is not a correction. Neither is praise, a question, or a new task.',
-    '- Say corrected only when the user pushed back on what that action did.',
-    '- When corrected is true you MUST copy the exact user words that show it into evidenceQuote,',
-    '  character for character from the messages shown. A paraphrase is discarded.',
+    ...(wantsCorrections
+      ? [
+          '',
+          'TASK 1 — corrections. For each case you are given the tool the assistant ran WITHOUT asking, and',
+          'the user messages that came after it. Decide ONLY this: did the user correct that action — undo',
+          'it, redo it differently, or say it was wrong?',
+          '',
+          '- Asking for the NEXT thing is not a correction. Neither is praise, a question, or a new task.',
+          '- Say corrected only when the user pushed back on what that action did.',
+          '- When corrected is true you MUST copy the exact user words that show it into evidenceQuote,',
+          '  character for character from the messages shown. A paraphrase is discarded.',
+        ]
+      : []),
     ...(wantsMemory
       ? [
           '',
-          `TASK 2 — memory. From the user messages, propose up to ${REFLECTION_MEMORY_CAP} durable facts about THIS`,
+          `TASK ${wantsCorrections ? '2' : '1'} — memory. From the user messages, propose up to ${REFLECTION_MEMORY_CAP} durable facts about THIS`,
           'person that would still be true and useful next week: how they want work done, a standing',
           'rule, a term their team uses, a stable preference.',
           '',
@@ -733,6 +804,10 @@ export function buildReflectionPrompt(
       : []),
     '',
     'Answer with JSON only — no prose, no code fence:',
+    // The `corrections` array is still named in the memory-only shape, and still
+    // expected to come back EMPTY. Naming it costs nothing and keeps one answer
+    // shape for the parser; and a verdict about a case that was never sent is
+    // dropped by the validator anyway (it can only address ids it was given).
     wantsMemory
       ? '{"corrections":[{"caseId":"<id>","corrected":true|false,"evidenceQuote":"<exact user words, only when corrected>"}],' +
         '"memories":[{"scope":"user|project","type":"semantic|procedural|episodic|working","key":"<slug>","value":"<one sentence>","evidenceQuote":"<exact user words>"}]}'
@@ -746,11 +821,13 @@ export function buildReflectionPrompt(
     );
   });
 
-  const parts = [`${cases.length} case(s) to judge.`, '', ...blocks];
+  const parts = wantsCorrections
+    ? [`${cases.length} case(s) to judge.`, '', ...blocks]
+    : ['There is nothing to judge in this conversation — no action was taken without asking.'];
   if (wantsMemory) {
     parts.push(
       '',
-      'The user messages in this conversation, for TASK 2:',
+      `The user messages in this conversation, for TASK ${wantsCorrections ? '2' : '1'}:`,
       ...context.userMessages.map((m) => `  user: ${m.text}`),
     );
   }

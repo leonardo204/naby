@@ -256,6 +256,13 @@ export type MemoryInjectionQuery = {
   cwd?: string;
   /** hint from the turn (aligns with eval_events.task_type). */
   taskType?: string;
+  /**
+   * The turn's own user text, for relevance ranking (P3-M8c, contract §5,
+   * additive in 0.4.0). Absent — or matching no candidate — leaves the ranking
+   * exactly as it was: scope → type → recency. A turn with no relevance signal
+   * is never made worse than it was before ranking existed.
+   */
+  queryText?: string;
   /** HARD cap on injected memory tokens for this turn. */
   tokenBudget: number;
 };
@@ -1011,6 +1018,16 @@ export interface Store {
 
   /** Record how far reflection got. Upsert by session id. */
   setReflectionCursor(sessionId: string, lastSeq: number, reflectedAt: number): void;
+
+  /**
+   * When the reflection pass last ran on ANY session, or undefined if it never
+   * has (P3-M8c §6.3 — the learning-depth block's "last looked back" line).
+   *
+   * A MAX over the cursors rather than a new column: the cursors already record
+   * every reflection, so a second record of the same fact could disagree with
+   * them, and "the newest cursor" is exactly what the panel means.
+   */
+  getLatestReflectionAt(): number | undefined;
 
   // -- usage (F1-07) -------------------------------------------------------
 

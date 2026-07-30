@@ -832,6 +832,16 @@ export class MemoryStore implements Store {
     });
   }
 
+  /** The newest reflection across every cursor; undefined before the first one
+   *  (P3-M8c §6.3). */
+  getLatestReflectionAt(): number | undefined {
+    let latest: number | undefined;
+    for (const cursor of this.reflectionCursors.values()) {
+      if (latest === undefined || cursor.reflectedAt > latest) latest = cursor.reflectedAt;
+    }
+    return latest;
+  }
+
   getSetting(key: string): string | undefined {
     return this.settings.get(key);
   }

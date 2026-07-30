@@ -15,6 +15,16 @@
 //   * Scope precedence on ties: session > project > user > org (immediacy).
 //   * Empty is a NO-OP: no relevant memory ⇒ inject nothing ⇒ the turn is
 //     byte-for-byte what Phase 1 would have sent.
+//
+// P3-M8c ADDS RELEVANCE (continuous-learning §6.2). The order used to be
+// scope→type→recency alone, which meant a 2000-token budget was filled by the
+// NEWEST confirmed facts whether or not they had anything to do with the turn.
+// Now, when the turn supplies `queryText`, candidates are ordered by lexical
+// overlap with it first and the old comparator only breaks ties. LEXICAL, not
+// embeddings: the bottleneck is "irrelevant memory wins on recency", which token
+// overlap already fixes, and it stays pure, deterministic and spike-checkable
+// (embedding relevance is §8-open). The fallback is structural, not incidental —
+// see `rankCandidates`.
 
 import type {
   InjectedMemory,
@@ -63,36 +73,142 @@ export function renderMemoryLine(item: MemoryItem): string {
   return `- (${item.scope}/${item.type}) ${item.key}: ${item.value}`;
 }
 
+// ---------------------------------------------------------------------------
+// Lexical relevance (P3-M8c, contract §5 `queryText`)
+// ---------------------------------------------------------------------------
+
 /**
- * Rank candidates deepest-first by relevance-agnostic precedence: scope, then
- * type priority, then most-recently-updated. (Real relevance ranking is Phase
- * 2b; this is the deterministic Phase-1.5 order.)
+ * Split text into comparable tokens. PURE and deterministic.
+ *
+ * The rules, and why each one is there:
+ *   - LOWERCASED, so "Postgres" in a memory matches "postgres" in the turn.
+ *   - Split on every non-letter/non-digit boundary. Punctuation, slashes and
+ *     underscores are separators, so `config/prod.yaml` yields `config`, `prod`,
+ *     `yaml` — the words a turn is likely to repeat, not the exact path.
+ *   - HANGUL RUNS ARE THEIR OWN TOKENS, matched BEFORE the general letter run.
+ *     Korean is written without spaces between a noun and its particle boundary
+ *     markers in mixed text (`config파일`), so a single letter-run rule would
+ *     produce the one token `config파일`, which matches neither `config` nor
+ *     `파일`. Taking the Hangul run first splits scripts and both halves match.
+ *   - ONE-CHARACTER TOKENS ARE DROPPED (§6.2). A single letter matches almost
+ *     any text by accident, which would turn the score into noise.
+ *
+ * Not stemmed and not stop-worded on purpose: both are language-specific
+ * guesses, and a wrong guess here silently changes which memory a turn sees.
  */
-function rankCandidates(items: readonly MemoryItem[]): MemoryItem[] {
+export function tokenizeForRelevance(text: string): string[] {
+  if (typeof text !== 'string' || text.length === 0) return [];
+  // Hangul runs are FENCED OFF FIRST, then everything is split on letter/digit
+  // runs. Doing it in one alternation does not work and the failure is silent:
+  // a regex scanning `config파일` reaches `c` first, the Hangul branch does not
+  // apply there, and the general letter branch then runs straight through the
+  // script boundary to produce the single token `config파일` — which matches
+  // neither half. Padding the Hangul run with spaces makes the boundary a
+  // separator like any other.
+  const fenced = text.toLowerCase().replace(/\p{Script=Hangul}+/gu, ' $& ');
+  const matches = fenced.match(/[\p{L}\p{N}]+/gu);
+  if (!matches) return [];
+  return matches.filter((t) => t.length > 1);
+}
+
+/**
+ * How much this memory has to do with the turn: the number of DISTINCT query
+ * tokens that also appear in the memory's key+value, divided by the square root
+ * of the memory's own token count.
+ *
+ * WHY THIS NORMALIZATION. Raw overlap alone rewards length — a rambling
+ * 400-character memory would out-score a precise one-liner simply by containing
+ * more words, which is the opposite of useful. Dividing by the FULL token count
+ * over-corrects the other way (a long memory that genuinely covers the topic
+ * loses to a short one that shares one incidental word). The square root sits
+ * between the two: it is the usual length normalization for exactly this reason,
+ * it is monotone in overlap for a fixed memory, and it is one arithmetic
+ * expression — reproducible from the numbers a spike can print. Jaccard was the
+ * alternative; it also divides by the QUERY length, which changes every memory's
+ * score by the same factor and therefore cannot change the ORDER, so it buys
+ * nothing here.
+ *
+ * 0 means "no shared word", and 0 is the value that makes the whole feature
+ * fall back to the old order (see `rankCandidates`).
+ */
+export function relevanceScore(queryTokens: ReadonlySet<string>, item: MemoryItem): number {
+  if (queryTokens.size === 0) return 0;
+  const memTokens = tokenizeForRelevance(`${item.key} ${item.value}`);
+  if (memTokens.length === 0) return 0;
+  const distinct = new Set(memTokens);
+  let overlap = 0;
+  for (const token of distinct) {
+    if (queryTokens.has(token)) overlap += 1;
+  }
+  if (overlap === 0) return 0;
+  return overlap / Math.sqrt(memTokens.length);
+}
+
+/** The relevance-agnostic order: scope, then type priority, then most recently
+ *  updated. Extracted so the ranking below can name it as its ONLY tiebreak —
+ *  the Phase-1.5 order is not re-derived anywhere. */
+function comparePrecedence(a: MemoryItem, b: MemoryItem): number {
+  const s = SCOPE_RANK[a.scope] - SCOPE_RANK[b.scope];
+  if (s !== 0) return s;
+  const t = TYPE_RANK[a.type] - TYPE_RANK[b.type];
+  if (t !== 0) return t;
+  return b.updatedAt - a.updatedAt; // newest first
+}
+
+/**
+ * Rank candidates: most RELEVANT to this turn first, with the Phase-1.5
+ * precedence order (scope → type → recency) breaking every exact tie.
+ *
+ * THE FALLBACK IS STRUCTURAL, NOT INCIDENTAL, and that is the point. There is no
+ * "did the query help?" branch to get wrong: when `queryText` is absent the score
+ * map is EMPTY, and when no candidate shares a word with the turn every lookup
+ * returns the same 0. Either way `scoreB - scoreA` is 0 for every pair, the
+ * comparator falls through to `comparePrecedence` for every pair, and the result
+ * is the array the old code produced — byte for byte, because `Array#sort` is
+ * stable (ES2019) so even genuinely equal elements keep their input order.
+ *
+ * Which is the guarantee contract §5 needs: a turn that relevance cannot help is
+ * not made worse than it was, and the scope-precedence invariant still decides
+ * every tie.
+ */
+function rankCandidates(items: readonly MemoryItem[], queryText?: string): MemoryItem[] {
+  const queryTokens = new Set(tokenizeForRelevance(queryText ?? ''));
+  const scores = new Map<string, number>();
+  // An empty query token set scores nothing, so the map stays empty and the sort
+  // below is exactly the pre-M8c sort.
+  if (queryTokens.size > 0) {
+    for (const item of items) {
+      const score = relevanceScore(queryTokens, item);
+      if (score > 0) scores.set(item.id, score);
+    }
+  }
   return [...items].sort((a, b) => {
-    const s = SCOPE_RANK[a.scope] - SCOPE_RANK[b.scope];
-    if (s !== 0) return s;
-    const t = TYPE_RANK[a.type] - TYPE_RANK[b.type];
-    if (t !== 0) return t;
-    return b.updatedAt - a.updatedAt; // newest first
+    const relevance = (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0);
+    if (relevance !== 0) return relevance;
+    return comparePrecedence(a, b);
   });
 }
 
 /**
  * Select, rank, and budget candidate memory for one turn. PURE. Filters to
- * `confirmed` only, ranks by precedence, then greedily fills up to `tokenBudget`
- * — every candidate that would push the total over the cap is dropped and
- * counted. `tokensUsed` is the summed cost of the included item lines and is
- * ALWAYS ≤ tokenBudget.
+ * `confirmed` only, ranks by relevance-then-precedence, then greedily fills up
+ * to `tokenBudget` — every candidate that would push the total over the cap is
+ * dropped and counted. `tokensUsed` is the summed cost of the included item
+ * lines and is ALWAYS ≤ tokenBudget.
+ *
+ * `queryText` is the turn's own words (P3-M8c). Omit it and the ranking is the
+ * pre-M8c one; the BUDGET half is untouched either way, so relevance changes
+ * WHICH memory wins a contested budget and never how much of it is spent.
  */
 export function selectMemoryForInjection(
   candidates: readonly MemoryItem[],
   tokenBudget: number,
+  queryText?: string,
 ): InjectedMemory {
   const budget = Math.max(0, Math.floor(tokenBudget));
   // Only confirmed memory injects (contract §5).
   const confirmed = candidates.filter((c) => c.status === 'confirmed');
-  const ranked = rankCandidates(confirmed);
+  const ranked = rankCandidates(confirmed, queryText);
 
   const items: MemoryItem[] = [];
   let tokensUsed = 0;
@@ -144,7 +260,8 @@ export function gatherCandidates(
 
 /**
  * Gather + select in one call: the store-reading entry point runTurn uses.
- * Returns the ranked, budgeted, confirmed-only injection set.
+ * Returns the ranked, budgeted, confirmed-only injection set. `query.queryText`,
+ * when the caller supplies it, is what the ranking is relevant TO (P3-M8c).
  */
 export function retrieveForInjection(
   store: Store,
@@ -154,6 +271,7 @@ export function retrieveForInjection(
   return selectMemoryForInjection(
     gatherCandidates(store, query, opts),
     query.tokenBudget,
+    query.queryText,
   );
 }
 

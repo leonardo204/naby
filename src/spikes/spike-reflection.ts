@@ -42,6 +42,12 @@
 //       observations is NEVER promoted (memory-contracts §4 invariant 1).
 //   (p) `deleteSession` removes that session's observations while the memory row
 //       itself, and a confirmed row's status, survive.
+// M8c (§6.4) — the widened trigger, also against BOTH drivers:
+//   (s) A session with NO autonomous action at all still earns ONE judge call, for
+//       the memory task alone, once it has said REFLECTION_MIN_USER_MESSAGES new
+//       things: the proposal lands and the cursor advances.
+//   (t) Below the threshold the judge is NOT called (counted, not inferred) and the
+//       cursor advances anyway — the span is spent either way.
 // And once, against a real file:
 //   (i) LOSSLESS MIGRATION v7 -> current: reflection_state appears and works, and
 //       the pre-existing session / messages / ledger rows all survive.
@@ -63,6 +69,7 @@ import {
   CORROBORATION_THRESHOLD,
   parseReflectionAnswer,
   REFLECTION_IDLE_MS,
+  REFLECTION_MIN_USER_MESSAGES,
   REFLECTION_SWEEP_CAP,
   validateReflectionVerdicts,
   type ReflectionCase,
@@ -656,6 +663,96 @@ async function checkObservationCascade(store: Store, label: string): Promise<voi
   );
 }
 
+// ===========================================================================
+// M8c — the widened trigger: a session with no action still teaches (spec §6.4)
+// ===========================================================================
+
+/** A conversation in which the agent did NOTHING without asking: no tool call,
+ *  therefore no ledger row, therefore no case. Through M8b this session was swept
+ *  and dropped without a single question being asked about it. */
+function seedConversationOnly(store: Store, sessionId: string, userMessages: string[]): void {
+  store.touchSession(sessionId, 'test-provider');
+  for (const text of userMessages) {
+    store.appendMessage(sessionId, { role: 'user', content: text });
+    store.appendMessage(sessionId, { role: 'assistant', content: 'Understood.' });
+  }
+}
+
+/** The quote a case-less session's proposal cites — the user's own words. */
+const CONVERSATION_QUOTE = 'always give me the SQL before the explanation';
+
+/** A judge that counts its calls and reports what it was asked, so "the judge was
+ *  not called" is ASSERTED rather than inferred from an unchanged store. */
+function countingJudge(
+  memories: ReflectionMemoryCandidate[],
+): { judge: ReflectionJudge; calls: ReflectionCase[][] } {
+  const calls: ReflectionCase[][] = [];
+  const judge: ReflectionJudge = async (cases) => {
+    calls.push([...cases]);
+    return { corrections: cases.map((c) => ({ caseId: c.caseId, corrected: false })), memories };
+  };
+  return { judge, calls };
+}
+
+async function checkConversationOnlySession(store: Store, label: string): Promise<void> {
+  // AT the threshold: two user messages, no autonomous action anywhere.
+  seedConversationOnly(store, 'sess-talk', [
+    CONVERSATION_QUOTE,
+    'and keep the column names snake_case',
+  ]);
+  const { judge, calls } = countingJudge([
+    proposal({ key: 'sql-first', value: 'Wants the SQL before the explanation.', evidenceQuote: CONVERSATION_QUOTE }),
+  ]);
+  const out = await runReflectionSweep(store, judge, { now: LATER() });
+  const cursor = store.getReflectionCursor('sess-talk');
+  const row = userMemory(store)[0];
+  const latestSeq = store.getMessages('sess-talk').length - 1;
+
+  record(
+    `(s) [${label}] a session with NO autonomous action still earns ONE memory-only judge call at ${REFLECTION_MIN_USER_MESSAGES} user messages`,
+    calls.length === 1 &&
+      calls[0]?.length === 0 && // memory-extraction ONLY: no case was put
+      out.proposedMemories === 1 &&
+      out.droppedCandidates === 0 &&
+      out.markedEvents === 0 &&
+      row?.key === 'sql-first' &&
+      row?.status === 'proposed' &&
+      row?.provenance.source === 'artifact' &&
+      cursor?.lastSeq === latestSeq,
+    `judgeCalls=${calls.length} casesInCall=${calls[0]?.length} proposed=${out.proposedMemories} ` +
+      `dropped=${out.droppedCandidates} key=${row?.key} status=${row?.status} cursor=${JSON.stringify(cursor)}`,
+  );
+}
+
+async function checkBelowThreshold(store: Store, label: string): Promise<void> {
+  // ONE user message: a goodbye, not a conversation. No call may be spent on it.
+  seedConversationOnly(store, 'sess-short', ['thanks!']);
+  const { judge, calls } = countingJudge([proposal()]);
+  const out = await runReflectionSweep(store, judge, { now: LATER() });
+  const cursor = store.getReflectionCursor('sess-short');
+  const latestSeq = store.getMessages('sess-short').length - 1;
+
+  record(
+    `(t) [${label}] below ${REFLECTION_MIN_USER_MESSAGES} user messages the judge is NOT called, and the cursor advances anyway`,
+    calls.length === 0 &&
+      out.proposedMemories === 0 &&
+      out.sweptSessions === 1 &&
+      userMemory(store).length === 0 &&
+      cursor?.lastSeq === latestSeq,
+    `judgeCalls=${calls.length} swept=${out.sweptSessions} proposed=${out.proposedMemories} ` +
+      `memoryRows=${userMemory(store).length} cursor=${JSON.stringify(cursor)}`,
+  );
+
+  // AND it stays cheap: a second sweep over the same spent span asks nothing.
+  const second = countingJudge([proposal()]);
+  const again = await runReflectionSweep(store, second.judge, { now: LATER() });
+  record(
+    `(t2) [${label}] the spent span is not re-read: a second sweep over the short session is a no-op`,
+    second.calls.length === 0 && again.sweptSessions === 0,
+    `judgeCalls=${second.calls.length} swept=${again.sweptSessions}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The validator, directly (the guarantee the sweep leans on)
 // ---------------------------------------------------------------------------
@@ -976,6 +1073,13 @@ async function runDriverChecks(makeBase: () => Store, label: string): Promise<vo
   s.close();
   s = make();
   await checkObservationCascade(s, label);
+  s.close();
+  // M8c (§6.4) — the widened trigger.
+  s = make();
+  await checkConversationOnlySession(s, label);
+  s.close();
+  s = make();
+  await checkBelowThreshold(s, label);
   s.close();
 }
 

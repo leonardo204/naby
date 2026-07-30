@@ -2009,6 +2009,17 @@ export class SqliteStore implements Store {
       .run(sessionId, Math.trunc(lastSeq), Math.trunc(reflectedAt));
   }
 
+  /** The newest reflection across every cursor; undefined before the first one
+   *  (P3-M8c §6.3). MAX() over an empty table returns a row holding NULL, which
+   *  is why the null is checked rather than the row. */
+  getLatestReflectionAt(): number | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT MAX(reflected_at) AS latest FROM reflection_state')
+      .get() as { latest: number | null } | undefined;
+    return row?.latest == null ? undefined : Number(row.latest);
+  }
+
   // -- MCP registry --------------------------------------------------------
 
   listMcpEntries(): McpEntry[] {

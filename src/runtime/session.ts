@@ -102,6 +102,17 @@ export type RunTurnOptions = {
     tokenBudget: number;
     /** Task-type hint (aligns with eval_events.task_type). */
     taskType?: string;
+    /**
+     * The turn's own words, for RELEVANCE ranking (P3-M8c, contract §5).
+     *
+     * NOT defaulted to `userText`, deliberately. On an autonomy step 2+ the
+     * `userText` is the harness's continuation prompt, which says nothing about
+     * what the user wants and would rank memory against the wrong text; and an
+     * omitted `queryText` keeps the pre-M8c order exactly, so every existing
+     * caller (and every existing spike) is unchanged by this field's existence.
+     * The caller that knows which text drives the turn passes it.
+     */
+    queryText?: string;
     /** user-scope key — a single-user-machine constant by default. */
     userId?: string;
     /** org-scope key — omit unless in-house org memory is in play. */
@@ -174,6 +185,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       ...(opts.memoryInjection.taskType !== undefined
         ? { taskType: opts.memoryInjection.taskType }
+        : {}),
+      ...(opts.memoryInjection.queryText !== undefined
+        ? { queryText: opts.memoryInjection.queryText }
         : {}),
     };
     const injectOpts: { userId?: string; orgId?: string } = {};

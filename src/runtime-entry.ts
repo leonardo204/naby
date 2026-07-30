@@ -224,10 +224,12 @@ export {
   DEFAULT_USER_ID,
   estimateTokens,
   gatherCandidates,
+  relevanceScore,
   renderInjectedMemory,
   renderMemoryLine,
   retrieveForInjection,
   selectMemoryForInjection,
+  tokenizeForRelevance,
 } from './runtime/memory-inject.js';
 // Phase 1.6 HP-03a — turn-time SKILL instruction injection. Pure trigger-match +
 // budget selection + assembly, mirroring the memory helpers; what runTurn uses to
@@ -591,10 +593,13 @@ export {
   REFLECTION_USER_MESSAGE_CAP,
   REFLECTION_MEMORY_CAP,
   REFLECTION_MEMORY_SCOPES,
+  REFLECTION_MIN_USER_MESSAGES,
   CORROBORATION_THRESHOLD,
   isSessionDueForReflection,
   buildReflectionCases,
   collectReflectionUserMessages,
+  countUserMessagesSince,
+  shouldExtractMemoryOnly,
   validateReflectionVerdicts,
   validateMemoryCandidates,
   shouldAutoConfirmMemory,

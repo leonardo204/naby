@@ -66,7 +66,8 @@
     "spike:bootstrap": "tsx src/spikes/spike-bootstrap.ts",
     "spike:stream": "tsx src/spikes/spike-stream.ts",
     "spike:workspace-tools": "tsx src/spikes/spike-workspace-tools.ts",
-    "spike:reflection": "npm run build:runtime && tsx src/spikes/spike-reflection.ts"
+    "spike:reflection": "npm run build:runtime && tsx src/spikes/spike-reflection.ts",
+    "spike:rank": "tsx src/spikes/spike-rank.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",
