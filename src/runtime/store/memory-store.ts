@@ -17,6 +17,9 @@
 import { decideMemoryWrite } from '../memory-gate.js';
 import { decideHarnessImport } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
+// The "is this the same claim" rule (P3-M8b §5.3) lives with the type so both
+// drivers reset corroboration on exactly the same edits.
+import { sameMemoryValue } from './store.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
@@ -37,6 +40,7 @@ import type {
   HarnessStatus,
   MemoryDeleteSelector,
   MemoryItem,
+  MemoryObservation,
   MemoryScope,
   MemoryStatus,
   MemoryWriteRequest,
@@ -44,6 +48,7 @@ import type {
   PolicyRule,
   PolicyRuleInput,
   Project,
+  ReflectionCursor,
   SessionRef,
   Store,
   TrustTier,
@@ -141,6 +146,12 @@ export class MemoryStore implements Store {
   // EXEMPTION expressible: dropping a SessionState no longer drops its memory,
   // deleteSession/removeProject delete only the session/project-scoped rows.
   private readonly memoryItems = new Map<string, MemoryItem>();
+  /** Cross-session corroboration (P3-M8b §5.3): memoryId → sessionId →
+   *  observation. The NESTED map is the composite primary key
+   *  (memory_id, session_id) of the SQLite table expressed in memory — one
+   *  session votes once per item, so re-stating a fact in the same conversation
+   *  overwrites its own vote instead of adding another. */
+  private readonly observations = new Map<string, Map<string, MemoryObservation>>();
   // Golden set (Phase 1.5 P15-04), keyed by its own id — a STORE-LEVEL
   // collection, DELIBERATELY separate from memoryItems: no injection/extraction
   // path reads it, which is what makes the excluded-from-learning invariant
@@ -162,6 +173,10 @@ export class MemoryStore implements Store {
   /** The eval-event ledger (P3-M5). A flat list: the meter always reads an
    *  agent's rows in time order, so an array beats a keyed map here. */
   private readonly evalEvents: EvalEvent[] = [];
+  /** Reflection cursors (P3-M8a), keyed by session id. Store-level rather than
+   *  inside SessionState only because it is deleted on exactly the same event —
+   *  keeping it here makes the delete a single line and mirrors the table. */
+  private readonly reflectionCursors = new Map<string, ReflectionCursor>();
   private agentIdCounter = 0;
   private closed = false;
 
@@ -216,14 +231,23 @@ export class MemoryStore implements Store {
 
   deleteSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    // The reflection cursor is a bookmark into the transcript that just went, so
+    // it goes too (P3-M8a). The eval-event LEDGER survives — invariant 4.
+    this.reflectionCursors.delete(sessionId);
     // CASCADE EXEMPTION (phase-1_5-memory-contracts §2/§6): remove ONLY this
     // session's scope='session' memory. user/project/org rows have no session
     // owner and MUST survive a session delete.
     for (const [id, item] of this.memoryItems) {
       if (item.scope === 'session' && item.scopeKey === sessionId) {
         this.memoryItems.delete(id);
+        this.observations.delete(id);
       }
     }
+    // CORROBORATION CASCADE (P3-M8b §5.3): this session's vote on every SURVIVING
+    // item goes too — evidence citing a transcript that no longer exists cannot
+    // be checked. The items keep their value and status; an already-confirmed row
+    // never reverts because its evidence shrank.
+    this.forgetObservationsFromSession(sessionId);
     // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): a session
     // delete NEVER touches harness. Harness has no session scope, so there is
     // deliberately no harnessItems removal here.
@@ -325,7 +349,8 @@ export class MemoryStore implements Store {
     if (decision.behavior === 'deny') {
       throw new Error(`memory write denied: ${decision.reason}`);
     }
-    return this.writeMemoryItem({
+    const valueChanged = existing ? !sameMemoryValue(existing.value, req.value) : false;
+    const saved = this.writeMemoryItem({
       scope: req.scope,
       scopeKey: req.scopeKey,
       type: req.type,
@@ -335,6 +360,75 @@ export class MemoryStore implements Store {
       confidence: req.confidence,
       status: decision.status,
     });
+
+    // CORROBORATION (P3-M8b §5.3), recorded by the STORE so the reflection pass
+    // and `naby_remember` fill one pool and neither can forget to. Both an
+    // 'allow' and a 'hold' count — a held row still is this session asserting the
+    // fact. Observationally identical to SqliteStore.
+    if (req.provenance.sessionId) {
+      // A materially different value is a NEW claim, so the old sessions' votes
+      // for the old claim are cleared: the count always means "distinct sessions
+      // that agree with what this row says now".
+      if (valueChanged) this.observations.delete(saved.id);
+      let bySession = this.observations.get(saved.id);
+      if (!bySession) {
+        bySession = new Map<string, MemoryObservation>();
+        this.observations.set(saved.id, bySession);
+      }
+      const observation: MemoryObservation = {
+        memoryId: saved.id,
+        sessionId: req.provenance.sessionId,
+        observedAt: Date.now(),
+      };
+      if (req.provenance.createdFrom !== undefined) {
+        observation.createdFrom = req.provenance.createdFrom;
+      }
+      // Keyed by session id, so one conversation votes once however often it
+      // repeats itself — the composite primary key, expressed as a nested map.
+      bySession.set(req.provenance.sessionId, observation);
+    }
+    return saved;
+  }
+
+  // -- cross-session corroboration (Phase 3 P3-M8b) -------------------------
+
+  getMemoryCorroboration(memoryIds: readonly string[]): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const id of memoryIds) {
+      const n = this.observations.get(id)?.size ?? 0;
+      // Absent rather than 0 for an unobserved item, exactly as the SQL GROUP BY
+      // returns no row for one.
+      if (n > 0) out[id] = n;
+    }
+    return out;
+  }
+
+  listCorroboratedProposed(threshold: number): MemoryItem[] {
+    const min = Math.max(1, Math.trunc(threshold));
+    const rows: { item: MemoryItem; n: number }[] = [];
+    for (const item of this.memoryItems.values()) {
+      if (item.status !== 'proposed') continue;
+      const n = this.observations.get(item.id)?.size ?? 0;
+      if (n >= min) rows.push({ item, n });
+    }
+    rows.sort((a, b) => b.n - a.n || b.item.updatedAt - a.item.updatedAt);
+    return rows.map((r) => cloneMemory(r.item));
+  }
+
+  /** Drop every observation of these memory ids — the cascade that follows a
+   *  memory item out of the store. */
+  private forgetObservationsOf(memoryIds: Iterable<string>): void {
+    for (const id of memoryIds) this.observations.delete(id);
+  }
+
+  /** Drop one session's vote on every memory item (P3-M8b §5.3). The items
+   *  themselves survive: only the evidence that pointed at a transcript which no
+   *  longer exists goes. */
+  private forgetObservationsFromSession(sessionId: string): void {
+    for (const [memoryId, bySession] of this.observations) {
+      bySession.delete(sessionId);
+      if (bySession.size === 0) this.observations.delete(memoryId);
+    }
   }
 
   getScopedMemory(
@@ -361,8 +455,10 @@ export class MemoryStore implements Store {
   }
 
   deleteMemory(sel: MemoryDeleteSelector): void {
+    // Observations follow their item out (P3-M8b §5.3).
     if ('id' in sel) {
       this.memoryItems.delete(sel.id);
+      this.observations.delete(sel.id);
       return;
     }
     const source: TrustTier = sel.source;
@@ -371,6 +467,7 @@ export class MemoryStore implements Store {
       if (sel.sessionId !== undefined && item.provenance.sessionId !== sel.sessionId)
         continue;
       this.memoryItems.delete(id);
+      this.observations.delete(id);
     }
   }
 
@@ -690,15 +787,27 @@ export class MemoryStore implements Store {
 
   listEvalEvents(
     agentId: string,
-    opts?: { kind?: EvalEventKind; taskType?: string; limit?: number },
+    opts?: { kind?: EvalEventKind; taskType?: string; sessionId?: string; limit?: number },
   ): EvalEvent[] {
     let rows = this.evalEvents.filter((e) => e.agentId === agentId);
     if (opts?.kind) rows = rows.filter((e) => e.kind === opts.kind);
     if (opts?.taskType) rows = rows.filter((e) => e.taskType === opts.taskType);
+    // One conversation's rows — the reflection pass's read (P3-M8a).
+    if (opts?.sessionId) rows = rows.filter((e) => e.sessionId === opts.sessionId);
     // Oldest first, then take the newest `limit` — so the caller can window and
     // run change detection without re-sorting.
     rows.sort((a, b) => a.at - b.at);
     return opts?.limit != null ? rows.slice(-Math.max(0, opts.limit)) : rows;
+  }
+
+  /** The ledger's ONE permitted after-the-fact edit (checkin-contracts invariant
+   *  8). Observationally identical to SqliteStore's: `autonomous` only, no write
+   *  for any other kind or a missing id, idempotent. */
+  markEvalEventCorrected(id: string): boolean {
+    const row = this.evalEvents.find((e) => e.id === id);
+    if (!row || row.kind !== 'autonomous') return false;
+    row.correctedAfter = true;
+    return true;
   }
 
   deleteEvalEvents(selector: EvalEventDeleteSelector): void {
@@ -707,6 +816,20 @@ export class MemoryStore implements Store {
     const kept = this.evalEvents.filter(keep);
     this.evalEvents.length = 0;
     this.evalEvents.push(...kept);
+  }
+
+  // -- reflection cursor (Phase 3 P3-M8a) -----------------------------------
+
+  getReflectionCursor(sessionId: string): ReflectionCursor | undefined {
+    const cursor = this.reflectionCursors.get(sessionId);
+    return cursor ? { ...cursor } : undefined;
+  }
+
+  setReflectionCursor(sessionId: string, lastSeq: number, reflectedAt: number): void {
+    this.reflectionCursors.set(sessionId, {
+      lastSeq: Math.trunc(lastSeq),
+      reflectedAt: Math.trunc(reflectedAt),
+    });
   }
 
   getSetting(key: string): string | undefined {
@@ -782,13 +905,24 @@ export class MemoryStore implements Store {
       if (s.ref.cwd === cwd) doomedSessions.push(sessionId);
     }
     const doomed = new Set(doomedSessions);
-    for (const sessionId of doomedSessions) this.sessions.delete(sessionId);
+    for (const sessionId of doomedSessions) {
+      this.sessions.delete(sessionId);
+      // The reflection cursor follows its transcript out (P3-M8a), and so does
+      // the session's vote on every surviving memory item (P3-M8b §5.3).
+      this.reflectionCursors.delete(sessionId);
+      this.forgetObservationsFromSession(sessionId);
+    }
+    const removedMemoryIds: string[] = [];
     for (const [id, item] of this.memoryItems) {
       const isDoomedSession =
         item.scope === 'session' && doomed.has(item.scopeKey);
       const isThisProject = item.scope === 'project' && item.scopeKey === cwd;
-      if (isDoomedSession || isThisProject) this.memoryItems.delete(id);
+      if (isDoomedSession || isThisProject) {
+        this.memoryItems.delete(id);
+        removedMemoryIds.push(id);
+      }
     }
+    this.forgetObservationsOf(removedMemoryIds);
     // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): drop only
     // this project's OWN scope='project' harness (scopeKey = cwd). user/org
     // harness is NOT project-owned and MUST survive; harness has no session

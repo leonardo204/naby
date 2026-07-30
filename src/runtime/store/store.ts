@@ -275,6 +275,64 @@ export type MemoryDeleteSelector =
   | { id: string }
   | { source: TrustTier; sessionId?: string };
 
+/**
+ * ONE SESSION AGREEING WITH A MEMORY'S CURRENT VALUE (Phase 3 P3-M8b,
+ * phase-3-continuous-learning §5.3; memory-contracts §8 amendment).
+ *
+ * WHY IT EXISTS. `updatedAt` could already say when a fact was last written, but
+ * not by how many DIFFERENT conversations — and those are not the same evidence
+ * at all. Saying the same thing twice in one sitting is one belief stated twice;
+ * saying it again three weeks later, in another session, after having forgotten
+ * you said it, is the thing worth trusting. An observation row is the record of
+ * the second kind.
+ *
+ * TWO RULES MAKE THE COUNT MEAN SOMETHING, both enforced by `putMemory`:
+ *
+ *   - it is written AUTOMATICALLY whenever a write with a `provenance.sessionId`
+ *     lands, so the reflection pass and `naby_remember` fill the same pool and
+ *     neither can forget to;
+ *   - the rows are CLEARED when the value materially changes. A new claim needs
+ *     new evidence, so the count is always "distinct sessions that agree with what
+ *     this row says NOW" — which is why no separate "and no session contradicted
+ *     it" condition is needed.
+ *
+ * Evidence, not progress state — but it is deleted with the conversation that
+ * produced it (§5.3): a citation into a transcript nobody can open any more is
+ * not evidence of anything. An already-`confirmed` item never reverts when its
+ * observations go.
+ */
+/**
+ * Whether two memory values are the SAME CLAIM — the test that decides whether a
+ * write keeps an item's corroboration or wipes it (§5.3).
+ *
+ * Whitespace-insensitive, case-SENSITIVE. Re-saving a fact with a trailing space
+ * or a rewrapped line is the same person saying the same thing, and resetting the
+ * evidence for it would make corroboration unreachable for anyone whose tooling
+ * touches whitespace. Case, by contrast, can be the whole content of a
+ * preference ("writes SQL keywords in caps"), so it counts as a change.
+ *
+ * Lives here, next to the type, because both drivers must answer it identically:
+ * two copies of this rule is a database where the same edit clears the evidence
+ * on one driver and not the other.
+ */
+export function sameMemoryValue(a: string, b: string): boolean {
+  const normalize = (s: string): string => s.replace(/\s+/g, ' ').trim();
+  return normalize(a) === normalize(b);
+}
+
+export type MemoryObservation = {
+  /** The `MemoryItem.id` this observation is about. */
+  memoryId: string;
+  /** The session that agreed with the current value. Half of the primary key:
+   *  one session counts ONCE per memory, however often it repeats itself. */
+  sessionId: string;
+  /** epoch ms of the write that recorded it. */
+  observedAt: number;
+  /** The `provenance.createdFrom` of that write — the message coordinate, when
+   *  the writer supplied one (reflection does: "<sessionId>:<seq>"). */
+  createdFrom?: string;
+};
+
 // ---------------------------------------------------------------------------
 // Golden set (Phase 1.5 P15-04) — phase-1_5-personalization-data-layer §3/§5/§6
 // ---------------------------------------------------------------------------
@@ -614,6 +672,22 @@ export type EvalEventInput = Omit<EvalEvent, 'id' | 'at'> & {
  *  delete-by-source. */
 export type EvalEventDeleteSelector = { agentId: string } | { sessionId: string };
 
+/**
+ * Where the session-reflection pass (Phase 3 P3-M8a) stopped reading a session's
+ * transcript: the highest message `seq` it has already looked at, and when it did.
+ *
+ * PROGRESS STATE, NOT USER RECORD — which is why it is the one thing that IS
+ * deleted with a session, unlike the ledger (invariant 4: growth survives a deleted
+ * conversation). A cursor into a transcript that no longer exists means nothing.
+ */
+export type ReflectionCursor = {
+  /** Highest message seq already reflected on. A session never reflected on has
+   *  no row at all; callers read that as -1 (seqs start at 0). */
+  lastSeq: number;
+  /** epoch ms of that reflection. */
+  reflectedAt: number;
+};
+
 /** built-in persona (learns the user, seeded once) | user-added custom agent. */
 export type AgentKind = 'persona' | 'custom';
 
@@ -691,7 +765,12 @@ export interface Store {
   /** Remove the session and everything keyed to it (messages + usage +
    * scope='session' memory). Phase 1.5 CASCADE EXEMPTION: user/project/org
    * memory is NOT touched — a session delete removes only that session's
-   * session-scoped memory (phase-1_5-memory-contracts §2/§6). */
+   * session-scoped memory (phase-1_5-memory-contracts §2/§6).
+   *
+   * P3-M8b: its MEMORY OBSERVATIONS go too. A surviving user-scope row keeps its
+   * value and its status; it simply loses the vote of a conversation that no
+   * longer exists to be checked against (§5.3). An already-confirmed row does not
+   * revert. */
   deleteSession(sessionId: string): void;
 
   // -- messages ------------------------------------------------------------
@@ -743,8 +822,34 @@ export interface Store {
   confirmMemory(id: string): void;
 
   /** Delete one item by id, or every item matching a provenance source
-   * (poisoning rollback / delete-by-source). Exactly one selector. */
+   * (poisoning rollback / delete-by-source). Exactly one selector. Takes the
+   * items' observation rows with it (P3-M8b): evidence for a row that no longer
+   * exists is unreachable by definition. */
   deleteMemory(sel: MemoryDeleteSelector): void;
+
+  // -- cross-session corroboration (Phase 3 P3-M8b) ------------------------
+  //
+  // How many DISTINCT sessions agree with each item's CURRENT value
+  // (phase-3-continuous-learning §5.3). The rows themselves are written by
+  // `putMemory` — there is deliberately no public "record an observation" method,
+  // because a caller that could forget to call it would produce a corroboration
+  // count that silently under-reports.
+
+  /** Distinct-session counts for the given item ids, keyed by id. Ids with no
+   * observations are ABSENT from the result rather than present with 0, so a
+   * caller reads `counts[id] ?? 0` and cannot mistake "never observed" for a real
+   * zero. An empty input returns an empty record without touching the database. */
+  getMemoryCorroboration(memoryIds: readonly string[]): Record<string, number>;
+
+  /** Every `proposed` item corroborated by at least `threshold` distinct
+   * sessions, across ALL scopes — the consolidation step's read (§5.4). Most
+   * corroborated first.
+   *
+   * IT DOES NOT DECIDE ANYTHING. Whether such a row may be promoted is policy
+   * (`shouldAutoConfirmMemory`: artifact-tier only, never `external`, and only
+   * when the user opted in) and lives in the runtime where it can be read,
+   * not inside a store method where it would be invisible. */
+  listCorroboratedProposed(threshold: number): MemoryItem[];
 
   // -- golden set (Phase 1.5 P15-04) ---------------------------------------
   //
@@ -871,14 +976,41 @@ export interface Store {
   appendEvalEvent(event: EvalEventInput): EvalEvent;
 
   /** An agent's observations, OLDEST FIRST so the caller can window and run
-   *  change detection without re-sorting. `limit` takes the newest N. */
+   *  change detection without re-sorting. `limit` takes the newest N.
+   *  `sessionId` narrows to one conversation — what the reflection pass reads
+   *  (P3-M8a); the rows stay keyed by agent, this is a filter on the LINK. */
   listEvalEvents(
     agentId: string,
-    opts?: { kind?: EvalEventKind; taskType?: string; limit?: number },
+    opts?: { kind?: EvalEventKind; taskType?: string; sessionId?: string; limit?: number },
   ): EvalEvent[];
+
+  /**
+   * Flip `correctedAfter` on one `autonomous` row — THE ONLY after-the-fact
+   * mutation the ledger allows (checkin-contracts invariant 8). Written by the
+   * session-reflection pass (P3-M8a), never by an agent turn.
+   *
+   * Returns false and writes NOTHING for a missing id or any other `kind`. The
+   * narrowness is the point: every additional field that can be rewritten later is
+   * another way to make a past score look better than it was, so the exception is
+   * one field on one kind and the type of the return value is what makes a refused
+   * write observable rather than silent.
+   */
+  markEvalEventCorrected(id: string): boolean;
 
   /** Erase growth history for an agent or a session. */
   deleteEvalEvents(selector: EvalEventDeleteSelector): void;
+
+  // -- reflection cursor (Phase 3 P3-M8a) ----------------------------------
+  //
+  // How far the reflection pass has read each session's transcript. Deleted WITH
+  // the session (see the type's note) — the only session-keyed state that is,
+  // apart from messages/usage/session-scoped memory.
+
+  /** Undefined when the session has never been reflected on. */
+  getReflectionCursor(sessionId: string): ReflectionCursor | undefined;
+
+  /** Record how far reflection got. Upsert by session id. */
+  setReflectionCursor(sessionId: string, lastSeq: number, reflectedAt: number): void;
 
   // -- usage (F1-07) -------------------------------------------------------
 

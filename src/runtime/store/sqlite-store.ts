@@ -37,6 +37,9 @@ import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import { decideMemoryWrite } from '../memory-gate.js';
 import { decideHarnessImport } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
+// The "is this the same claim" rule (P3-M8b §5.3) lives with the type so both
+// drivers reset corroboration on exactly the same edits.
+import { sameMemoryValue } from './store.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
@@ -68,6 +71,7 @@ import type {
   PolicyRule,
   PolicyRuleInput,
   Project,
+  ReflectionCursor,
   SessionRef,
   Store,
   TrustTier,
@@ -181,13 +185,35 @@ function openSilently(path: string): DatabaseSyncType {
 // (§2): deleteSession never touches harness; removeProject removes only
 // scope='project' harness for that cwd; user/org survive — enforced in the
 // methods, not by any FK.
+//
+// v8 (Phase 3 P3-M8a) adds the `reflection_state` table — one row per session
+// recording how far the session-reflection pass has read its transcript
+// (specs/phase-3-continuous-learning.md §4.5). Purely ADDITIVE, exactly like v5
+// and v6: the table is IF NOT EXISTS in the DDL, so a brand-new database gets it
+// on first open and an existing v7 database picks it up on next open with NO data
+// migration and NO loss (a session with no row simply reads as "never reflected
+// on"). The version is bumped only to record that it happened. UNLIKE every other
+// session-linked table this one IS deleted with its session — the cursor is
+// progress state, not the user's record (see `ReflectionCursor` in store.ts).
+//
+// v9 (Phase 3 P3-M8b) adds the `memory_observations` table — which DISTINCT
+// sessions agree with a memory item's CURRENT value
+// (specs/phase-3-continuous-learning.md §5.3). Purely ADDITIVE, exactly like v5,
+// v6 and v8: the table and its index are IF NOT EXISTS in the DDL, so a brand-new
+// database gets them on first open and an existing v8 database picks them up on
+// next open with NO data migration and NO loss. NO BACKFILL — and the absence of
+// one is correct rather than lazy: an existing row's history of which sessions
+// agreed with it was never recorded, so inventing observations for it would mean
+// inventing evidence, and the honest reading of a pre-v9 row is "corroborated by
+// nobody yet". Rows are written only by putMemory and are cascade-deleted with
+// their memory item AND with the session that produced them.
 /**
  * Exported so tests and spikes can assert "stamped to the CURRENT version"
  * instead of hardcoding a number that goes stale on the next migration — which
  * is exactly what happened when v7 landed and spike:harness started failing on
  * a lossless migration it had verified correctly.
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 9;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -239,6 +265,27 @@ CREATE TABLE IF NOT EXISTS memory_items (
 
 CREATE INDEX IF NOT EXISTS memory_items_by_scope ON memory_items (scope, scope_key);
 CREATE INDEX IF NOT EXISTS memory_items_by_source ON memory_items (prov_source);
+
+-- v9 (Phase 3 P3-M8b). CROSS-SESSION CORROBORATION: which distinct sessions
+-- agree with a memory item's CURRENT value (phase-3-continuous-learning §5.3).
+--
+-- THE COMPOSITE PRIMARY KEY IS THE WHOLE MECHANISM. (memory_id, session_id) means
+-- one session votes ONCE per memory however many times it restates the fact, so
+-- the count is "how many conversations independently said this" rather than "how
+-- chatty was the user" — the distinction the trust meter exists to keep (§2, the
+-- decision not to count volume). Written ONLY by putMemory, cleared for an item
+-- whose value materially changes, and cascade-deleted with the memory item and
+-- with the session (both explicit in the methods, like every other cascade here —
+-- foreign_keys is ON but no FK is declared, because memory items outlive the
+-- sessions that taught them).
+CREATE TABLE IF NOT EXISTS memory_observations (
+  memory_id    TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  observed_at  INTEGER NOT NULL,   -- epoch ms of the write that recorded it
+  created_from TEXT,               -- "<sessionId>:<seq>" of the evidence, if any
+  PRIMARY KEY (memory_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS memory_observations_by_session ON memory_observations (session_id);
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
   name    TEXT PRIMARY KEY,
@@ -386,6 +433,24 @@ CREATE TABLE IF NOT EXISTS eval_events (
 );
 CREATE INDEX IF NOT EXISTS eval_events_by_agent ON eval_events (agent_id, at);
 CREATE INDEX IF NOT EXISTS eval_events_by_session ON eval_events (session_id);
+
+-- v8 (Phase 3 P3-M8a). How far the session-reflection pass has read each
+-- session's transcript (specs/phase-3-continuous-learning.md §4.5). Additive: an
+-- existing DB picks it up on next open with NO data migration and NO loss — an
+-- absent row means "never reflected on", which is the correct reading for every
+-- session that predates this table.
+--
+-- THE ONE SESSION-KEYED TABLE THAT IS CASCADE-DELETED WITH ITS SESSION. The
+-- ledger deliberately survives a deleted conversation (checkin-contracts
+-- invariant 4: what the agent proved is not erased by tidying up chats), but a
+-- cursor is not a record of anything the user or the agent did — it is a
+-- bookmark into a transcript. Keeping bookmarks for deleted transcripts would
+-- only leave rows nothing can ever read.
+CREATE TABLE IF NOT EXISTS reflection_state (
+  session_id   TEXT PRIMARY KEY,
+  last_seq     INTEGER NOT NULL,   -- highest message seq already reflected on
+  reflected_at INTEGER NOT NULL    -- epoch ms of that reflection
+);
 
 -- naby agents (Phase 3, P3-M1). Additive table: an existing DB picks it up on
 -- next open with NO data migration and NO loss. The naby-OWNED agent layer
@@ -895,14 +960,34 @@ export class SqliteStore implements Store {
     // it is qualified by scope='session' so a project whose cwd happened to
     // equal this sessionId (it cannot, but the guard makes the intent legible)
     // is never touched.
+    // The doomed session-scoped items' observations first, while the rows they
+    // point at still exist to be selected.
+    this.db
+      .prepare(
+        `DELETE FROM memory_observations WHERE memory_id IN
+           (SELECT id FROM memory_items WHERE scope = 'session' AND scope_key = ?)`,
+      )
+      .run(sessionId);
     this.db
       .prepare("DELETE FROM memory_items WHERE scope = 'session' AND scope_key = ?")
       .run(sessionId);
+    // CORROBORATION CASCADE (P3-M8b §5.3): this session's vote on every SURVIVING
+    // memory item goes too — a citation into a transcript that no longer exists
+    // cannot be checked, so it may not keep counting as evidence. The item itself
+    // is untouched: a user-scope fact keeps its value and its status, and an
+    // already-confirmed row never reverts because its evidence shrank.
+    this.db.prepare('DELETE FROM memory_observations WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(sessionId);
     // HARNESS CASCADE EXEMPTION (phase-1_6-harness-contracts §2/§6): a session
     // delete NEVER touches harness. Harness has no session scope (a
     // command/skill/subagent is a durable capability, not per-conversation
     // state), so there is deliberately no harness_items delete here.
+    //
+    // The reflection CURSOR, by contrast, does go (P3-M8a): it is a bookmark into
+    // the transcript being deleted, not a record of anything. The eval-event
+    // LEDGER still survives (invariant 4) — deleting a chat must not erase what
+    // the agent proved.
+    this.db.prepare('DELETE FROM reflection_state WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
   }
 
@@ -1090,7 +1175,7 @@ export class SqliteStore implements Store {
       throw new Error(`memory write denied: ${decision.reason}`);
     }
     // 'allow' carries the (possibly downgraded) status; 'hold' pins 'proposed'.
-    return this.writeMemoryRow({
+    const saved = this.writeMemoryRow({
       scope: req.scope,
       scopeKey: req.scopeKey,
       type: req.type,
@@ -1100,6 +1185,87 @@ export class SqliteStore implements Store {
       confidence: req.confidence,
       status: decision.status,
     });
+
+    // CORROBORATION (P3-M8b, §5.3). Recorded HERE rather than by the caller so a
+    // write through the reflection pass and a write through `naby_remember` land
+    // in the same pool, and neither can forget to. Both an 'allow' and a 'hold'
+    // count: a held row still IS this session asserting the fact.
+    if (req.provenance.sessionId) {
+      this.recordMemoryObservation(
+        saved.id,
+        req.provenance.sessionId,
+        existingRow ? !sameMemoryValue(existingRow.value, saved.value) : false,
+        req.provenance.createdFrom,
+      );
+    }
+    return saved;
+  }
+
+  /**
+   * Upsert one session's observation of a memory item, clearing the item's other
+   * observations first when the value MATERIALLY changed.
+   *
+   * WHY THE CLEAR IS THE IMPORTANT HALF. Without it, "three sessions corroborate
+   * this" would survive the fact being rewritten into something the other two
+   * sessions never said — a count of agreement with a claim nobody agreed to.
+   * Wiping on a real change makes the number mean exactly one thing, always:
+   * distinct sessions that agree with the value stored RIGHT NOW. It is also why
+   * the spec needs no separate "and nothing contradicted it" test (§5.3).
+   */
+  private recordMemoryObservation(
+    memoryId: string,
+    sessionId: string,
+    valueChanged: boolean,
+    createdFrom?: string,
+  ): void {
+    if (valueChanged) {
+      this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(memoryId);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO memory_observations (memory_id, session_id, observed_at, created_from)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(memory_id, session_id) DO UPDATE SET
+           observed_at = excluded.observed_at,
+           created_from = excluded.created_from`,
+      )
+      .run(memoryId, sessionId, Date.now(), createdFrom ?? null);
+  }
+
+  getMemoryCorroboration(memoryIds: readonly string[]): Record<string, number> {
+    this.assertOpen();
+    const out: Record<string, number> = {};
+    if (memoryIds.length === 0) return out;
+    // ONE query, not one per id: the review panel asks about every row it just
+    // listed, and a per-id round trip would turn a page render into N statements.
+    const placeholders = memoryIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT memory_id, COUNT(DISTINCT session_id) AS n
+           FROM memory_observations
+          WHERE memory_id IN (${placeholders})
+          GROUP BY memory_id`,
+      )
+      .all(...memoryIds) as { memory_id: string; n: number }[];
+    for (const row of rows) out[row.memory_id] = Number(row.n);
+    return out;
+  }
+
+  listCorroboratedProposed(threshold: number): MemoryItem[] {
+    this.assertOpen();
+    const min = Math.max(1, Math.trunc(threshold));
+    const rows = this.db
+      .prepare(
+        `SELECT m.*, COUNT(DISTINCT o.session_id) AS n
+           FROM memory_items m
+           JOIN memory_observations o ON o.memory_id = m.id
+          WHERE m.status = 'proposed'
+          GROUP BY m.id
+         HAVING n >= ?
+          ORDER BY n DESC, m.updated_at DESC`,
+      )
+      .all(min) as (MemoryRow & { n: number })[];
+    return rows.map(toMemoryItem);
   }
 
   getScopedMemory(
@@ -1137,7 +1303,11 @@ export class SqliteStore implements Store {
 
   deleteMemory(sel: MemoryDeleteSelector): void {
     this.assertOpen();
+    // The observations go with the items (P3-M8b §5.3). Deleted through the same
+    // WHERE clause rather than by collecting ids first, so a rollback of ten
+    // thousand poisoned rows stays two statements.
     if ('id' in sel) {
+      this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(sel.id);
       this.db.prepare('DELETE FROM memory_items WHERE id = ?').run(sel.id);
       return;
     }
@@ -1147,10 +1317,22 @@ export class SqliteStore implements Store {
     if (sel.sessionId !== undefined) {
       this.db
         .prepare(
+          `DELETE FROM memory_observations WHERE memory_id IN
+             (SELECT id FROM memory_items WHERE prov_source = ? AND prov_session_id = ?)`,
+        )
+        .run(source, sel.sessionId);
+      this.db
+        .prepare(
           'DELETE FROM memory_items WHERE prov_source = ? AND prov_session_id = ?',
         )
         .run(source, sel.sessionId);
     } else {
+      this.db
+        .prepare(
+          `DELETE FROM memory_observations WHERE memory_id IN
+             (SELECT id FROM memory_items WHERE prov_source = ?)`,
+        )
+        .run(source);
       this.db
         .prepare('DELETE FROM memory_items WHERE prov_source = ?')
         .run(source);
@@ -1703,7 +1885,7 @@ export class SqliteStore implements Store {
 
   listEvalEvents(
     agentId: string,
-    opts?: { kind?: EvalEventKind; taskType?: string; limit?: number },
+    opts?: { kind?: EvalEventKind; taskType?: string; sessionId?: string; limit?: number },
   ): EvalEvent[] {
     this.assertOpen();
     const where: string[] = ['agent_id = ?'];
@@ -1715,6 +1897,12 @@ export class SqliteStore implements Store {
     if (opts?.taskType) {
       where.push('task_type = ?');
       args.push(opts.taskType);
+    }
+    // One conversation's rows — what the reflection pass reads (P3-M8a). The
+    // eval_events_by_session index already exists for it.
+    if (opts?.sessionId) {
+      where.push('session_id = ?');
+      args.push(opts.sessionId);
     }
     // Newest-first in SQL so `limit` takes the most RECENT rows, then reversed so
     // the caller gets oldest-first (what windowing and change detection expect).
@@ -1759,6 +1947,38 @@ export class SqliteStore implements Store {
     });
   }
 
+  /**
+   * The ledger's ONE permitted after-the-fact edit (checkin-contracts invariant
+   * 8): mark an `autonomous` row as having been corrected by the user afterwards.
+   *
+   * The `kind` is re-read from the row rather than trusted from the caller, so a
+   * check-in's stored `hit` can never be reached through this door — the flag that
+   * decides accuracy stays fixed at record time (invariant 1). Everything else in
+   * the payload is preserved: only `correctedAfter` is added.
+   */
+  markEvalEventCorrected(id: string): boolean {
+    this.assertOpen();
+    const row = this.db.prepare('SELECT kind, payload FROM eval_events WHERE id = ?').get(id) as
+      | { kind: string; payload: string }
+      | undefined;
+    if (!row || row.kind !== 'autonomous') return false;
+    let payload: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(row.payload) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        payload = parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* a corrupt payload is rewritten as just the flag rather than blocking it */
+    }
+    if (payload.correctedAfter === true) return true; // idempotent: already recorded
+    payload.correctedAfter = true;
+    this.db
+      .prepare('UPDATE eval_events SET payload = ? WHERE id = ?')
+      .run(JSON.stringify(payload), id);
+    return true;
+  }
+
   deleteEvalEvents(selector: EvalEventDeleteSelector): void {
     this.assertOpen();
     if ('agentId' in selector) {
@@ -1766,6 +1986,27 @@ export class SqliteStore implements Store {
     } else {
       this.db.prepare(`DELETE FROM eval_events WHERE session_id = ?`).run(selector.sessionId);
     }
+  }
+
+  // -- reflection cursor (Phase 3 P3-M8a) -----------------------------------
+
+  getReflectionCursor(sessionId: string): ReflectionCursor | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT last_seq, reflected_at FROM reflection_state WHERE session_id = ?')
+      .get(sessionId) as { last_seq: number; reflected_at: number } | undefined;
+    return row ? { lastSeq: Number(row.last_seq), reflectedAt: Number(row.reflected_at) } : undefined;
+  }
+
+  setReflectionCursor(sessionId: string, lastSeq: number, reflectedAt: number): void {
+    this.assertOpen();
+    this.db
+      .prepare(
+        `INSERT INTO reflection_state (session_id, last_seq, reflected_at) VALUES (?, ?, ?)
+         ON CONFLICT (session_id) DO UPDATE SET last_seq = excluded.last_seq,
+                                                reflected_at = excluded.reflected_at`,
+      )
+      .run(sessionId, Math.trunc(lastSeq), Math.trunc(reflectedAt));
   }
 
   // -- MCP registry --------------------------------------------------------
@@ -1878,13 +2119,31 @@ export class SqliteStore implements Store {
         this.db.prepare('DELETE FROM messages WHERE session_id = ?').run(session_id);
         // CASCADE EXEMPTION (§2/§6): a session's scope='session' memory only.
         this.db
+          .prepare(
+            `DELETE FROM memory_observations WHERE memory_id IN
+               (SELECT id FROM memory_items WHERE scope = 'session' AND scope_key = ?)`,
+          )
+          .run(session_id);
+        this.db
           .prepare("DELETE FROM memory_items WHERE scope = 'session' AND scope_key = ?")
           .run(session_id);
+        // This session's vote on every surviving item goes too (P3-M8b §5.3) —
+        // same reasoning as in deleteSession.
+        this.db.prepare('DELETE FROM memory_observations WHERE session_id = ?').run(session_id);
         this.db.prepare('DELETE FROM usage WHERE session_id = ?').run(session_id);
+        // The reflection cursor follows its transcript out (P3-M8a) — same
+        // reasoning as in deleteSession.
+        this.db.prepare('DELETE FROM reflection_state WHERE session_id = ?').run(session_id);
       }
       // The project's OWN scope='project' memory (scopeKey = cwd) goes with it.
       // user/org memory is NOT project-owned and MUST survive — it is never
       // touched here (phase-1_5-memory-contracts §2/§6).
+      this.db
+        .prepare(
+          `DELETE FROM memory_observations WHERE memory_id IN
+             (SELECT id FROM memory_items WHERE scope = 'project' AND scope_key = ?)`,
+        )
+        .run(cwd);
       this.db
         .prepare("DELETE FROM memory_items WHERE scope = 'project' AND scope_key = ?")
         .run(cwd);

@@ -181,7 +181,18 @@ export type {
   EvalEventInput,
   EvalEventKind,
   EvalEventDeleteSelector,
+  // The reflection cursor (Phase 3, P3-M8a) — how far the session-reflection
+  // pass has read one session's transcript.
+  ReflectionCursor,
+  // Cross-session corroboration (Phase 3, P3-M8b) — which DISTINCT sessions
+  // agree with a memory item's CURRENT value. Written by putMemory, never by a
+  // caller; reset when the value materially changes.
+  MemoryObservation,
 } from './runtime/store/store.js';
+// The "is this the same claim" test corroboration resets on. Exported because a
+// caller that needs to predict whether a write will clear the evidence (the
+// review UI, a spike) must ask the same question the store asks.
+export { sameMemoryValue } from './runtime/store/store.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
@@ -559,3 +570,51 @@ export {
   type CheckinAnswer,
   type DegenerateCode,
 } from './runtime/checkin.js';
+
+// -- session reflection (Phase 3, P3-M8a) ------------------------------------
+// The pure half of the pass that finally WRITES `correctedAfter`: which idle
+// session is worth looking back at, which autonomous actions to put to a judge,
+// and the validator that throws away any verdict whose evidence the user did not
+// actually type. The model can lower the agent's score, never invent a reason to.
+//
+// M8b adds the second task the same call performs: memory PROPOSALS, held to the
+// same standard (a quote the user really typed, then the very guards
+// `naby_remember` applies), and the corroboration threshold the opt-in
+// consolidation step measures against.
+export {
+  REFLECTION_IDLE_MS,
+  REFLECTION_SWEEP_CAP,
+  REFLECTION_MESSAGE_CAP,
+  REFLECTION_LATER_MESSAGE_CAP,
+  REFLECTION_MESSAGE_CHARS,
+  REFLECTION_CASE_CAP,
+  REFLECTION_USER_MESSAGE_CAP,
+  REFLECTION_MEMORY_CAP,
+  REFLECTION_MEMORY_SCOPES,
+  CORROBORATION_THRESHOLD,
+  isSessionDueForReflection,
+  buildReflectionCases,
+  collectReflectionUserMessages,
+  validateReflectionVerdicts,
+  validateMemoryCandidates,
+  shouldAutoConfirmMemory,
+  normalizeReflectionAnswer,
+  buildReflectionPrompt,
+  parseReflectionVerdicts,
+  parseReflectionAnswer,
+  type ReflectionCase,
+  type ReflectionVerdict,
+  type ReflectionJudge,
+  type ReflectionPrompt,
+  type ReflectionValidation,
+  type ReflectionSessionRef,
+  type ReflectionLedgerRow,
+  type ReflectionCaseInput,
+  type ReflectionAnswer,
+  type ReflectionMemoryCandidate,
+  type ReflectionSessionContext,
+  type ReflectionUserMessage,
+  type ValidatedMemoryCandidate,
+  type MemoryCandidateValidation,
+  type AutoConfirmCandidate,
+} from './runtime/reflection.js';
