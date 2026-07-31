@@ -403,6 +403,20 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
     minHeight: 640,
     show: opts.show ?? true,
     backgroundColor: '#111111',
+    // WINDOWS/LINUX ONLY, and deliberately NOT `Menu.setApplicationMenu(null)`.
+    // The app builds no menu of its own, so what shows on Windows is Electron's
+    // DEFAULT menu — a File/Edit/View/Window bar the product never asked for,
+    // sitting above a UI that already owns its own chrome. Hiding the BAR while
+    // keeping the MENU alive is the difference that matters: the default menu is
+    // also where the default accelerators live (Ctrl+R reload, Ctrl+Shift+I
+    // devtools, Ctrl+0/+/- zoom, Ctrl+W close), and dropping the application
+    // menu entirely would take those with it. `autoHideMenuBar` keeps them
+    // bound, and Alt still reveals the bar for anyone who wants it.
+    //
+    // macOS has no in-window menu bar to hide — its menu belongs to the system
+    // strip — so the flag is left off there rather than asking Electron to
+    // no-op on a platform contract we do not want to touch.
+    autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -424,6 +438,11 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
       ],
     },
   });
+
+  // `autoHideMenuBar` alone still paints the bar until the first Alt toggle on
+  // some Windows builds; this starts it hidden. Guarded to non-darwin so the
+  // macOS system menu is never touched.
+  if (process.platform !== 'darwin') win.setMenuBarVisibility(false);
 
   // Nothing in this app should ever open a second window or navigate off
   // loopback. Both are refused rather than merely unused: an injected script in
