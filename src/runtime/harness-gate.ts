@@ -28,6 +28,14 @@
 //   (4) The gate is negative-tested: a simulated injection payload arriving via
 //       `external` provenance must not produce an `enabled` row. (Enforced by
 //       (1)+(3); asserted in the harness spike.)
+//   (5) A CONTENT REFRESH of an item the user already reviewed preserves that
+//       row's status. `req.refresh` marks a re-read of the SAME file at the SAME
+//       origin (the local `.claude` re-scan); it may restate the body, never the
+//       trust decision. This is not a hole in (1)/(3): a refresh only ever hands
+//       back the STORED status, which nothing but setHarnessEnabled can have set,
+//       and a brand-new row has no stored status to preserve so it still lands
+//       disabled. A different origin claiming the same identity is a takeover,
+//       not a refresh, and is gated normally (lands disabled).
 
 import type {
   HarnessImportDecision,
@@ -71,6 +79,25 @@ export function decideHarnessImport(
       behavior: 'deny',
       reason: `a '${source}'-tier import may not overwrite an enabled '${existing.provenance.source}'-tier harness item without user action`,
     };
+  }
+
+  // (5) CONTENT REFRESH — a re-read of the SAME file at the SAME origin restates
+  // the body of a row the user has already ruled on, so it carries the STORED
+  // status through instead of re-deciding it. Checked after the trust-ordering
+  // deny (a deny stays absolute) and BEFORE the external rule, which would
+  // otherwise pin 'disabled' and erase an explicit enable on every re-scan.
+  //
+  // The origin must MATCH: a different file claiming an existing (scope,scopeKey,
+  // kind,name) is a takeover of that name, not a refresh of that item, and must
+  // be gated as the new import it is. An existing row with no recorded origin has
+  // nothing to match, so it likewise falls through.
+  if (
+    req.refresh &&
+    existing &&
+    existing.provenance.origin !== undefined &&
+    existing.provenance.origin === req.item.provenance.origin
+  ) {
+    return { behavior: 'allow', status: existing.status };
   }
 
   // (1)+(3) EXTERNAL NEVER AUTO-ENABLES / always lands disabled. A request to

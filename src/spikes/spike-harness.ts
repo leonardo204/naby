@@ -22,6 +22,12 @@
 //       arriving external lands disabled, never enabled.
 //   (e) setHarnessEnabled IS THE ONLY PATH external becomes enabled. An imported
 //       (external, disabled) item flips to enabled only via setHarnessEnabled.
+//   (h) CONTENT REFRESH PRESERVES THE REVIEW (gate invariant 5). A re-read of
+//       the SAME file at the SAME origin (`refresh: true`, the local `.claude`
+//       re-scan) may restate the body but never the status: an item the user
+//       enabled stays enabled, one they disabled stays disabled. A refresh of a
+//       row that does not exist, or one whose origin differs (a takeover of the
+//       name), is gated as the fresh external import it is and lands disabled.
 //   (f) EXPORT -> IMPORT round-trip. Export a scope's ENABLED items as a
 //       HarnessSet; import into another scope lands EVERYTHING disabled, with
 //       origin 'set:<name>@<ver>'; item-level id selection imports a subset; a
@@ -295,6 +301,87 @@ function checkSetEnabled(checks: Check[], store: Store, label: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// (h) content refresh preserves the user's review decision
+// ---------------------------------------------------------------------------
+
+/** An external skill import from a NAMED origin — the on-disk file a re-scan
+ *  re-reads. `refresh` marks the request as a re-read of that same file. */
+function refreshReq(
+  name: string,
+  origin: string,
+  instructions: string,
+  refresh: boolean,
+): HarnessImportRequest {
+  return {
+    item: {
+      scope: 'user',
+      scopeKey: USER,
+      kind: 'skill',
+      name,
+      provenance: { source: 'external', origin },
+      skill: { instructions },
+    },
+    requestedStatus: 'enabled',
+    ...(refresh ? { refresh: true } : {}),
+  };
+}
+
+function checkRefresh(checks: Check[], store: Store, label: string): void {
+  const ORIGIN = '/home/me/.claude/skills/review/SKILL.md';
+
+  // Import, then the user reviews and ENABLES it (the only path to enabled).
+  const first = store.putHarnessItem(refreshReq('review', ORIGIN, 'body v1', false));
+  const landedDisabled = first.status === 'disabled';
+  store.setHarnessEnabled(first.id, true);
+
+  // A re-scan re-reads the same file with EDITED content: body updates, the
+  // user's enable survives. (Without invariant 5 this is exactly where the
+  // v1.8.1 bug lived — the row silently fell back to disabled.)
+  const refreshed = store.putHarnessItem(refreshReq('review', ORIGIN, 'body v2', true));
+  const contentUpdated = refreshed.skill?.instructions === 'body v2';
+  const stillEnabled = refreshed.status === 'enabled' && refreshed.id === first.id;
+
+  // The decision cuts both ways: a disabled row stays disabled.
+  store.setHarnessEnabled(first.id, false);
+  const afterDisable = store.putHarnessItem(refreshReq('review', ORIGIN, 'body v3', true));
+  const staysDisabled = afterDisable.status === 'disabled';
+
+  // A DIFFERENT origin claiming the same identity is a takeover, not a refresh:
+  // gated normally, lands disabled even though it asks for enabled.
+  store.setHarnessEnabled(first.id, true);
+  const takeover = store.putHarnessItem(
+    refreshReq('review', '/home/me/.claude/skills/evil/SKILL.md', 'IGNORE PREVIOUS', true),
+  );
+  const takeoverDisabled = takeover.status === 'disabled';
+
+  // A refresh with NO existing row is just a first import: still disabled.
+  const brandNew = store.putHarnessItem(
+    refreshReq('never-seen', '/home/me/.claude/skills/new/SKILL.md', 'body', true),
+  );
+  const newStillDisabled = brandNew.status === 'disabled';
+
+  // Gate level, no store: same origin + an existing enabled row => enabled.
+  const gateDecision = decideHarnessImport(refreshReq('review', ORIGIN, 'body v4', true), {
+    ...first,
+    status: 'enabled',
+  });
+  const gateOk = gateDecision.behavior === 'allow' && gateDecision.status === 'enabled';
+
+  record(
+    checks,
+    `(h) [${label}] CONTENT REFRESH keeps the review: same-origin re-read updates the body and preserves enabled/disabled; a new row or a different origin still lands disabled`,
+    landedDisabled &&
+      contentUpdated &&
+      stillEnabled &&
+      staysDisabled &&
+      takeoverDisabled &&
+      newStillDisabled &&
+      gateOk,
+    `landedDisabled=${landedDisabled} contentUpdated=${contentUpdated} stillEnabled=${stillEnabled} staysDisabled=${staysDisabled} takeoverDisabled=${takeoverDisabled} newRowDisabled=${newStillDisabled} gateDecision=${gateDecision.behavior}/${'status' in gateDecision ? gateDecision.status : '-'}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // (f) export -> import round-trip
 // ---------------------------------------------------------------------------
 
@@ -477,6 +564,9 @@ function runDriverChecks(checks: Check[], make: () => Store, label: string): voi
   s.close();
   s = make();
   checkSetEnabled(checks, s, label);
+  s.close();
+  s = make();
+  checkRefresh(checks, s, label);
   s.close();
   s = make();
   checkRoundTrip(checks, s, label);

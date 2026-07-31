@@ -509,6 +509,23 @@ export type HarnessItem = {
 export type HarnessImportRequest = {
   item: Omit<HarnessItem, 'id' | 'createdAt' | 'updatedAt' | 'status'>;
   requestedStatus?: HarnessStatus;
+  /**
+   * CONTENT REFRESH of an item the user has already reviewed — set ONLY by the
+   * re-scan of a local `.claude` tree, never by an agent-driven write.
+   *
+   * A refresh re-reads the SAME file at the SAME origin and re-states its body.
+   * Without this flag such a write goes through the gate as a brand-new external
+   * import, which pins 'disabled' (invariant 3) and therefore ERASES the user's
+   * explicit enable — the v1.8.1 bug where enabling an imported skill was undone
+   * by the very next Settings list. With it, the gate carries the EXISTING row's
+   * status through (harness-gate.ts invariant 5): a refresh may change content,
+   * never trust.
+   *
+   * It cannot be used to smuggle an item to 'enabled': the status it preserves is
+   * the stored one, which only setHarnessEnabled can ever have set, and a NEW row
+   * (nothing to preserve) is unaffected.
+   */
+  refresh?: boolean;
 };
 
 /** The deterministic import-gate decision (contract §4). An 'allow' may downgrade
