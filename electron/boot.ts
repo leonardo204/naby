@@ -387,6 +387,20 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
+    // A FLOOR, not a preference. Dragged narrow enough the desktop UI does not
+    // merely look cramped, it changes identity: `public/boot.js` redirects any
+    // top-level viewport matching `(max-width: 767px)` to the mobile route `/m`,
+    // so a window the user shrank past that point would swap the whole shell out
+    // from under them — and the only way back is the /m "use desktop" escape
+    // hatch. 960 keeps the top-level viewport ~200px clear of that breakpoint
+    // even after the window frame is subtracted, and clears the Settings modal's
+    // own floor as well (880px panel + the 2rem mx-4 gutters = 912).
+    //
+    // 640 tall is the height at which the three-panel layout and the sidebar
+    // still show a usable amount of each panel; below it the chat composer and
+    // the panel headers eat the whole window.
+    minWidth: 960,
+    minHeight: 640,
     show: opts.show ?? true,
     backgroundColor: '#111111',
     webPreferences: {
