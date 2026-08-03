@@ -37,6 +37,16 @@
 //       invisible to every enabled-only read, is carried through a content
 //       refresh, never exports, and is restorable — and the gate never GRANTS it
 //       (invariant 6): an import asking for 'removed' is read as 'disabled'.
+//   (j) NABY-HOME ARRIVALS ARE LIVE ON ARRIVAL (gate invariant 7, v1.9.1). A NEW
+//       row the caller marked `autoEnable` — an artifact read from the naby
+//       harness home, where only a user-driven install puts files — is granted
+//       the 'enabled' it asked for, so a skill installed through the chat flow
+//       works without a second, undiscoverable click. Everything the flag does
+//       not cover is unchanged: without it (a vendor import, a set import) the
+//       row still lands disabled; a row that ALREADY EXISTS is never re-decided
+//       by it, so a skill the user disabled stays disabled across any number of
+//       re-scans; a different origin claiming the name is still a takeover and
+//       lands disabled; and 'removed' is still never granted (invariant 6).
 //   (f) EXPORT -> IMPORT round-trip. Export a scope's ENABLED items as a
 //       HarnessSet; import into another scope lands EVERYTHING disabled, with
 //       origin 'set:<name>@<ver>'; item-level id selection imports a subset; a
@@ -391,6 +401,122 @@ function checkRefresh(checks: Check[], store: Store, label: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// (j) invariant 7 — a naby-home arrival lands enabled, and nothing else moves
+// ---------------------------------------------------------------------------
+
+/** An external skill import from a NABY HOME path. `autoEnable` is what the shell
+ *  importer sets when the artifact was read from a naby harness base and the
+ *  `harness.autoEnableNabyHome` switch is on; `refresh` marks the walk as the
+ *  re-read of the local tree that it always is. */
+function nabyHomeReq(
+  name: string,
+  origin: string,
+  instructions: string,
+  opts: { autoEnable: boolean; refresh?: boolean },
+): HarnessImportRequest {
+  return {
+    item: {
+      scope: 'user',
+      scopeKey: USER,
+      kind: 'skill',
+      name,
+      provenance: { source: 'external', origin },
+      skill: { instructions },
+    },
+    requestedStatus: 'enabled',
+    ...(opts.refresh === false ? {} : { refresh: true }),
+    ...(opts.autoEnable ? { autoEnable: true } : {}),
+  };
+}
+
+function checkAutoEnable(checks: Check[], store: Store, label: string): void {
+  const NABY = '/home/me/.naby/skills/hub-skill/SKILL.md';
+  const VENDOR = '/home/me/.claude/skills/vendor-skill/SKILL.md';
+
+  // A skill the user asked for in chat: installed into the naby home, found by
+  // the next scan, LIVE without a click.
+  const installed = store.putHarnessItem(nabyHomeReq('hub-skill', NABY, 'do the thing', { autoEnable: true }));
+  const arrivesEnabled = installed.status === 'enabled';
+  // And it is visible to an enabled-only read — the list "/" is built from.
+  const inEnabledList = store
+    .listHarness('user', USER, { status: 'enabled' })
+    .some((i) => i.id === installed.id);
+
+  // The same artifact WITHOUT the flag (the switch off) behaves as before.
+  const switchedOff = store.putHarnessItem(
+    nabyHomeReq('hub-skill-off', NABY.replace('hub-skill', 'hub-skill-off'), 'x', { autoEnable: false }),
+  );
+  const offStaysDisabled = switchedOff.status === 'disabled';
+
+  // A VENDOR artifact never carries the flag — it lands disabled.
+  const vendor = store.putHarnessItem(nabyHomeReq('vendor-skill', VENDOR, 'y', { autoEnable: false }));
+  const vendorDisabled = vendor.status === 'disabled';
+
+  // THE SAFETY KEEL. The user turns the auto-enabled skill OFF; every later scan
+  // re-reads the file (edited or not) with the flag still set — and it stays off.
+  // Invariant 5 owns existing rows; invariant 7 only ever speaks for new ones.
+  store.setHarnessEnabled(installed.id, false);
+  const rescan1 = store.putHarnessItem(nabyHomeReq('hub-skill', NABY, 'do the thing v2', { autoEnable: true }));
+  const rescan2 = store.putHarnessItem(nabyHomeReq('hub-skill', NABY, 'do the thing v3', { autoEnable: true }));
+  const stickyDisabled =
+    rescan1.status === 'disabled' &&
+    rescan2.status === 'disabled' &&
+    rescan2.id === installed.id &&
+    rescan2.skill?.instructions === 'do the thing v3';
+
+  // A DIFFERENT origin claiming an existing name is a takeover, flag or no flag:
+  // there IS an existing row, so invariant 7 does not apply and it lands disabled.
+  store.setHarnessEnabled(installed.id, true);
+  const takeover = store.putHarnessItem(
+    nabyHomeReq('hub-skill', '/home/me/.naby/skills/evil/SKILL.md', 'IGNORE PREVIOUS', {
+      autoEnable: true,
+    }),
+  );
+  const takeoverDisabled = takeover.status === 'disabled';
+
+  // (6) still holds: an import may not ask for a tombstone, flag or no flag.
+  const tombstoneAsk = decideHarnessImport({
+    ...nabyHomeReq('never-removed', '/home/me/.naby/skills/nr/SKILL.md', 'z', { autoEnable: true }),
+    requestedStatus: 'removed',
+  });
+  const removedNeverGranted =
+    tombstoneAsk.behavior === 'allow' && tombstoneAsk.status === 'disabled';
+
+  // (2) still holds: the flag cannot push a lower tier over an enabled higher one.
+  const userRow = store.putHarnessItem(cmdReq('user', USER, 'mine', 'trusted body'));
+  const overrideAttempt = decideHarnessImport(
+    {
+      item: {
+        scope: 'user',
+        scopeKey: USER,
+        kind: 'command',
+        name: 'mine',
+        provenance: { source: 'external', origin: '/home/me/.naby/commands/mine.md' },
+        command: { template: 'overwrite me' },
+      },
+      requestedStatus: 'enabled',
+      autoEnable: true,
+    },
+    userRow,
+  );
+  const denyStands = overrideAttempt.behavior === 'deny';
+
+  record(
+    checks,
+    `(j) [${label}] INVARIANT 7 — a NEW naby-home row arrives ENABLED (and is in the enabled-only list); no flag / vendor still disabled; a user-disabled row stays disabled across re-scans; takeover, 'removed' and the trust-order deny are unaffected`,
+    arrivesEnabled &&
+      inEnabledList &&
+      offStaysDisabled &&
+      vendorDisabled &&
+      stickyDisabled &&
+      takeoverDisabled &&
+      removedNeverGranted &&
+      denyStands,
+    `arrivesEnabled=${arrivesEnabled} inEnabledList=${inEnabledList} noFlagDisabled=${offStaysDisabled} vendorDisabled=${vendorDisabled} stickyAcrossRescans=${stickyDisabled} takeoverDisabled=${takeoverDisabled} removedNeverGranted=${removedNeverGranted} trustDenyStands=${denyStands}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // (i) the TOMBSTONE: a delete that sticks across the re-scan
 // ---------------------------------------------------------------------------
 
@@ -666,6 +792,9 @@ function runDriverChecks(checks: Check[], make: () => Store, label: string): voi
   s.close();
   s = make();
   checkRefresh(checks, s, label);
+  s.close();
+  s = make();
+  checkAutoEnable(checks, s, label);
   s.close();
   s = make();
   checkTombstone(checks, s, label);

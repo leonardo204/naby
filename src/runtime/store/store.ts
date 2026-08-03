@@ -560,6 +560,32 @@ export type HarnessImportRequest = {
    * (nothing to preserve) is unaffected.
    */
   refresh?: boolean;
+  /**
+   * THE ARRIVAL WAS USER-DRIVEN — this NEW row may land 'enabled'
+   * (harness-gate.ts invariant 7). Set ONLY by the naby-harness-home scan, and
+   * only for an artifact whose file sits under a naby harness home.
+   *
+   * WHY A FLAG RATHER THAN A CHECK IN THE GATE. The gate is pure: it has no home
+   * directory, no cwd, no settings, and giving it any of the three would make the
+   * one function that must be trivially auditable depend on the machine it runs
+   * on. So the CALLER decides eligibility (it already resolved the bases to walk
+   * them) and states it here; the gate only decides what may be done with that
+   * claim — which is deliberately narrow.
+   *
+   * WHAT IT MAY AND MAY NOT DO. It may grant 'enabled' to a row that DOES NOT
+   * EXIST YET and asked for 'enabled'. It may not touch an existing row's status
+   * (that is invariant 5's job — a re-scan can never flip a user's disable back
+   * on), it may not resurrect a tombstone (invariant 6), and it may not survive
+   * the trust-ordering deny (invariant 2).
+   *
+   * WHY IT IS SAFE HERE AND NOT FOR A VENDOR TREE. A file under `~/.naby` got
+   * there through an install the user asked for in chat — a gated, visible turn
+   * with the user's own request behind it. A `~/.claude` tree merely EXISTS on
+   * disk; nobody asked for its contents today, so an import out of it keeps
+   * arriving disabled (invariants 1/3). The distinction is the provenance of the
+   * ACTION, not of the bytes.
+   */
+  autoEnable?: boolean;
 };
 
 /** The deterministic import-gate decision (contract §4). An 'allow' may downgrade

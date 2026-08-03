@@ -11,13 +11,16 @@
 // It deliberately MIRRORS decideMemoryWrite and SHARES its trust ordering
 // (trust.ts: user > artifact > external) so the two gates cannot drift apart.
 //
-// The four load-bearing invariants (contract §4), each implemented and labelled
-// below:
+// The load-bearing invariants (contract §4 for (1)-(4); (5)-(7) were added as the
+// scan, the delete and the install flow taught us what the first four were and
+// were not saying), each implemented and labelled below:
 //
 //   (1) Imported (external) items NEVER auto-enable. `provenance.source ===
 //       'external'` ⇒ the decision is at most `hold` with status:'disabled';
 //       enabling requires an explicit user action (setHarnessEnabled). A
-//       brand-new imported set is inert until reviewed.
+//       brand-new imported set is inert until reviewed. SEE (7) for the one
+//       arrival this does not describe: a file installed into naby's OWN harness
+//       home, where the explicit user action is the chat turn that put it there.
 //   (2) Trust ordering is FIXED: user > artifact > external. A lower-tier import
 //       cannot overwrite a higher-tier ENABLED item without user action (deny).
 //   (3) External imports always land DISABLED. Where memory blocks external
@@ -47,6 +50,29 @@
 //       for one would be a way for written content to hide itself from the very
 //       review UI that is supposed to show it. (5) is unaffected — it hands back
 //       the STORED status, which only a user action can have set to 'removed'.
+//   (7) A USER-DRIVEN ARRIVAL MAY LAND ENABLED — BUT ONLY AS A NEW ROW.
+//       `req.autoEnable` says the caller has established that this artifact
+//       arrived through an install the USER ASKED FOR: it sits under a naby
+//       harness home, which is a directory nothing but naby writes and which the
+//       skill-hub chat flow only writes to after a gated, visible turn the user
+//       requested. That is a different fact from "these bytes are trustworthy",
+//       and it is the fact (1)/(3) were always standing in for: a `~/.claude`
+//       tree merely EXISTS on disk — nobody asked for it today — so an import out
+//       of one still lands disabled, and so does a set import, and so does an
+//       unknown origin. Only the caller that resolved the naby bases may set the
+//       flag, and only for artifacts read from one.
+//       ITS LIMITS ARE THE OTHER INVARIANTS, ALL OF WHICH STAND. It is checked
+//       AFTER the (2) deny (a deny is absolute) and AFTER (5) (an EXISTING row's
+//       status is the user's, and a re-scan may never restate it — a skill the
+//       user disabled stays disabled however many times the tree is walked). It
+//       applies to a row that does not exist yet, and only when the import asked
+//       for 'enabled', so (6) still holds: 'removed' was already read as
+//       'disabled' before this branch and can never be granted.
+//       IT IS ALSO KILLABLE. The flag is off unless the shell's
+//       'harness.autoEnableNabyHome' setting is on (default on); with it off, a
+//       naby-home arrival behaves exactly as it did before — disabled until
+//       reviewed. The gate does not read that setting: it is pure, and the caller
+//       states the conclusion.
 
 import type {
   HarnessImportDecision,
@@ -120,6 +146,22 @@ export function decideHarnessImport(
     existing.provenance.origin === req.item.provenance.origin
   ) {
     return { behavior: 'allow', status: existing.status };
+  }
+
+  // (7) USER-DRIVEN ARRIVAL, NEW ROW ONLY. The caller has established that this
+  // artifact's file sits under a naby harness home — a place it can only have
+  // reached through an install the user asked for — and the kill switch is on, so
+  // the requested 'enabled' is granted instead of being held for a second click
+  // the user has no way to know is needed.
+  //
+  // `existing === undefined` is the load-bearing half of the condition, and it is
+  // why this sits BELOW the refresh branch rather than above it: every path that
+  // could move an ALREADY-REVIEWED row's status has already returned by here. A
+  // row the user disabled is either refreshed (5, status carried) or, if its
+  // origin changed, a takeover that falls through to (1)/(3) and lands disabled.
+  // Neither can be turned back on by a scan.
+  if (!existing && req.autoEnable === true && requested === 'enabled') {
+    return { behavior: 'allow', status: 'enabled' };
   }
 
   // (1)+(3) EXTERNAL NEVER AUTO-ENABLES / always lands disabled. A request to
