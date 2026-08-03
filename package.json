@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -69,7 +69,8 @@
     "spike:workspace-tools": "tsx src/spikes/spike-workspace-tools.ts",
     "spike:reflection": "npm run build:runtime && tsx src/spikes/spike-reflection.ts",
     "spike:rank": "tsx src/spikes/spike-rank.ts",
-    "spike:boot-services": "npm run build:electron && tsx src/spikes/spike-boot-services.ts"
+    "spike:boot-services": "npm run build:electron && tsx src/spikes/spike-boot-services.ts",
+    "spike:hygiene": "tsx src/spikes/spike-hygiene.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",
