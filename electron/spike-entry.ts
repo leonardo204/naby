@@ -155,6 +155,14 @@ async function run(): Promise<void> {
     origin: server.origin,
   });
 
+  // -- (i) the background services `shell/server.mjs` starts ---------------
+  // Scheduled-task timers and the always-on Telegram listener were wired ONLY
+  // in the CLI server, so neither ran in Electron. This reports what the
+  // embedded boot path actually managed to start, from inside the real main
+  // process — the source assertions in spike:boot-services can only prove the
+  // call is written, not that it survives packaging and runs.
+  emit('services', { ...server.services });
+
   // -- (c) hardening ------------------------------------------------------
   // Run BEFORE the window loads, so the probes cannot be confused with the
   // window's own (legitimate) traffic.

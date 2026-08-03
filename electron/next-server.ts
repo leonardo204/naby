@@ -23,11 +23,20 @@
 //
 // It also `process.exit()`s on its single-instance check and installs signal
 // handlers that would fight Electron's own lifecycle. So we host Next ourselves
-// with the design's own pattern, and reuse the shell as the Next APP DIR plus
-// one narrow, explicit import: its WebSocket route dispatcher (see step 3
-// below). Not reusing that dispatcher is what silently killed chat — Next's own
-// upgrade handler does not know the shell's `/ws/*` routes. The shell's tree is
-// still not modified in any way.
+// with the design's own pattern, and reuse the shell as the Next APP DIR plus a
+// short, explicit list of imports from its BUILT server bundle:
+//
+//   * its WebSocket route dispatcher (step 3). Not reusing it is what silently
+//     killed chat — Next's own upgrade handler does not know `/ws/*`.
+//   * the scheduled-task manager and the Telegram chat listener (step 4). Not
+//     reusing THEM is what silently killed both features in every Electron
+//     launch: `server.mjs` was the only caller, so timers were never rebuilt and
+//     the bot never started listening. See `startBackgroundServices`.
+//
+// Picking imports off `server.mjs` one at a time is not an accident of style —
+// each one is a post-boot side effect that lives in a CLI entry file and has no
+// other home, and the pattern to follow when a third appears is the one below.
+// The shell's tree is still not modified in any way.
 //
 // PACKAGING NOTE (what this needs when it ships inside an asar)
 // This module is dev-correct today and packaging-ready in every respect but one,
@@ -79,6 +88,33 @@ type NextUpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) =
  */
 type ShellUpgradeDispatcher = (req: IncomingMessage, socket: Duplex, head: Buffer) => boolean;
 
+/** `broadcastToGlobalState` out of the same `dist/wsServer.mjs` module. */
+type ShellGlobalStateBroadcast = (payload: Record<string, unknown>) => void;
+
+/** The shape of a fired scheduled task, narrowed to what the broadcast needs. */
+type FiredScheduledTask = {
+  id: string;
+  cwd?: string;
+  tabId?: string;
+  sessionId?: string;
+};
+
+/** The bits of `dist/scheduledTasks.mjs`'s singleton this file drives. */
+type ShellScheduledTaskManager = {
+  setOnTaskFired(cb: (task: FiredScheduledTask) => void): void;
+  init(): Promise<void>;
+};
+
+/** Per-service outcome of the post-boot wiring. Reported, never thrown. */
+export type BackgroundServiceStatus = 'started' | 'failed';
+
+export type BackgroundServices = {
+  /** Scheduled tasks: timers rebuilt from disk and the WS broadcast attached. */
+  scheduledTasks: BackgroundServiceStatus;
+  /** Telegram two-way chat: the always-on getUpdates loop (no-op when off). */
+  telegramChat: BackgroundServiceStatus;
+};
+
 type NextApp = {
   prepare(): Promise<void>;
   close?(): Promise<void>;
@@ -103,6 +139,8 @@ export type EmbeddedServer = {
   /** The bound address, asserted to be loopback. */
   readonly address: string;
   readonly guard: Guard;
+  /** Outcome of the post-boot background wiring — see `startBackgroundServices`. */
+  readonly services: BackgroundServices;
   /** Idempotent. Resolves once the listener is closed and Next has shut down. */
   close(): Promise<void>;
 };
@@ -128,6 +166,101 @@ function applyWritableCacheEnv(userDataDir: string): string {
   // Unconfirmed in Next's source (design §2.3) — set, but never depended on.
   process.env.NEXT_PRIVATE_CACHE_DIR ??= cacheDir;
   return cacheDir;
+}
+
+// ---------------------------------------------------------------------------
+// Background services the SHELL's CLI server starts, and this one must too
+// ---------------------------------------------------------------------------
+//
+// THE HOLE THIS CLOSES. `shell/server.mjs` does two things after `app.prepare()`
+// that nothing else in the system does:
+//
+//   1. `scheduledTaskManager.init()` — rebuilds the timers for every saved
+//      scheduled task and attaches the `task-fired` WS broadcast.
+//   2. `startTelegramChat()` — starts the always-on Telegram getUpdates loop
+//      (telegram-chat §5), which is what makes the bot answer `/help` on a cold
+//      app rather than only after someone re-saves Telegram settings.
+//
+// The Electron app does NOT run `server.mjs` (see the file header for why), so
+// both were dead in `electron:dev` AND in the packaged artifact. The symptom for
+// Telegram was exact and reproducible: fresh app, message the bot, silence —
+// because `telegram.set` calling `ensureListener` was the only path that ever
+// woke the loop. Scheduled tasks had the SAME hole and no symptom anyone had
+// looked for yet: a task saved yesterday simply never fired today.
+//
+// WHY IT IS SAFE TO IMPORT THESE HERE — ONE STORE, NOT TWO.
+// `dist/{wsServer,scheduledTasks,telegramChat}.mjs` come out of ONE tsup build
+// with `splitting: true`, so they share their chunks: the store, the scheduled
+// singleton and the Telegram bridge state resolve to a single instance across
+// the three specifiers. That is the whole reason we import the BUILT entries
+// rather than re-resolving the TypeScript sources — a second bundling would
+// hand this process a second store and a second getUpdates loop, and two loops
+// on one bot token is the 409 trap the spec calls out. Those singletons are
+// additionally globalThis-pinned, which is what keeps THIS realm and the Next
+// bundle's realm agreeing (same argument as the WS dispatcher above).
+//
+// WHY A FAILURE IS NOT FATAL, unlike the WS dispatcher.
+// A missing dispatcher kills chat, the app's reason to exist, so it throws. A
+// missing scheduler or Telegram bundle costs a background convenience. Refusing
+// to boot over it would turn "your bot is quiet" into "your app will not open",
+// which is strictly worse. So each is tried independently, failures are logged
+// with the specifier that failed, and boot continues.
+
+async function startBackgroundServices(opts: {
+  shellDir: string;
+  broadcast: ShellGlobalStateBroadcast | undefined;
+  log: (msg: string) => void;
+}): Promise<BackgroundServices> {
+  const { shellDir, broadcast, log } = opts;
+  const services: BackgroundServices = { scheduledTasks: 'failed', telegramChat: 'failed' };
+
+  // -- scheduled tasks -------------------------------------------------------
+  try {
+    const url = pathToFileURL(join(shellDir, 'dist', 'scheduledTasks.mjs')).href;
+    const mod = (await import(url)) as { scheduledTaskManager?: ShellScheduledTaskManager };
+    const manager = mod.scheduledTaskManager;
+    if (!manager || typeof manager.init !== 'function') {
+      throw new Error(`${url} exports no usable \`scheduledTaskManager\``);
+    }
+    // Attach the broadcast BEFORE init(): init() rebuilds timers and an
+    // already-due task can fire immediately, and a fire with no callback is a
+    // task that ran while every open window was told nothing.
+    if (broadcast) {
+      manager.setOnTaskFired((task) => {
+        broadcast({
+          type: 'task-fired',
+          taskId: task.id,
+          cwd: task.cwd,
+          tabId: task.tabId,
+          sessionId: task.sessionId,
+        });
+      });
+    } else {
+      log('[services] scheduled tasks: no global-state broadcast — firing silently');
+    }
+    await manager.init();
+    services.scheduledTasks = 'started';
+    log('[services] scheduled tasks initialised');
+  } catch (err) {
+    log(`[services] scheduled tasks failed to start: ${String(err)} — continuing`);
+  }
+
+  // -- Telegram two-way chat -------------------------------------------------
+  try {
+    const url = pathToFileURL(join(shellDir, 'dist', 'telegramChat.mjs')).href;
+    const mod = (await import(url)) as { startTelegramChat?: () => void };
+    if (typeof mod.startTelegramChat !== 'function') {
+      throw new Error(`${url} exports no \`startTelegramChat\``);
+    }
+    // Never throws by contract, and is a no-op when Telegram is off or
+    // unconfigured — it logs which of the two it was.
+    mod.startTelegramChat();
+    services.telegramChat = 'started';
+  } catch (err) {
+    log(`[services] telegram chat failed to start: ${String(err)} — continuing`);
+  }
+
+  return services;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +421,10 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
   // times out. That is the bug this block fixes; it must not be able to
   // reintroduce itself quietly as a fallback.
   const wsServerUrl = pathToFileURL(join(shellDir, 'dist', 'wsServer.mjs')).href;
-  const wsServerModule = (await import(wsServerUrl)) as { handleUpgrade?: ShellUpgradeDispatcher };
+  const wsServerModule = (await import(wsServerUrl)) as {
+    handleUpgrade?: ShellUpgradeDispatcher;
+    broadcastToGlobalState?: ShellGlobalStateBroadcast;
+  };
   if (typeof wsServerModule.handleUpgrade !== 'function') {
     throw new Error(
       `shell WS dispatcher missing: ${wsServerUrl} exports no \`handleUpgrade\` — ` +
@@ -296,6 +432,19 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
     );
   }
   dispatchShellUpgrade = wsServerModule.handleUpgrade;
+
+  // ---- 4. The background services `shell/server.mjs` starts ----------------
+  //
+  // Deliberately AFTER the dispatcher is installed: a scheduled task that is
+  // already due fires during init(), and its `task-fired` broadcast is only
+  // worth anything once upgrades can be served. The broadcast comes out of the
+  // wsServer module we JUST imported, so the writer here and the socket set the
+  // dispatcher serves are the same object — no second realm of our own making.
+  const services = await startBackgroundServices({
+    shellDir,
+    broadcast: wsServerModule.broadcastToGlobalState,
+    log,
+  });
 
   log(`[server] ready on http://127.0.0.1:${port} (loopback only, token required)`);
 
@@ -305,6 +454,7 @@ export async function startEmbeddedNextServer(opts: StartOptions): Promise<Embed
     address,
     origin: `http://127.0.0.1:${port}`,
     guard,
+    services,
     async close(): Promise<void> {
       if (closed) return;
       closed = true;

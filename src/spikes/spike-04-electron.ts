@@ -28,11 +28,16 @@
 //       wrong token → 403, all correct → 200 — plus the one deliberate
 //       exemption (GET /manifest.webmanifest, which a browser can only fetch
 //       without credentials) and the three edges that keep it narrow
+//   (i) the background services `shell/server.mjs` starts — the scheduled-task
+//       manager and the always-on Telegram listener — are started by the
+//       EMBEDDED boot path too, which is where they were missing entirely
 //   (h) the outbound Happy Eyeballs attempt timeout is raised in this process,
 //       so a >250ms-RTT endpoint does not fail with `fetch failed`
 //   (d) bound to 127.0.0.1 only — NOT reachable on the machine's LAN address
 //   (e) node:sqlite works in the Electron main process and the runtime store
-//       writes a real file under userData
+//       writes a real file at the path boot() resolved — checked against a temp
+//       NABY_HOME this driver supplies, so the spike never writes to the
+//       developer's real ~/.naby/app.db
 //   (f) the process exits cleanly (no hang) and the store is closed
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
@@ -40,13 +45,27 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ENTRY = resolve(ROOT, 'dist/electron/spike-entry.mjs');
 const MARK = '##SPIKE04##';
+
+// THE SPIKE MUST NOT TOUCH THE DEVELOPER'S REAL STORE.
+//
+// `boot()` resolves the store to `~/.naby/app.db` — deliberately, so the
+// packaged app, `electron:dev` and the `cockpit` CLI all share one store — and
+// only `NABY_DB_PATH` / `NABY_HOME` (both set with `??=`) can move it. This
+// spike WRITES: it creates a session and appends a message to prove `node:sqlite`
+// works in Electron's Node build. Without an override those rows land in the real
+// database and push the developer's recent sessions down the list, which the
+// project rules forbid outright. So the driver picks a throwaway home, passes it
+// to the child, and asserts the store landed exactly there.
+const DB_SANDBOX = resolve(tmpdir(), `naby-spike04-${process.pid}-${Date.now()}`);
+const DB_PATH = resolve(DB_SANDBOX, 'app.db');
 
 /** Hard ceiling for the whole child run. A Next cold start is the slow part. */
 const RUN_TIMEOUT_MS = 180_000;
@@ -72,16 +91,18 @@ async function runElectron(): Promise<ChildOutcome> {
   // shim behaviour across platforms.
   const electronBinary = require('electron') as string;
 
+  mkdirSync(DB_SANDBOX, { recursive: true });
+
   const child = spawn(electronBinary, [ENTRY], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      // Isolate from the developer's real app data. Electron derives userData
-      // from appData + the app name, so pointing appData at a temp dir keeps the
-      // spike's SQLite file and Next cache out of ~/Library/Application Support.
-      // The spike still asserts the db lands under the app's OWN userData path,
-      // whatever that resolves to.
+      // Isolate from the developer's real store — see DB_SANDBOX above. `boot()`
+      // sets both of these with `??=`, so a value passed in here wins and the
+      // spike's session/message round trip stays in a temp directory.
+      NABY_HOME: DB_SANDBOX,
+      NABY_DB_PATH: DB_PATH,
       NODE_ENV: 'production',
       ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
     },
@@ -199,6 +220,29 @@ function evaluate(outcome: ChildOutcome): Check[] {
       : 'no `bridge` observation',
   });
 
+  // -- (i) background services started at boot -----------------------------
+  //
+  // `shell/server.mjs` starts the scheduled-task manager and the always-on
+  // Telegram listener after Next is ready. The Electron app never runs that
+  // file, so for as long as the wiring lived only there BOTH were dead in
+  // `electron:dev` and in the packaged artifact: saved scheduled tasks never
+  // fired, and the bot answered nothing until someone re-saved Telegram
+  // settings. `next-server.ts` step 4 now starts them, and this reads the
+  // outcome back out of the REAL main process — the only place the claim
+  // "it actually runs at boot" can be tested.
+  //
+  // `telegramChat: 'started'` here means the listener entry ran, not that a bot
+  // is polling: the spike's temp store has Telegram off, so the loop no-ops by
+  // design. What is being asserted is that the call site is reachable at boot.
+  const svc = findOne(obs, 'services');
+  checks.push({
+    name: '(i) embedded boot starts the shell background services (scheduled tasks + Telegram listener)',
+    pass: svc?.scheduledTasks === 'started' && svc.telegramChat === 'started',
+    evidence: svc
+      ? `scheduledTasks=${String(svc.scheduledTasks)} telegramChat=${String(svc.telegramChat)}`
+      : 'no `services` observation — the embedded server reported no background wiring',
+  });
+
   // -- (c) hardening -------------------------------------------------------
   const hardenCases: Array<{ key: string; expect: number; label: string }> = [
     { key: 'foreign-host', expect: 403, label: 'foreign Host → 403 (DNS-rebinding kill switch)' },
@@ -276,19 +320,25 @@ function evaluate(outcome: ChildOutcome): Check[] {
   });
 
   // -- (e) node:sqlite in the Electron main process ------------------------
+  // The path assertion is against the sandbox this driver HANDED the child, not
+  // against userData: `boot()` anchors the store at `~/.naby` on purpose (one
+  // store across launch modes), so "under userData" stopped being true when that
+  // decision was made, and asserting it only proved the spike was writing to the
+  // developer's real database.
   const sq = findOne(obs, 'sqlite');
   checks.push({
-    name: '(e) node:sqlite works in the Electron main process; store writes a file under userData',
+    name: '(e) node:sqlite works in the Electron main process; the store writes a real file at the path boot() resolved',
     pass:
       sq?.ok === true &&
       sq.messageCount === 1 &&
       sq.dbExists === true &&
-      sq.underUserData === true &&
+      sq.dbPath === DB_PATH &&
       typeof sq.dbBytes === 'number' &&
       sq.dbBytes > 0,
     evidence: sq
       ? sq.ok === true
-        ? `db=${String(sq.dbPath)} bytes=${String(sq.dbBytes)} messages=${String(sq.messageCount)} underUserData=${String(sq.underUserData)}`
+        ? `db=${String(sq.dbPath)} bytes=${String(sq.dbBytes)} messages=${String(sq.messageCount)} ` +
+          `isolated=${String(sq.dbPath === DB_PATH)} (expected ${DB_PATH})`
         : `store failed: ${String(sq.error)}`
       : 'no `sqlite` observation',
   });
@@ -328,6 +378,14 @@ async function main(): Promise<void> {
 
   const outcome = await runElectron();
   const checks = evaluate(outcome);
+
+  // The sandbox has served its purpose once the observations are in hand. Best
+  // effort: a leftover temp directory is not worth failing a passing spike over.
+  try {
+    rmSync(DB_SANDBOX, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 
   for (const c of checks) {
     console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}`);
