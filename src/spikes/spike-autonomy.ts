@@ -60,7 +60,12 @@ import {
   createNabySpec,
   getStore,
 } from '../../shell/packages/feature/agent/src/server/engines/naby.js';
-import { BUILTIN_PERSONA_ID } from '../runtime-entry.js';
+// The HANDLE is imported rather than typed as a literal: this spike routes to the
+// built-in agent by name, so a rename of the seed handle (2026-08-03: `persona` →
+// `naby`) must move these turns with it. Addressing a name nobody holds does not
+// fail loudly — it just runs an ordinary unrouted turn, and every assertion below
+// about the persona's settings would then be measuring the wrong thing.
+import { BUILTIN_PERSONA_ID, BUILTIN_PERSONA_NAME } from '../runtime-entry.js';
 import type {
   RunCtx,
   RunEvent,
@@ -505,7 +510,7 @@ async function main(): Promise<void> {
   growUp(BUILTIN_PERSONA_ID);
   store.setSetting('persona.autonomy.maxSteps', '3');
   store.setSetting('persona.autonomy.escalation', 'inline');
-  const { h: h9, s: s9 } = await runOnce('@persona keep working until it is done.', [
+  const { h: h9, s: s9 } = await runOnce(`@${BUILTIN_PERSONA_NAME} keep working until it is done.`, [
     toolCall('p1'),
     text('step one'),
     toolCall('p2'),
@@ -534,7 +539,7 @@ async function main(): Promise<void> {
   // Turning the setting back off restores single-turn behaviour on the very next
   // message — the setting IS the switch, with no rebuild and no row write.
   store.setSetting('persona.autonomy.maxSteps', '1');
-  const { h: h10, s: s10 } = await runOnce('@persona one more thing.', [
+  const { h: h10, s: s10 } = await runOnce(`@${BUILTIN_PERSONA_NAME} one more thing.`, [
     toolCall('p3'),
     text('answered'),
   ]);

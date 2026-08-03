@@ -17,9 +17,9 @@
 import { decideMemoryWrite } from '../memory-gate.js';
 import { decideHarnessImport } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
-// The "is this the same claim" rule (P3-M8b §5.3) lives with the type so both
-// drivers reset corroboration on exactly the same edits.
-import { sameMemoryValue } from './store.js';
+// The "is this the same claim" rule (P3-M8b §5.3) and the search-fold rule
+// (P3-M10 §4) live with the type so both drivers answer them identically.
+import { memoryMatchesSearch, sameMemoryValue } from './store.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
@@ -49,6 +49,7 @@ import type {
   PolicyRuleInput,
   Project,
   ReflectionCursor,
+  ScopedMemoryQuery,
   SessionRef,
   Store,
   TrustTier,
@@ -338,6 +339,15 @@ export class MemoryStore implements Store {
       status: fields.status,
       createdAt: existing ? existing.createdAt : now,
       updatedAt: now,
+      // P3-M10: ACCESS HISTORY SURVIVES AN UPSERT. This method rebuilds the item
+      // from scratch, so a field it forgets to carry over is silently erased —
+      // whereas the SQL driver's UPDATE simply does not name the column and
+      // therefore keeps it. Re-stating a fact you already knew is not a reason to
+      // forget when it was last used, and losing the stamp here (and only here)
+      // would make the two drivers disagree about staleness.
+      ...(existing?.lastInjectedAt !== undefined
+        ? { lastInjectedAt: existing.lastInjectedAt }
+        : {}),
     };
     this.memoryItems.set(item.id, item);
     return cloneMemory(item);
@@ -431,27 +441,119 @@ export class MemoryStore implements Store {
     }
   }
 
+  /** The scoped read FILTER, shared by `getScopedMemory` and
+   *  `countScopedMemory` so a page and its total can never disagree — the
+   *  in-memory twin of sqlite-store's `scopedMemoryFilter`. */
+  private matchesScopedQuery(
+    item: MemoryItem,
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: ScopedMemoryQuery,
+  ): boolean {
+    if (item.scope !== scope || item.scopeKey !== scopeKey) return false;
+    if (opts?.status && item.status !== opts.status) return false;
+    if (opts?.type && item.type !== opts.type) return false;
+    if (opts?.search && !memoryMatchesSearch(item, opts.search)) return false;
+    if (typeof opts?.staleBefore === 'number') {
+      // The same two conditions the SQL WHERE applies: confirmed, and last access
+      // (lastInjectedAt, falling back to updatedAt) before the cutoff.
+      if (item.status !== 'confirmed') return false;
+      if ((item.lastInjectedAt ?? item.updatedAt) >= Math.trunc(opts.staleBefore)) return false;
+    }
+    return true;
+  }
+
   getScopedMemory(
     scope: MemoryScope,
     scopeKey: string,
-    opts?: { status?: MemoryStatus },
+    opts?: ScopedMemoryQuery,
   ): MemoryItem[] {
     const out: MemoryItem[] = [];
     for (const item of this.memoryItems.values()) {
-      if (item.scope !== scope || item.scopeKey !== scopeKey) continue;
-      if (opts?.status && item.status !== opts.status) continue;
+      if (!this.matchesScopedQuery(item, scope, scopeKey, opts)) continue;
       out.push(cloneMemory(item));
     }
     // Relevance-agnostic (createdAt asc), as SqliteStore; ranking is the
     // injection step's job, not the store's.
-    return out.sort((a, b) => a.createdAt - b.createdAt);
+    out.sort((a, b) => a.createdAt - b.createdAt);
+    // Windowed only when a page was asked for — the same condition as the SQL
+    // driver, so an un-paged call returns the identical array it always did.
+    if (typeof opts?.limit !== 'number') return out;
+    const offset = typeof opts.offset === 'number' ? Math.max(0, Math.trunc(opts.offset)) : 0;
+    return out.slice(offset, offset + Math.max(0, Math.trunc(opts.limit)));
+  }
+
+  countScopedMemory(
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: Omit<ScopedMemoryQuery, 'limit' | 'offset'>,
+  ): number {
+    let n = 0;
+    for (const item of this.memoryItems.values()) {
+      if (this.matchesScopedQuery(item, scope, scopeKey, opts)) n += 1;
+    }
+    return n;
+  }
+
+  listStaleConfirmedMemory(before: number, opts?: { limit?: number }): MemoryItem[] {
+    const cutoff = Math.trunc(before);
+    const rows: MemoryItem[] = [];
+    for (const item of this.memoryItems.values()) {
+      if (item.status !== 'confirmed') continue;
+      if ((item.lastInjectedAt ?? item.updatedAt) >= cutoff) continue;
+      rows.push(cloneMemory(item));
+    }
+    // Oldest access first, as SqliteStore.
+    rows.sort(
+      (a, b) => (a.lastInjectedAt ?? a.updatedAt) - (b.lastInjectedAt ?? b.updatedAt),
+    );
+    return typeof opts?.limit === 'number'
+      ? rows.slice(0, Math.max(0, Math.trunc(opts.limit)))
+      : rows;
   }
 
   confirmMemory(id: string): void {
     const item = this.memoryItems.get(id);
     if (!item || item.status === 'confirmed') return;
+    const now = Date.now();
     item.status = 'confirmed';
-    item.updatedAt = Date.now();
+    item.updatedAt = now;
+    // P3-M10 §2.1: a confirm IS an access — a person just read the row and said
+    // yes. Stamped in the same step as the status, exactly as the SQL driver
+    // does it in one UPDATE.
+    item.lastInjectedAt = now;
+  }
+
+  updateMemoryValue(id: string, value: string, at: number = Date.now()): MemoryItem | undefined {
+    const item = this.memoryItems.get(id);
+    if (!item) return undefined;
+    const now = Math.trunc(at);
+    // Asked BEFORE the write, while the old value is still there — the same
+    // `sameMemoryValue` test putMemory applies (P3-M8b §5.3).
+    const changed = !sameMemoryValue(item.value, value);
+    item.value = value;
+    // The user typed this sentence themselves, which is what the `user` tier
+    // means (§3). The promotion is why an edited row can outrank the
+    // artifact-tier write it replaced.
+    item.provenance = { ...item.provenance, source: 'user' };
+    item.updatedAt = now;
+    item.lastInjectedAt = now;
+    // A new claim needs new evidence; a whitespace fix is the same claim.
+    if (changed) this.observations.delete(id);
+    return cloneMemory(item);
+  }
+
+  markMemoriesInjected(ids: readonly string[], at: number = Date.now()): void {
+    // Empty is a genuine no-op — see the Store interface: injection runs every
+    // turn and a turn that injected nothing must touch nothing.
+    if (ids.length === 0) return;
+    const now = Math.trunc(at);
+    for (const id of ids) {
+      const item = this.memoryItems.get(id);
+      // Silently skips an id that no longer exists, exactly as the SQL UPDATE's
+      // `WHERE id IN (...)` matches no row for one.
+      if (item) item.lastInjectedAt = now;
+    }
   }
 
   deleteMemory(sel: MemoryDeleteSelector): void {
@@ -1019,6 +1121,18 @@ export class MemoryStore implements Store {
       // client re-sending its whole pinned set cannot reshuffle the order.
       s.ref.pinnedAt = at;
     }
+  }
+
+  // -- temporary (non-learning) sessions (P3-M10 §3) -----------------------
+
+  setSessionNoLearn(sessionId: string, noLearn: boolean): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return; // no-op on a missing session, as SqliteStore
+    // Deleted rather than set to false when off, so `SessionRef` comparisons see
+    // the same shape the SQL driver produces (which only surfaces the field when
+    // the flag is on).
+    if (noLearn) s.ref.noLearn = true;
+    else delete s.ref.noLearn;
   }
 
   listPinnedSessions(): SessionRef[] {

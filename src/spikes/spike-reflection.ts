@@ -98,6 +98,14 @@ import {
   type CheckinRecord,
 } from '../runtime/growth.js';
 import { DEFAULT_USER_ID, retrieveForInjection } from '../runtime/memory-inject.js';
+// P3-M10 (memory-hygiene §2.2/§3): the decay window and the app-wide learning
+// switch, imported from the runtime so the spike drives the SAME rules the sweep
+// does rather than a second copy of them.
+import {
+  MEMORY_DECAY_REVIEW_MS,
+  staleReviewCutoff,
+  writeLearningEnabled,
+} from '../runtime/memory-hygiene.js';
 import { buildQueryOptions } from '../engines/claude-agent-sdk-engine.js';
 import type { EngineRunInput } from '../runtime/engine.js';
 import {
@@ -650,6 +658,34 @@ const proposingJudge = (memories: ReflectionMemoryCandidate[]): ReflectionJudge 
   });
 };
 
+/**
+ * A judge that answers BOTH tasks for real: it corrects when the user's own words
+ * say so (quoting them, like `honestJudge`) AND proposes memory (like
+ * `proposingJudge`), while recording every case it was shown.
+ *
+ * The P3-M10 checks need all three at once — "corrections still ran but memory
+ * did not" is only meaningful from a judge that would have done both — and the
+ * recorded cases are how (r) shows a temporary session was never put in front of
+ * the model at all, rather than merely producing nothing.
+ */
+const correctingProposingJudge = (
+  memories: ReflectionMemoryCandidate[],
+  calls: ReflectionCase[][] = [],
+): ReflectionJudge => {
+  return async (cases) => {
+    calls.push([...cases]);
+    return {
+      corrections: cases.map((c) => {
+        const evidence = c.laterUserMessages.find((m) => m.includes('undo it'));
+        return evidence
+          ? { caseId: c.caseId, corrected: true, evidenceQuote: 'undo it' }
+          : { caseId: c.caseId, corrected: false };
+      }),
+      memories,
+    };
+  };
+};
+
 function proposal(over: Partial<ReflectionMemoryCandidate> = {}): ReflectionMemoryCandidate {
   return {
     scope: 'user',
@@ -882,6 +918,161 @@ async function checkConsolidation(store: Store, label: string): Promise<void> {
       externalAfter?.status === 'proposed',
     `off: autoConfirmed=${off.autoConfirmed} statuses=${statusesWhileOff.join(',')}; ` +
       `on: autoConfirmed=${on.autoConfirmed} artifact=${artifactAfter?.status} external=${externalAfter?.status} (observed by ${externalCount} sessions)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// (r)–(t) P3-M10: the sweep and the two sovereignty switches
+// (specs/phase-3-memory-hygiene.md §2.2/§3)
+// ---------------------------------------------------------------------------
+
+/**
+ * (r) A TEMPORARY session is SKIPPED OUTRIGHT — not swept-with-the-memory-half-
+ * disabled, skipped.
+ *
+ * The distinction is the whole promise of the flag. A corrections-only pass would
+ * still read the transcript, still stamp `reviewedAt` on rows naming that session,
+ * and still advance its cursor — i.e. it would still be mining a conversation the
+ * user asked it not to mine, just less visibly. So this checks THREE things: no
+ * judge call, no memory, and no cursor write (which is what leaves the backlog
+ * intact if the user later clears the flag).
+ */
+async function checkNoLearnSessionSkipped(store: Store, label: string): Promise<void> {
+  seedCorrectedSession(store, 'sess-temp', 12_000);
+  store.setSessionNoLearn('sess-temp', true);
+  // A second, ORDINARY session, so this proves the skip is targeted rather than
+  // the sweep simply having found nothing to do.
+  seedCorrectedSession(store, 'sess-normal', 12_100);
+
+  const calls: ReflectionCase[][] = [];
+  const out = await runReflectionSweep(store, correctingProposingJudge([proposal()], calls), {
+    now: LATER(),
+    cap: 10,
+  });
+  const judgedSessions = calls.flat().map((c) => c.caseId);
+  const tempCursor = store.getReflectionCursor('sess-temp');
+  const normalCursor = store.getReflectionCursor('sess-normal');
+  const rows = userMemory(store);
+
+  record(
+    `(r) [${label}] a TEMPORARY session is skipped entirely: never judged, no cursor, nothing learned — while an ordinary session beside it is swept normally`,
+    out.skippedNoLearn === 1 &&
+      out.sweptSessions === 1 &&
+      tempCursor === undefined &&
+      normalCursor !== undefined &&
+      // Every case put to the judge came from the ordinary session.
+      judgedSessions.length > 0 &&
+      judgedSessions.every((id) => !id.includes('sess-temp')) &&
+      // The one proposal that landed is attributed to the ordinary session.
+      rows.every((m) => m.provenance.sessionId !== 'sess-temp'),
+    `skippedNoLearn=${out.skippedNoLearn} swept=${out.sweptSessions} ` +
+      `tempCursor=${String(tempCursor?.lastSeq)} normalCursor=${String(normalCursor?.lastSeq)} ` +
+      `judged=[${judgedSessions.join(',')}] memoryFrom=[${rows.map((m) => m.provenance.sessionId).join(',')}]`,
+  );
+
+  // Clearing the flag must make the session readable again — with its evidence
+  // still there, because the cursor never moved.
+  store.setSessionNoLearn('sess-temp', false);
+  const after = await runReflectionSweep(store, correctingProposingJudge([], []), {
+    now: LATER(),
+    cap: 10,
+  });
+  record(
+    `(r2) [${label}] clearing the flag hands the session back with its backlog intact (the cursor was never advanced past it)`,
+    after.skippedNoLearn === 0 &&
+      after.sweptSessions === 1 &&
+      store.getReflectionCursor('sess-temp') !== undefined,
+    `skippedNoLearn=${after.skippedNoLearn} swept=${after.sweptSessions} ` +
+      `tempCursor=${String(store.getReflectionCursor('sess-temp')?.lastSeq)}`,
+  );
+}
+
+/**
+ * (s) With `memory.learningEnabled` off the sweep still CORRECTS but proposes
+ * NOTHING — the asymmetry §3 draws. Corrections are the agent being told it got
+ * something wrong; they are not a durable fact being recorded about the user, and
+ * switching them off would blind the trust meter for no privacy gain.
+ */
+async function checkLearningOffSweep(store: Store, label: string): Promise<void> {
+  seedCorrectedSession(store, 'sess-nolearn-setting', 13_000);
+  writeLearningEnabled(store, false);
+  const out = await runReflectionSweep(store, correctingProposingJudge([proposal()]), {
+    now: LATER(),
+    cap: 10,
+  });
+  const rows = userMemory(store);
+
+  record(
+    `(s) [${label}] with learning OFF the sweep still marks corrections but writes NO memory — and does not report the proposals as "refused"`,
+    out.proposedMemories === 0 &&
+      rows.length === 0 &&
+      out.markedEvents === 1 &&
+      // Counting them as dropped would make "the user turned learning off"
+      // indistinguishable from "the guards rejected the model's proposals".
+      out.droppedCandidates === 0,
+    `proposed=${out.proposedMemories} rows=${rows.length} marked=${out.markedEvents} dropped=${out.droppedCandidates}`,
+  );
+
+  writeLearningEnabled(store, true);
+}
+
+/**
+ * (t) The STALE REVIEW derivation rides the consolidation step: it COUNTS and
+ * reports, and changes nothing. §2.2 is explicit that deletion is always a
+ * person's act — an automatic tidy-up of "memory you have not used lately" is
+ * exactly the behaviour that would make the feature untrustworthy.
+ */
+async function checkStaleReview(store: Store, label: string): Promise<void> {
+  const now = LATER();
+  const cutoff = staleReviewCutoff(now, MEMORY_DECAY_REVIEW_MS);
+
+  const stale = store.putMemory({
+    scope: 'user',
+    scopeKey: DEFAULT_USER_ID,
+    type: 'semantic',
+    key: 'forgotten-preference',
+    value: 'Something nothing has needed in a very long time.',
+    provenance: { source: 'user' },
+    confidence: 1,
+    requestedStatus: 'confirmed',
+  });
+  store.markMemoriesInjected([stale.id], cutoff - 1);
+
+  const fresh = store.putMemory({
+    scope: 'user',
+    scopeKey: DEFAULT_USER_ID,
+    type: 'semantic',
+    key: 'live-preference',
+    value: 'Something used only moments ago.',
+    provenance: { source: 'user' },
+    confidence: 1,
+    requestedStatus: 'confirmed',
+  });
+  store.markMemoriesInjected([fresh.id], now);
+
+  const out = await runReflectionSweep(store, proposingJudge([]), { now, cap: 10 });
+  const afterStale = userMemory(store).find((m) => m.id === stale.id);
+  const afterFresh = userMemory(store).find((m) => m.id === fresh.id);
+
+  record(
+    `(t) [${label}] consolidation REPORTS the stale-review queue and changes nothing — no deletion, no status change (§2.2: deletion is always a person's act)`,
+    out.staleForReview === 1 &&
+      afterStale?.status === 'confirmed' &&
+      afterStale.value === 'Something nothing has needed in a very long time.' &&
+      afterFresh?.status === 'confirmed',
+    `staleForReview=${out.staleForReview}; stale row still ${afterStale?.status} and intact; ` +
+      `fresh row ${afterFresh?.status}`,
+  );
+
+  // And "keep this" (the browser's action) takes it straight back out of the
+  // queue — the same `markMemoriesInjected` the injection step calls, because a
+  // person saying "still relevant" is at least as good a signal as a retrieval.
+  store.markMemoriesInjected([stale.id], now);
+  const kept = await runReflectionSweep(store, proposingJudge([]), { now, cap: 10 });
+  record(
+    `(t2) [${label}] "keep this" removes a row from the stale queue by stamping access`,
+    kept.staleForReview === 0,
+    `staleForReview after keepAlive = ${kept.staleForReview}`,
   );
 }
 
@@ -1330,6 +1521,16 @@ async function runDriverChecks(makeBase: () => Store, label: string): Promise<vo
   s.close();
   s = make();
   await checkConsolidation(s, label);
+  s.close();
+  // P3-M10 (§2.2/§3) — the decay queue and the two sovereignty switches.
+  s = make();
+  await checkNoLearnSessionSkipped(s, label);
+  s.close();
+  s = make();
+  await checkLearningOffSweep(s, label);
+  s.close();
+  s = make();
+  await checkStaleReview(s, label);
   s.close();
   s = make();
   await checkObservationCascade(s, label);

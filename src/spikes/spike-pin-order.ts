@@ -37,7 +37,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { MemoryStore } from '../runtime/store/memory-store.js';
-import { SqliteStore } from '../runtime/store/sqlite-store.js';
+import { SCHEMA_VERSION, SqliteStore } from '../runtime/store/sqlite-store.js';
 import type { Store } from '../runtime/store/store.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -180,8 +180,14 @@ function checkMigration(checks: Check[], dir: string): void {
   );
   record(
     checks,
-    '(e) the column is added and the version stamped',
-    cols.includes('pinned_at') && version === 7,
+    `(e) the column is added and the version stamped to the CURRENT schema (${SCHEMA_VERSION})`,
+    // Compared against SCHEMA_VERSION rather than the literal 7 this check was
+    // written with. That literal is exactly the failure the constant is exported
+    // to prevent (see sqlite-store.ts): a v6 database opened today migrates all
+    // the way to current, so the assertion started reporting a correct migration
+    // as broken the day v8 landed — and stayed red through v9 and v10, which is
+    // the other cost of a stale expectation: it stops being read.
+    cols.includes('pinned_at') && version === SCHEMA_VERSION,
     `pinned_at=${cols.includes('pinned_at')} user_version=${version}`,
   );
 

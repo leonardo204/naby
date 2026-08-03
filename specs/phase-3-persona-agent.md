@@ -2,11 +2,11 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.11.0
+version: 0.12.0
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
-related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
-updated: 2026-07-30
+related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
+updated: 2026-08-03
 ---
 
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
@@ -55,6 +55,7 @@ Agent {
 - 최초 실행 때 **built-in 페르소나 에이전트 하나를 시드로 넣는다**. **삭제도 편집도 할 수 없다**(2026-07-30 사용자 결정, §8 참조). 시드가 기본값을 강제한다 — 부팅할 때마다 저장된 행을 `BUILTIN_PERSONA_SEED`와 비교해 한 필드라도 어긋나면 시드 값으로 되돌린다. `id`와 `createdAt`만 남기므로 원장·기억·성장 이력은 그대로 붙어 있다.
   - 강제는 스토어에서 한다. `putAgent`는 kind='persona' 행에 쓰려는 모든 시도를 **throw로 거절**하고, 시드만 쓰는 `restoreBuiltinPersona`가 유일한 통로다. 셸 라우트(`agent.put`)도 같은 거절을 사람이 읽을 문장으로 먼저 답한다.
   - 페르소나 카드는 읽기 전용이다. Edit·Remove 버튼이 없고, 배지·설명·성장 패널·내보내기만 남는다.
+  - ⚠️ **2026-08-03 개정(§8.2)**: 시드의 `name`은 `naby`다. `name`이 시드 소유 필드이므로 **기존 설치의 `persona` 행은 다음 부팅의 heal이 `@naby`로 고쳐 쓴다**(id·createdAt 유지, 마이그레이션 없음). `kind='persona'`와 `BUILTIN_PERSONA_ID`는 바뀌지 않는다.
 
 ## 5. 호출 라우팅 (`@`)
 
@@ -65,6 +66,7 @@ Agent {
 ## 6. Settings 재편
 
 - **"에이전트"** 섹션을 새로 만든다. 내장 페르소나를 보여주고 추가·편집을 지원하며, **메모리(NabyMemoryReview)를 이 아래로 옮긴다**.
+  - ⚠️ **2026-08-03 개정(§8.2)**: 섹션 이름은 **'나비'/'Naby'**이고, **추가(생성) UI는 없다**. 편집은 가져온 커스텀 에이전트에만 남는다.
 - **하네스** 섹션에 **커맨드·스킬·서브에이전트 서브탭을 합친다.** 지금 따로 있는 "커맨드" 섹션을 흡수한다. 스킬은 이미 하네스에 속한다.
 - 정리된 nav: theme · language · provider · **Agents(페르소나+메모리)** · **Harness(command/skill/subagent)** · Permissions · about.
 
@@ -139,6 +141,12 @@ Agent {
   - 남음(M4c): 모델 판단이 아니라 **편집·승인 신호에서 선호를 추출**하는 루프. 전략 문서가 Phase 2b(추출·검증)에 배치했고, 북극성 지표(편집률 감소 곡선)를 실제로 움직이는 부분이다. → **P3-M8(연속 학습)로 승계** — [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
 - **P3-M9** ✅ **완료(2026-07-30)** — 페르소나 하드닝. 편집 잠금(§4) 이후 위임 비전을 실행 가능하게 만들었다: 자율 설정의 사용자 소유권 이동(`persona.autonomy.*` 설정), `@` 게이트 일원화(`isAddressable` 한 함수를 팔레트·엔진이 공유), 시드 프롬프트 운영 프로토콜 4종, 자율 루프 검증 촉구. 상세 → [`phase-3-persona-hardening`](phase-3-persona-hardening.md).
 - **P3-M8** ✅ **M8a~M8d 완료(2026-07-30)** — 연속 학습. 모든 세션의 대화록을 학습 증거로 바꾸는 루프. M8a(세션 회고 — 암묵 교정 `correctedAfter` 기록), M8b(기억 제안 + 교차 세션 확증·옵트인 자동 confirm), M8c(어휘 관련도 주입 랭킹 + 학습 깊이 패널 + 순수 대화 세션 회고), M8d(암묵 라벨 가중 편입 w=0.25 + MCP 결과성 분류)를 구현·검증했다. 남은 M8e(골든셋 재채점)는 라이브 judge 품질 실측 뒤로 보류. 상세 → [`phase-3-continuous-learning`](phase-3-continuous-learning.md).
+- **P3-M10** — 기억 위생과 주권(감쇠·주권 컨트롤·기억 브라우저). 이 문서의 범위 밖이며 상세는 [`phase-3-memory-hygiene`](phase-3-memory-hygiene.md)에 있다.
+- **P3-M11** ✅ **완료(2026-08-03)** — 나비 정체성 일원화. 내장 에이전트의 핸들을 `naby`(표시 '나비')로 바꾸고, 커스텀 에이전트 **생성** UI를 없앴다. 근거와 범위는 §8.2다.
+  - 런타임: `BUILTIN_PERSONA_NAME`을 `'naby'`로 바꾸고 시드의 자기소개 줄을 "You are naby, the user's personal agent."로 고쳤다(운영 프로토콜 4종은 그대로다). `kind='persona'`와 `BUILTIN_PERSONA_ID`는 **그대로 둔다** — 불변식과 원장·기억·성장 기록이 전부 그 둘에 걸려 있다.
+  - 이름은 **마이그레이션 없이** 부팅 시드가 옮긴다. `name`은 시드가 소유하는 필드라 기존 설치의 `persona` 행은 드리프트로 잡히고, 다음 부팅의 heal이 id와 createdAt을 유지한 채 `@naby`로 고쳐 쓴다.
+  - 셸: Settings 섹션 이름을 '나비'/'Naby'로 바꾸고(아이콘 🦋 유지), 에이전트 추가 버튼과 빈 폼을 지웠다. 편집기는 남는다 — **가져온 커스텀 에이전트는 계속 목록에 뜨고 편집·삭제된다**. 추가 버튼 자리에는 "특정 역할은 하네스 서브에이전트" 한 줄을 둔다.
+  - 검증: `spike:agents`가 이름 heal과 **충돌 양보**(사용자가 `@naby`를 이미 쥔 설치)를 두 드라이버에서 확인한다. `spike:autonomy`는 핸들을 상수에서 읽도록 고쳤다(이름이 안 맞으면 라우팅이 조용히 빠져 검사 대상이 달라진다). 셸 1275/1275, 타입체크 clean(양 트리), `build:app` exit 0.
 
 ## 8. 결정 사항 (2026-07-25 확정)
 
@@ -153,6 +161,18 @@ Agent {
   - 이전 빌드에서 이미 편집된 행은 다음 부팅의 시드가 **되돌린다**(§4). 한 기계만 계약 밖에 남는 상태를 만들지 않는다.
   - 예외 하나: 시드 이름(`persona`)을 다른 custom 에이전트가 이미 쥐고 있으면 이름만 그대로 두고 나머지를 되돌린다. 사용자가 만든 행을 건드리거나 부팅을 깨뜨리는 쪽이 더 나쁘다.
 - ✅ **구현은 새 세션에서 한다**(컨텍스트를 넉넉히 두려고). 이 문서가 착수 스펙이다.
+
+## 8.2. 결정 사항 (2026-08-03 사용자 결정)
+
+- ✅ **페르소나의 이름은 `naby`다(표시 '나비').** 이 에이전트는 제품이 담고 있는 여러 역할 중 하나가 아니라 **제품 그 자체**다. `@persona`라는 핸들은 그것을 역할 하나로 부르는 이름이었고, 설정 섹션 제목 '에이전트'도 같은 오해를 만들었다.
+  - 바뀌는 것은 **이름과 표시뿐이다.** `kind='persona'`는 타입 판별자로 그대로 두고 `BUILTIN_PERSONA_ID`도 그대로 둔다. 삭제·편집 금지(§8.1), 단일 행 불변식, 원장·기억·성장 기록이 전부 그 둘에 걸려 있어서, 이름을 옮기려고 식별자를 건드리면 잃는 것이 이름보다 크다.
+  - 기존 설치는 **부팅 heal이 옮긴다**(§4). `name`은 시드가 소유하는 필드라 `persona` 행은 드리프트로 잡히고, id와 createdAt을 유지한 채 `@naby`로 고쳐진다. 별도 마이그레이션을 쓰지 않는다.
+  - 이름 충돌 양보(§8.1)는 그대로 적용된다. 사용자가 이미 `@naby`라는 커스텀 에이전트를 쥐고 있으면 **이름만 예전 그대로 두고** 나머지를 되돌린다. 부팅을 깨뜨리거나 사용자가 만든 행의 이름을 뺏는 쪽이 더 나쁘다.
+- ✅ **커스텀 에이전트 생성 UI를 없앤다. 런타임과 임포트 호환은 유지한다.**
+  - 왜인가: 사용자가 손으로 만든 커스텀 에이전트도 **나비와 똑같은 신뢰 게이트**를 지나야 `@`로 불린다. 즉 만들자마자 알이고, 자라기 전에는 부를 수 없다. 그런데 사람들이 커스텀에 기대한 것은 "전문 역할"이고, 그 자리는 **하네스 서브에이전트**가 이미 맡고 있다. 서브에이전트는 업계 표준 용어라 그대로 쓴다.
+  - 그래서 나비 레이어의 에이전트는 **하나**다. 나비다.
+  - 없애는 것은 **생성 경로뿐이다.** `kind='custom'` 행은 런타임에 그대로 있고, 임포트는 계속 그것을 만들며, 목록·편집·삭제·성장·내보내기도 그대로 동작한다. 다른 기기에서 가져온 에이전트를 쓰지 못하게 만드는 것은 이 결정의 목적이 아니다.
+  - `agent.put` API는 그대로 둔다(페르소나 행은 여전히 거부한다). 편집이 그 API를 쓰고, 생성은 UI에서만 사라진다.
 
 ### 착수 시 남은 세부 결정 (P3-M1에서 확정)
 1. `@` 충돌 정리 규칙: **등록된 에이전트 이름 > 하네스 subagent(`@verb`) > 파일 참조**. 줄 맨 앞의 `@name`이 등록된 agent면 라우팅하고, 아니면 기존 동작을 따른다.

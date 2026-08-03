@@ -54,6 +54,20 @@ export type SessionRef = {
    * last use made them swap places the moment the user typed in one of them.
    */
   pinnedAt?: number;
+  /**
+   * THE TEMPORARY (NON-LEARNING) SESSION (Phase 3 P3-M10, memory-hygiene §3).
+   * True = nothing this conversation says is learned from: no `naby_remember`,
+   * no learning instruction, no growth observation, no check-in, and the
+   * reflection sweep skips the session entirely.
+   *
+   * Absent reads as FALSE, which is the only safe default direction: a session
+   * that predates schema v10 was learned from, and pretending otherwise would
+   * silently claim a privacy property the data never had.
+   *
+   * INJECTION IS UNTOUCHED by it — the same asymmetry as `memory.learningEnabled`
+   * (§3): "do not learn from this" is not "forget what you know".
+   */
+  noLearn?: boolean;
   /** Coarse lifecycle state, e.g. 'active' | 'ended'; absent = unknown. */
   status?: string;
 };
@@ -231,6 +245,22 @@ export type MemoryItem = {
   createdAt: number;
   /** epoch ms — enables latest-wins / supersede policy (§7-open). */
   updatedAt: number;
+  /**
+   * WHEN THIS MEMORY WAS LAST USED (Phase 3 P3-M10, memory-hygiene §2.1). Absent
+   * = never — which is the honest reading for every row written before schema
+   * v10, and the reason there is no backfill.
+   *
+   * "USED" MEANS THREE THINGS, and they are all the same thing: the injection
+   * step SELECTED it for a turn (selection IS access — the retrieval decided this
+   * memory was worth spending budget on), a person CONFIRMED it, or a person
+   * EDITED it. All three are evidence that the memory is still live.
+   *
+   * It only ever moves the DECAY signal (`memoryLastAccessAt` falls back to
+   * `updatedAt`, so the field's absence changes nothing), and decay only ever
+   * breaks a RELEVANCE TIE — see memory-inject `rankCandidates`. Nothing is ever
+   * deleted because of it (§2.2: deletion is always a person's act).
+   */
+  lastInjectedAt?: number;
 };
 
 /** A write request to the gate (contract §4). Everything a MemoryItem carries
@@ -275,6 +305,36 @@ export type InjectedMemory = {
   tokensUsed: number;
   /** count omitted PURELY due to the cap (logged, never silent). */
   droppedForBudget: number;
+};
+
+/**
+ * The store-level read filter for scoped memory (contract §6, extended
+ * ADDITIVELY by P3-M10 §4 for the memory browser).
+ *
+ * EVERY FIELD IS OPTIONAL AND EVERY OMISSION IS "no filter", so `{}` and
+ * `undefined` both mean the Phase-1.5 read. The filters COMBINE with AND; the
+ * ordering is unchanged (createdAt asc — ranking is the injection step's job).
+ */
+export type ScopedMemoryQuery = {
+  /** proposed vs confirmed; omit for both. */
+  status?: MemoryStatus;
+  /** Memory taxonomy filter; omit for all four. */
+  type?: MemoryType;
+  /** Substring of key or value, matched by `memoryMatchesSearch` (both drivers
+   *  answer it identically — see that function). Blank = no filter. */
+  search?: string;
+  /**
+   * STALE ONLY: keep just the rows that are `confirmed` AND whose last access
+   * (`lastInjectedAt`, falling back to `updatedAt`) is strictly before this epoch
+   * ms. The confirmed half is part of the filter, not an extra condition the
+   * caller adds: a `proposed` row is not "stale", it is unanswered, and mixing
+   * the two would put the review queue inside the decay queue (§2.2).
+   */
+  staleBefore?: number;
+  /** Page size. Omit for "all rows" — which is what every pre-M10 caller gets. */
+  limit?: number;
+  /** Rows to skip before the page. Ignored without a `limit`. */
+  offset?: number;
 };
 
 /** Exactly-one-selector for deleteMemory (contract §6). */
@@ -325,6 +385,36 @@ export type MemoryDeleteSelector =
 export function sameMemoryValue(a: string, b: string): boolean {
   const normalize = (s: string): string => s.replace(/\s+/g, ' ').trim();
   return normalize(a) === normalize(b);
+}
+
+/**
+ * The memory browser's SEARCH rule (P3-M10, memory-hygiene §4): does this row's
+ * key or value contain the term?
+ *
+ * ASCII-ONLY CASE FOLDING, DELIBERATELY. The SQLite driver answers this question
+ * with `LIKE`, whose default case-insensitivity covers A–Z and nothing else;
+ * JavaScript's `toLowerCase()` covers the whole Unicode range. Using the natural
+ * spelling on each side would mean a search for `İSTANBUL` matched on one driver
+ * and not on the other — the exact kind of divergence spike:f105 exists to catch,
+ * and one nobody would think to look for. So BOTH sides fold only A–Z, and this
+ * function is the statement of that rule. Korean, the other language this UI is
+ * written in, is caseless, so nothing is lost where it matters.
+ *
+ * An empty/blank term matches everything (the filter is simply off).
+ */
+export function memoryMatchesSearch(
+  item: Pick<MemoryItem, 'key' | 'value'>,
+  term: string,
+): boolean {
+  const needle = asciiFold(term.trim());
+  if (needle.length === 0) return true;
+  return asciiFold(item.key).includes(needle) || asciiFold(item.value).includes(needle);
+}
+
+/** Lowercase A–Z and leave every other code point alone — see
+ *  `memoryMatchesSearch` for why this is not `toLowerCase()`. */
+export function asciiFold(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 }
 
 export type MemoryObservation = {
@@ -914,16 +1004,82 @@ export interface Store {
 
   /** Read memory for injection/review. `status` filters proposed vs confirmed;
    * omit for all. Ordering here is relevance-agnostic (createdAt asc) — ranking
-   * happens in the injection step (§5), not the store. (Contract §6 getMemory.) */
+   * happens in the injection step (§5), not the store. (Contract §6 getMemory.)
+   *
+   * P3-M10 (memory-hygiene §4) adds the BROWSER's read shape — `type`, `search`,
+   * `staleBefore`, `limit`, `offset` — ADDITIVELY: every option is optional and
+   * omitting them all is byte-for-byte the Phase-1.5 read, which is why no
+   * existing call site changed. `countScopedMemory` answers the same filter
+   * WITHOUT the window, so a paginated list can say "51–100 of 340". */
   getScopedMemory(
     scope: MemoryScope,
     scopeKey: string,
-    opts?: { status?: MemoryStatus },
+    opts?: ScopedMemoryQuery,
   ): MemoryItem[];
 
+  /** How many rows `getScopedMemory` would return for this filter IGNORING
+   *  `limit`/`offset` — the page count behind the browser's pagination (§4).
+   *  Reads exactly the same predicate, so a filter can never mean one thing to
+   *  the list and another to its total. */
+  countScopedMemory(
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: Omit<ScopedMemoryQuery, 'limit' | 'offset'>,
+  ): number;
+
+  /** Every CONFIRMED item nobody has used since `before`, across ALL scopes —
+   *  the consolidation step's stale-review read (P3-M10 §2.2). Oldest access
+   *  first.
+   *
+   *  IT DECIDES NOTHING AND STORES NOTHING. "Stale" is DERIVED on every read from
+   *  `COALESCE(lastInjectedAt, updatedAt) < before`; there is deliberately no
+   *  stale flag in the table, because a flag would have to be maintained and a
+   *  derivation cannot go out of date. Nothing here deletes anything — the user
+   *  chooses, in the browser's "stale" filter, between deleting a row and keeping
+   *  it alive (`markMemoriesInjected`). */
+  listStaleConfirmedMemory(before: number, opts?: { limit?: number }): MemoryItem[];
+
   /** Confirm a proposed item — the ONLY path external-origin memory becomes
-   * confirmed (§4 invariant 1). No-op if already confirmed or absent. */
+   * confirmed (§4 invariant 1). No-op if already confirmed or absent.
+   *
+   * P3-M10: a confirm also STAMPS ACCESS (§2.1). A person just read this row and
+   * said yes to it, which is the strongest "still live" signal there is — without
+   * the stamp a memory could be confirmed today and count as 30 days stale
+   * tomorrow, purely because nothing had injected it yet. */
   confirmMemory(id: string): void;
+
+  /**
+   * EDIT one memory's value — the sovereignty control of P3-M10 (§3). Returns the
+   * updated row, or undefined when there is no such id.
+   *
+   * IT DOES FOUR THINGS, and each one is load-bearing:
+   *   1. writes the new value;
+   *   2. PROMOTES `provenance.source` to `'user'`. The user typing the sentence
+   *      themselves is exactly what the `user` trust tier means, so an edited row
+   *      must be able to win against the `artifact`-tier row it replaced;
+   *   3. RESETS corroboration when the value materially changed — the SAME
+   *      `sameMemoryValue` rule `putMemory` applies (P3-M8b §5.3). A new claim
+   *      needs new evidence; a whitespace fix is not a new claim;
+   *   4. STAMPS ACCESS, for the same reason `confirmMemory` does.
+   *
+   * `status` is deliberately UNTOUCHED. Editing the wording of a proposal is not
+   * agreeing to it, and quietly confirming rows as a side effect of a text change
+   * is precisely the silent promotion contract §4 invariant 1 forbids.
+   */
+  updateMemoryValue(id: string, value: string, at?: number): MemoryItem | undefined;
+
+  /**
+   * Stamp `lastInjectedAt` on these ids (P3-M10 §2.1) — "these memories were just
+   * used". Called by the injection step with what it selected, and by the
+   * browser's "keep this" action, which is the same claim made by a person.
+   *
+   * A BATCH, and an empty list is a NO-OP that touches nothing. Injection runs on
+   * every single turn, so this must cost one statement rather than one per item —
+   * and a turn that injected nothing must leave the database completely alone, or
+   * the "empty is a no-op" invariant (contract §5) would hold for the prompt and
+   * quietly fail for the store.
+   */
+  markMemoriesInjected(ids: readonly string[], at?: number): void;
 
   /** Delete one item by id, or every item matching a provenance source
    * (poisoning rollback / delete-by-source). Exactly one selector. Takes the
@@ -1254,6 +1410,14 @@ export interface Store {
 
   /** Pinned sessions, MOST-RECENTLY-USED FIRST. */
   listPinnedSessions(): SessionRef[];
+
+  // -- temporary (non-learning) sessions (P3-M10 §3) -----------------------
+
+  /** Mark this session as one nothing is learned from, or clear the mark. No-op
+   *  when the session does not exist, exactly like `setSessionPinned`. The flag
+   *  is read back through `SessionRef.noLearn` — there is no second reader, so a
+   *  caller cannot ask the question two ways and get two answers. */
+  setSessionNoLearn(sessionId: string, noLearn: boolean): void;
 
   // -- lifecycle -----------------------------------------------------------
 

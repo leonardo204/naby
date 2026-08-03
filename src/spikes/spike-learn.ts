@@ -30,6 +30,14 @@
 //   (g) The learning instruction is injected for a routed agent and absent for
 //       a plain turn.
 //
+// P3-M10 (memory-hygiene §3) adds the two SOVEREIGNTY switches to the same
+// end-to-end path, because the thing worth proving about them is not that a
+// write is refused but that the CAPABILITY is gone:
+//   (h) `memory.learningEnabled=false` removes the tool and the instruction and
+//       writes nothing — while already-confirmed memory still injects.
+//   (i) A session marked `noLearn` additionally loses `naby_checkin` and writes
+//       no growth-ledger row, and (i2) the flag does not leak to the next turn.
+//
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -50,6 +58,7 @@ import type {
   RunCtx,
   RunEvent,
 } from '../../shell/packages/feature/agent/src/server/engines/types.js';
+import { BUILTIN_PERSONA_ID, writeLearningEnabled } from '../runtime-entry.js';
 import type { MemoryItem, ModelResolver } from '../runtime-entry.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -360,6 +369,106 @@ async function main(): Promise<void> {
     "(f2) a projectless turn refuses 'project' scope and says why",
     toolResults(h7.events).some((t) => /no 'project' scope/.test(t)),
     `result: ${JSON.stringify(toolResults(h7.events).map((t) => t.slice(0, 90)))}`,
+  );
+
+  // ==== P3-M10 §3: THE TWO SOVEREIGNTY SWITCHES ============================
+  //
+  // The same production path as everything above, with one switch flipped —
+  // which is the only way to show that "learning off" removes the CAPABILITY
+  // rather than merely refusing the call. A tool the model can still see and
+  // still call, that then fails, is a turn that reads as broken; the tool has to
+  // be absent from the schema list entirely.
+
+  // (h) THE APP-WIDE SETTING. Off ⇒ no tool, no instruction, no write.
+  writeLearningEnabled(getStore(), false);
+  const rowsBeforeOff = allMemory('user', USER_KEY).length;
+  const { s: sOff } = await runOnce(
+    '@learner remember that I prefer tabs over spaces',
+    [
+      rememberCall('r5', {
+        key: 'indent-style',
+        value: 'Prefers tabs over spaces in every language.',
+        type: 'semantic',
+      }),
+      text('ok'),
+    ],
+    { cwd: TMP_DIR },
+  );
+  const rowsAfterOff = allMemory('user', USER_KEY).length;
+  record(
+    checks,
+    '(h) memory.learningEnabled=false removes naby_remember AND the learning instruction, and nothing is written',
+    !sOff.offeredTools.includes('naby_remember') &&
+      sOff.prompts.every((p) => !p.includes('LEARNING:')) &&
+      rowsAfterOff === rowsBeforeOff,
+    `tools=${JSON.stringify(sOff.offeredTools)}; instruction present in ${
+      sOff.prompts.filter((p) => p.includes('LEARNING:')).length
+    }/${sOff.prompts.length} prompts; rows ${rowsBeforeOff}→${rowsAfterOff}`,
+  );
+
+  // (h2) …but INJECTION IS UNTOUCHED (§3: "stop learning" is not "forget"). The
+  // fact confirmed in the review step above must still reach the turn.
+  record(
+    checks,
+    '(h2) with learning OFF, already-confirmed memory STILL injects — the switch stops capture, not recall',
+    sOff.prompts.some((p) => p.includes('Wants distances and weights in metric units')),
+    `prompts carrying the confirmed fact: ${
+      sOff.prompts.filter((p) => p.includes('Wants distances')).length
+    }/${sOff.prompts.length}`,
+  );
+
+  writeLearningEnabled(getStore(), true);
+
+  // (i) THE PER-SESSION FLAG. Same effect, scoped to one conversation — and it
+  // ALSO removes the check-in tool and the growth observation, which the
+  // app-wide setting deliberately does not (§3/§6).
+  const tempSessionId = getStore().createSession('mock', 'temporary').sessionId;
+  getStore().setSessionNoLearn(tempSessionId, true);
+  const ledgerBefore = getStore().listEvalEvents(BUILTIN_PERSONA_ID, {
+    sessionId: tempSessionId,
+  }).length;
+  const rowsBeforeTemp = allMemory('user', USER_KEY).length;
+  const { s: sTemp } = await runOnce(
+    'remember that I always deploy on Fridays',
+    [
+      rememberCall('r6', {
+        key: 'deploy-day',
+        value: 'Always deploys on Fridays.',
+        type: 'semantic',
+      }),
+      text('ok'),
+    ],
+    { cwd: TMP_DIR, sessionId: tempSessionId },
+  );
+  const rowsAfterTemp = allMemory('user', USER_KEY).length;
+  const ledgerAfter = getStore().listEvalEvents(BUILTIN_PERSONA_ID, {
+    sessionId: tempSessionId,
+  }).length;
+
+  record(
+    checks,
+    '(i) a TEMPORARY session gets neither naby_remember nor naby_checkin, learns nothing, and leaves NO ledger row',
+    !sTemp.offeredTools.includes('naby_remember') &&
+      !sTemp.offeredTools.includes('naby_checkin') &&
+      sTemp.prompts.every((p) => !p.includes('LEARNING:')) &&
+      rowsAfterTemp === rowsBeforeTemp &&
+      ledgerAfter === ledgerBefore,
+    `tools=${JSON.stringify(sTemp.offeredTools)}; rows ${rowsBeforeTemp}→${rowsAfterTemp}; ` +
+      `ledger rows for this session ${ledgerBefore}→${ledgerAfter}`,
+  );
+
+  // (i2) It is PER SESSION, not sticky: the very next ordinary turn learns again.
+  const { s: sAfter } = await runOnce('what units do I use?', [text('Metric.')], {
+    cwd: TMP_DIR,
+  });
+  record(
+    checks,
+    '(i2) the flag is per SESSION — the next ordinary turn has the tool and the instruction back',
+    sAfter.offeredTools.includes('naby_remember') &&
+      sAfter.prompts.some((p) => p.includes('LEARNING:')),
+    `tools=${JSON.stringify(sAfter.offeredTools)}; instruction present: ${sAfter.prompts.some((p) =>
+      p.includes('LEARNING:'),
+    )}`,
   );
 
   // ---- report -------------------------------------------------------------

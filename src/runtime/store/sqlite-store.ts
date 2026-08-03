@@ -72,6 +72,7 @@ import type {
   PolicyRuleInput,
   Project,
   ReflectionCursor,
+  ScopedMemoryQuery,
   SessionRef,
   Store,
   TrustTier,
@@ -213,7 +214,21 @@ function openSilently(path: string): DatabaseSyncType {
  * is exactly what happened when v7 landed and spike:harness started failing on
  * a lossless migration it had verified correctly.
  */
-export const SCHEMA_VERSION = 9;
+//
+// v10 (Phase 3 P3-M10) adds TWO COLUMNS and no tables
+// (specs/phase-3-memory-hygiene.md §2.1/§3): `memory_items.last_injected_at`
+// (epoch ms, NULL = never used) and `sessions.no_learn` (0/1, DEFAULT 0). Both
+// are added by `ALTER TABLE ... ADD COLUMN`, which — unlike CREATE TABLE — has no
+// IF NOT EXISTS form, so each one is gated on the COLUMN being absent rather than
+// on the version number. That is deliberate and it is what makes the migration
+// self-healing: a database that skipped versions, or one whose user_version was
+// stamped before a crash, still lands with exactly the right columns and never
+// throws "duplicate column name" on a second open. NO BACKFILL, and its absence
+// is again the honest reading rather than laziness: no row has an access history
+// we never recorded (NULL means "never used", and `memoryLastAccessAt` falls back
+// to updated_at so nothing is treated as stale for lack of data), and no existing
+// session was a non-learning one.
+export const SCHEMA_VERSION = 10;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -225,7 +240,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   cwd          TEXT,                          -- owning project (a LINK, not a key); NULL = projectless
   pinned       INTEGER NOT NULL DEFAULT 0,    -- 0/1
   pinned_at    INTEGER,                       -- WHEN it was pinned; NULL = not pinned
-  status       TEXT                           -- e.g. 'active' | 'ended'; NULL = unknown
+  status       TEXT,                          -- e.g. 'active' | 'ended'; NULL = unknown
+  no_learn     INTEGER NOT NULL DEFAULT 0     -- v10: 1 = temporary session, nothing is learned from it
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -260,11 +276,19 @@ CREATE TABLE IF NOT EXISTS memory_items (
   status            TEXT NOT NULL,   -- proposed | confirmed
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
+  last_injected_at  INTEGER,         -- v10: last USE (injected/confirmed/edited); NULL = never
   UNIQUE (scope, scope_key, key)
 );
 
 CREATE INDEX IF NOT EXISTS memory_items_by_scope ON memory_items (scope, scope_key);
 CREATE INDEX IF NOT EXISTS memory_items_by_source ON memory_items (prov_source);
+-- NOTE: the v10 memory_items_by_access index is NOT declared here. It names
+-- last_injected_at, and on an UPGRADING database this DDL runs BEFORE the ALTER
+-- that adds that column — CREATE INDEX would throw "no such column", and because
+-- the whole DDL is executed as ONE statement batch the throw would abort the
+-- migration mid-way and take every later statement with it. It is created in
+-- migrate() instead, after the column is guaranteed to exist; a fresh database
+-- gets it from that same line, so both end up identical.
 
 -- v9 (Phase 3 P3-M8b). CROSS-SESSION CORROBORATION: which distinct sessions
 -- agree with a memory item's CURRENT value (phase-3-continuous-learning §5.3).
@@ -492,6 +516,10 @@ type SessionRow = {
   // to stand in for this and could not express it — a pinned tab jumped around
   // as soon as the user typed in another one.
   pinned_at?: number | null;
+  // v10 (P3-M10). 1 = a temporary session nothing is learned from. Optional on
+  // the type for the same reason as the v3 columns: a partial SELECT, or a row
+  // read from a database mid-migration, may not carry it.
+  no_learn?: number | null;
 };
 
 function toSessionRef(row: SessionRow): SessionRef {
@@ -506,6 +534,13 @@ function toSessionRef(row: SessionRow): SessionRef {
   if (row.cwd !== null && row.cwd !== undefined) ref.cwd = row.cwd;
   if (row.pinned !== null && row.pinned !== undefined) ref.pinned = Number(row.pinned) !== 0;
   if (row.pinned_at !== null && row.pinned_at !== undefined) ref.pinnedAt = Number(row.pinned_at);
+  // v10. Surfaced ONLY when it is on: `noLearn: false` and an absent field mean
+  // the same thing everywhere that reads it (`=== true`), and leaving the field
+  // off keeps every existing SessionRef comparison — and every stored JSON
+  // snapshot of one — byte-for-byte what it was.
+  if (row.no_learn !== null && row.no_learn !== undefined && Number(row.no_learn) !== 0) {
+    ref.noLearn = true;
+  }
   if (row.status !== null && row.status !== undefined) ref.status = row.status;
   return ref;
 }
@@ -545,6 +580,9 @@ type MemoryRow = {
   status: string;
   created_at: number;
   updated_at: number;
+  // v10 (P3-M10). Epoch ms of the last USE; NULL = never used. Optional on the
+  // type because a partial SELECT (or a pre-migration read) may not carry it.
+  last_injected_at?: number | null;
 };
 
 function toMemoryItem(row: MemoryRow): MemoryItem {
@@ -567,7 +605,69 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     status: row.status as MemoryStatus,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
+    // Absent rather than null when never used (P3-M10) — `memoryLastAccessAt`
+    // reads `?? updatedAt`, and a literal null would satisfy `!== undefined`
+    // checks while being useless arithmetic.
+    ...(row.last_injected_at !== null && row.last_injected_at !== undefined
+      ? { lastInjectedAt: Number(row.last_injected_at) }
+      : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The scoped-memory read filter, as SQL (P3-M10 §4).
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the WHERE fragment + bound parameters shared by `getScopedMemory` and
+ * `countScopedMemory`.
+ *
+ * ONE BUILDER FOR BOTH, deliberately: a list and its total that computed their
+ * predicates separately would eventually disagree, and the symptom — a page
+ * saying "showing 12 of 40" while holding 12 of 12 — is the kind of bug that gets
+ * blamed on the UI for a week.
+ *
+ * `search` is matched with LIKE over key and value. The term is ESCAPED first:
+ * `%` and `_` are LIKE wildcards, so an un-escaped search for "50%" would quietly
+ * match everything containing "50". LIKE's default case-insensitivity is
+ * ASCII-only, which is exactly what `memoryMatchesSearch` implements on the
+ * in-memory side — see that function for why both sides fold only A–Z.
+ */
+function scopedMemoryFilter(
+  scope: MemoryScope,
+  scopeKey: string,
+  opts?: ScopedMemoryQuery,
+): {
+  sql: string;
+  params: (string | number)[];
+} {
+  const clauses: string[] = ['scope = ?', 'scope_key = ?'];
+  // Bound in the same order the clauses are appended — which is why the scope
+  // pair is pushed here rather than left for the caller to remember.
+  const params: (string | number)[] = [scope, scopeKey];
+  if (opts?.status) {
+    clauses.push('status = ?');
+    params.push(opts.status);
+  }
+  if (opts?.type) {
+    clauses.push('type = ?');
+    params.push(opts.type);
+  }
+  const term = opts?.search?.trim();
+  if (term) {
+    const escaped = `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    clauses.push("(key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\')");
+    params.push(escaped, escaped);
+  }
+  if (typeof opts?.staleBefore === 'number') {
+    // The `isStaleForReview` predicate, in SQL: confirmed AND last access before
+    // the cutoff. COALESCE is the `lastInjectedAt ?? updatedAt` fallback, so a
+    // pre-v10 row (last_injected_at NULL) is judged on when it was last written
+    // rather than being treated as infinitely old.
+    clauses.push("status = 'confirmed'", 'COALESCE(last_injected_at, updated_at) < ?');
+    params.push(Math.trunc(opts.staleBefore));
+  }
+  return { sql: clauses.join(' AND '), params };
 }
 
 let memoryIdCounter = 0;
@@ -852,6 +952,31 @@ export class SqliteStore implements Store {
     if (sessionCols.length > 0 && !sessionCols.some((c) => c.name === 'pinned_at')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN pinned_at INTEGER');
     }
+
+    // v?->v10 (P3-M10): the two hygiene columns. Gated on the COLUMN, not the
+    // version, for the reason spelled out at SCHEMA_VERSION — ADD COLUMN has no
+    // IF NOT EXISTS and throws on a second run, so a version-gated migration that
+    // ever half-ran would brick every subsequent open. Additive and backfill-free:
+    // `last_injected_at` is nullable ("never used", which is true) and
+    // `no_learn` carries a DEFAULT 0 ("this session was learned from", which is
+    // also true of every session that existed before the flag).
+    if (sessionCols.length > 0 && !sessionCols.some((c) => c.name === 'no_learn')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN no_learn INTEGER NOT NULL DEFAULT 0');
+    }
+    const memoryCols = this.db.prepare('PRAGMA table_info(memory_items)').all() as {
+      name: string;
+    }[];
+    if (memoryCols.length > 0 && !memoryCols.some((c) => c.name === 'last_injected_at')) {
+      this.db.exec('ALTER TABLE memory_items ADD COLUMN last_injected_at INTEGER');
+    }
+    // The stale-review index, created HERE rather than in the DDL because it names
+    // the column added just above — see the note where the other memory_items
+    // indexes are declared. IF NOT EXISTS, so it is a no-op on every later open,
+    // and unconditional, so a fresh database and an upgraded one end up identical
+    // (an upgraded install is the one with the rows that need the index).
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS memory_items_by_access ON memory_items (status, last_injected_at, updated_at)',
+    );
 
     if (current > 0 && current < 3) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN cwd TEXT');
@@ -1286,22 +1411,52 @@ export class SqliteStore implements Store {
   getScopedMemory(
     scope: MemoryScope,
     scopeKey: string,
-    opts?: { status?: MemoryStatus },
+    opts?: ScopedMemoryQuery,
   ): MemoryItem[] {
     this.assertOpen();
-    const rows = (
-      opts?.status
-        ? this.db
-            .prepare(
-              'SELECT * FROM memory_items WHERE scope = ? AND scope_key = ? AND status = ? ORDER BY created_at ASC',
-            )
-            .all(scope, scopeKey, opts.status)
-        : this.db
-            .prepare(
-              'SELECT * FROM memory_items WHERE scope = ? AND scope_key = ? ORDER BY created_at ASC',
-            )
-            .all(scope, scopeKey)
-    ) as MemoryRow[];
+    const filter = scopedMemoryFilter(scope, scopeKey, opts);
+    // LIMIT/OFFSET only when a page was ASKED for. A bare `LIMIT -1` would work
+    // in SQLite but would put a window clause on the injection path's read, and
+    // "the query is literally the one it always was" is a cheaper thing to
+    // verify than "the window happens to be unbounded".
+    const limit = typeof opts?.limit === 'number' ? Math.max(0, Math.trunc(opts.limit)) : undefined;
+    const offset =
+      typeof opts?.offset === 'number' ? Math.max(0, Math.trunc(opts.offset)) : 0;
+    const window = limit === undefined ? '' : ` LIMIT ${limit} OFFSET ${offset}`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items WHERE ${filter.sql} ORDER BY created_at ASC${window}`,
+      )
+      .all(...filter.params) as MemoryRow[];
+    return rows.map(toMemoryItem);
+  }
+
+  countScopedMemory(
+    scope: MemoryScope,
+    scopeKey: string,
+    opts?: Omit<ScopedMemoryQuery, 'limit' | 'offset'>,
+  ): number {
+    this.assertOpen();
+    const filter = scopedMemoryFilter(scope, scopeKey, opts);
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM memory_items WHERE ${filter.sql}`)
+      .get(...filter.params) as { n: number } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  listStaleConfirmedMemory(before: number, opts?: { limit?: number }): MemoryItem[] {
+    this.assertOpen();
+    // OLDEST ACCESS FIRST: the review queue should open on the memory that has
+    // been ignored longest, which is the one most likely to be genuinely dead.
+    const limit =
+      typeof opts?.limit === 'number' ? ` LIMIT ${Math.max(0, Math.trunc(opts.limit))}` : '';
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+          WHERE status = 'confirmed' AND COALESCE(last_injected_at, updated_at) < ?
+          ORDER BY COALESCE(last_injected_at, updated_at) ASC${limit}`,
+      )
+      .all(Math.trunc(before)) as MemoryRow[];
     return rows.map(toMemoryItem);
   }
 
@@ -1309,11 +1464,61 @@ export class SqliteStore implements Store {
     this.assertOpen();
     // The ONLY path external-origin memory becomes confirmed (§4 invariant 1).
     // No-op if already confirmed or absent.
+    //
+    // P3-M10: the same statement stamps ACCESS. A person just looked at this row
+    // and said yes to it — recording that in a second UPDATE would be two writes
+    // for one act, and one of them could fail alone.
+    const now = Date.now();
     this.db
       .prepare(
-        "UPDATE memory_items SET status = 'confirmed', updated_at = ? WHERE id = ? AND status = 'proposed'",
+        `UPDATE memory_items SET status = 'confirmed', updated_at = ?, last_injected_at = ?
+          WHERE id = ? AND status = 'proposed'`,
       )
-      .run(Date.now(), id);
+      .run(now, now, id);
+  }
+
+  updateMemoryValue(id: string, value: string, at: number = Date.now()): MemoryItem | undefined {
+    this.assertOpen();
+    const existing = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(id) as MemoryRow | undefined;
+    if (!existing) return undefined;
+    const now = Math.trunc(at);
+    // The SAME "is this the same claim" test putMemory applies (P3-M8b §5.3),
+    // asked BEFORE the write while the old value is still readable.
+    const changed = !sameMemoryValue(existing.value, value);
+    this.db
+      .prepare(
+        `UPDATE memory_items
+            SET value = ?, prov_source = 'user', updated_at = ?, last_injected_at = ?
+          WHERE id = ?`,
+      )
+      .run(value, now, now, id);
+    // A materially different value is a NEW claim, so the sessions that agreed
+    // with the OLD one no longer agree with anything — the identical rule, and
+    // the identical statement, as `recordMemoryObservation`'s clear. A pure
+    // whitespace/format fix keeps the evidence, because it is the same claim.
+    if (changed) {
+      this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(id);
+    }
+    const row = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(id) as MemoryRow | undefined;
+    return row ? toMemoryItem(row) : undefined;
+  }
+
+  markMemoriesInjected(ids: readonly string[], at: number = Date.now()): void {
+    this.assertOpen();
+    // NOTHING AT ALL for an empty list — not even a prepared statement. This runs
+    // on every turn, and a turn that injected no memory must leave the database
+    // untouched (contract §5's no-op invariant, extended to writes).
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db
+      .prepare(
+        `UPDATE memory_items SET last_injected_at = ? WHERE id IN (${placeholders})`,
+      )
+      .run(Math.trunc(at), ...ids);
   }
 
   deleteMemory(sel: MemoryDeleteSelector): void {
@@ -2320,6 +2525,18 @@ export class SqliteStore implements Store {
       )
       .all() as SessionRow[];
     return rows.map(toSessionRef);
+  }
+
+  // -- temporary (non-learning) sessions (P3-M10 §3) -----------------------
+
+  setSessionNoLearn(sessionId: string, noLearn: boolean): void {
+    this.assertOpen();
+    // No-op on a missing session, exactly like setSessionPinned: the UI can only
+    // reach this through a tab that has one, and an UPDATE matching no row is the
+    // right shape for "there is nothing to mark".
+    this.db
+      .prepare('UPDATE sessions SET no_learn = ? WHERE session_id = ?')
+      .run(noLearn ? 1 : 0, sessionId);
   }
 
   // -- lifecycle -----------------------------------------------------------

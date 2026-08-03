@@ -32,6 +32,17 @@
 //   (h) End to end: `queryText` reaches the turn's SYSTEM field through runTurn,
 //       and a turn that supplies none is byte-for-byte the turn it always was.
 //
+// P3-M10 ADDS A SECOND TIER to the same chain (memory-hygiene §2.2), and the
+// same argument applies to it one level down — decay must break ties without
+// ever overturning relevance:
+//   (i) A stale memory loses a relevance TIE to a fresh one, even when recency
+//       alone would have put it first.
+//   (j) A stale memory still WINS on relevance: matching the turn beats being
+//       recent. This is the invariant that keeps decay from becoming amnesia.
+//   (k) A uniformly fresh (or uniformly stale, or history-less) population ranks
+//       exactly as it did before M10 — the tier is structurally absent when it
+//       has nothing to distinguish, and the ceiling still holds.
+//
 // NO NETWORK, NO KEYS. Temp dir only; the real ~/.naby/app.db is never touched.
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
@@ -279,6 +290,117 @@ function checkNoSignalIsIdentical(): void {
 }
 
 // ---------------------------------------------------------------------------
+// (i)–(k) THE FRESHNESS TIER (P3-M10, memory-hygiene §2.2)
+//
+// M10 inserts one comparison into this chain: relevance → FRESHNESS → scope →
+// type → recency. The risk it introduces is the same one M8c introduced, one
+// layer down — a tier that only sometimes helps must never overturn the
+// comparison ABOVE it. So the checks below are, in order: it works, it never
+// outranks relevance, and it disappears entirely when it has nothing to say.
+// ---------------------------------------------------------------------------
+
+const M10_NOW = 1_800_000_000_000;
+const M10_DAY = 86_400_000;
+
+function checkFreshnessTier(): void {
+  // Identical relevance (neither shares a word with the query), identical scope
+  // and type. They differ ONLY in access history — and the stale one is the row
+  // the OLD comparator would have put first, because its `updatedAt` is newer.
+  // So nothing except the freshness tier can produce the expected order.
+  const staleButNewer = item({
+    id: 'stale-newer',
+    key: 'archived-runbook',
+    value: 'The 2019 incident runbook lives in the wiki.',
+    updatedAt: 9_000_000_000_000,
+    lastInjectedAt: M10_NOW - 200 * M10_DAY,
+  });
+  const freshButOlder = item({
+    id: 'fresh-older',
+    key: 'current-runbook',
+    value: 'The on-call rota is in the team handbook.',
+    updatedAt: 1_000,
+    lastInjectedAt: M10_NOW - M10_DAY,
+  });
+  const rows = [staleButNewer, freshButOlder];
+
+  const ranked = selectMemoryForInjection(rows, 1_000, undefined, M10_NOW);
+  // The pre-M10 answer, for contrast: recency put the stale one first.
+  const oldOrder = ids(rankTheOldWay(rows));
+
+  record(
+    '(i) a STALE memory loses a relevance tie to a fresh one, even though recency alone would have put it first',
+    ids(ranked.items) === 'fresh-older,stale-newer' && oldOrder === 'stale-newer,fresh-older',
+    `M10 order=${ids(ranked.items)}; pre-M10 order=${oldOrder}`,
+  );
+
+  // THE INVARIANT THAT MATTERS MOST: relevance is still decided FIRST. A stale
+  // memory that genuinely answers the turn must beat a fresh one that does not —
+  // otherwise decay would have made the agent forget things it had written down,
+  // which is a strictly worse failure than the one decay exists to fix.
+  const staleRelevant = item({
+    id: 'stale-relevant',
+    key: 'postgres-migrations',
+    value: 'Runs database migrations with sqitch before deploying postgres changes.',
+    updatedAt: 1_000,
+    lastInjectedAt: M10_NOW - 400 * M10_DAY,
+  });
+  const freshIrrelevant = item({
+    id: 'fresh-irrelevant',
+    key: 'coffee-order',
+    value: 'Takes an oat flat white in the afternoon, never after six.',
+    updatedAt: 9_000,
+    lastInjectedAt: M10_NOW,
+  });
+  const contested = [freshIrrelevant, staleRelevant];
+  const budget = budgetForOne(contested);
+  const withQuery = selectMemoryForInjection(
+    contested,
+    budget,
+    'can you run the postgres migrations for this deploy?',
+    M10_NOW,
+  );
+
+  record(
+    '(j) RELEVANCE STILL WINS: a 400-day-stale memory that matches the turn takes the budget from a fresh irrelevant one',
+    withQuery.items.length === 1 &&
+      withQuery.items[0]?.id === 'stale-relevant' &&
+      withQuery.droppedForBudget === 1,
+    `injected=${ids(withQuery.items)} dropped=${withQuery.droppedForBudget}`,
+  );
+
+  // AND IT VANISHES WHEN IT IS UNIFORM. Every row equally fresh, or every row
+  // equally stale, means the tier returns 0 for every pair and the comparator
+  // falls straight through to the Phase-1.5 order — the same structural
+  // fallback M8c's relevance has, checked the same way.
+  const base = population();
+  const expected = ids(rankTheOldWay(base));
+  const allStale = base.map((r) => ({ ...r, lastInjectedAt: M10_NOW - 300 * M10_DAY }));
+  const allFresh = base.map((r) => ({ ...r, lastInjectedAt: M10_NOW - 1_000 }));
+  // No access history at all — every pre-v10 row, judged on `updatedAt`. These
+  // fixtures are stamped in 1970, so they are uniformly stale.
+  const noHistory = selectMemoryForInjection(base, 1_000_000, undefined, M10_NOW);
+
+  record(
+    '(k) a UNIFORMLY fresh or uniformly stale population ranks byte-for-byte as it did pre-M10 (60 rows, colliding timestamps)',
+    ids(selectMemoryForInjection(allStale, 1_000_000, undefined, M10_NOW).items) === expected &&
+      ids(selectMemoryForInjection(allFresh, 1_000_000, undefined, M10_NOW).items) === expected &&
+      ids(noHistory.items) === expected,
+    `allStale=${ids(selectMemoryForInjection(allStale, 1_000_000, undefined, M10_NOW).items) === expected} ` +
+      `allFresh=${ids(selectMemoryForInjection(allFresh, 1_000_000, undefined, M10_NOW).items) === expected} ` +
+      `noAccessHistory=${ids(noHistory.items) === expected}`,
+  );
+
+  // The budget is still a hard ceiling with the tier in play — freshness changes
+  // WHICH memory wins a contested budget, never how much of it is spent.
+  const tight = selectMemoryForInjection(base, 200, undefined, M10_NOW);
+  record(
+    '(k2) the freshness tier cannot breach the HARD token ceiling',
+    tight.tokensUsed <= 200 && tight.items.length + tight.droppedForBudget === base.length,
+    `tokensUsed=${tight.tokensUsed}/200 kept=${tight.items.length} dropped=${tight.droppedForBudget} of ${base.length}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // (e) Hangul
 // ---------------------------------------------------------------------------
 
@@ -487,6 +609,7 @@ async function main(): Promise<boolean> {
   checkRelevanceWins();
   checkTieFallsBack();
   checkNoSignalIsIdentical();
+  checkFreshnessTier();
   checkHangul();
   for (const [label, make] of [
     ['MemoryStore', () => new MemoryStore()],

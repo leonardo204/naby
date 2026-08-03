@@ -197,6 +197,23 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       injectOpts.orgId = opts.memoryInjection.orgId;
     const injected = retrieveForInjection(store, query, injectOpts);
     effectiveSystem = composeSystemWithMemory(opts.system, injected);
+    // -- ACCESS RECORDING (P3-M10, memory-hygiene §2.1) --------------------
+    //
+    // SELECTION IS ACCESS. The retrieval above just decided these particular
+    // memories were worth spending this turn's budget on; that decision is the
+    // usage signal decay is measured against, and this is the only place in the
+    // codebase that holds it. Recording it anywhere else would mean either a
+    // second retrieval or a caller who can forget — which is the same reasoning
+    // that put corroboration inside `putMemory` rather than at its call sites.
+    //
+    // IT RIDES THE EXISTING INJECTION-LOG POINT, one line above the callback that
+    // already reports what was injected, so the two can never describe different
+    // sets. An empty injection writes NOTHING (the store's own guard), which is
+    // what keeps a no-memory turn byte-for-byte AND write-for-write a Phase-1
+    // turn.
+    if (injected.items.length > 0) {
+      store.markMemoriesInjected(injected.items.map((item) => item.id));
+    }
     // Record what was injected (item ids, tokensUsed, droppedForBudget) so a
     // bad injection is auditable and memory hit rate is computable.
     opts.onMemoryInjection?.(injected);

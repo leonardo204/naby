@@ -188,11 +188,35 @@ export type {
   // agree with a memory item's CURRENT value. Written by putMemory, never by a
   // caller; reset when the value materially changes.
   MemoryObservation,
+  // The scoped-memory read filter (Phase 3 P3-M10) — status/type/search/stale
+  // plus the limit/offset window the memory browser pages with.
+  ScopedMemoryQuery,
 } from './runtime/store/store.js';
 // The "is this the same claim" test corroboration resets on. Exported because a
 // caller that needs to predict whether a write will clear the evidence (the
 // review UI, a spike) must ask the same question the store asks.
 export { sameMemoryValue } from './runtime/store/store.js';
+// P3-M10 — the browser's search rule. Exported for the same reason: a caller
+// filtering rows it already holds must fold case exactly as the store does.
+export { asciiFold, memoryMatchesSearch } from './runtime/store/store.js';
+
+// Phase 3 P3-M10 — MEMORY DECAY + SOVEREIGNTY (specs/phase-3-memory-hygiene.md
+// §2/§3). Pure rules with no clock of their own: the shell reads the learning
+// switch and combines it with a session's `noLearn` through the SAME
+// `canCaptureMemory` predicate the spikes drive, and the reflection sweep derives
+// its stale-review queue from the SAME cutoff the API's filter uses.
+export {
+  canCaptureMemory,
+  isMemoryStale,
+  isStaleForReview,
+  MEMORY_DECAY_REVIEW_MS,
+  MEMORY_LEARNING_ENABLED_KEY,
+  MEMORY_STALE_MS,
+  memoryLastAccessAt,
+  readLearningEnabled,
+  staleReviewCutoff,
+  writeLearningEnabled,
+} from './runtime/memory-hygiene.js';
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 

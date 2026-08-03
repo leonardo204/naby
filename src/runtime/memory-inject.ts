@@ -26,6 +26,11 @@
 // (embedding relevance is §8-open). The fallback is structural, not incidental —
 // see `rankCandidates`.
 
+// P3-M10 ADDS A FRESHNESS TIER to the tie-break chain (memory-hygiene §2.2). The
+// staleness rule itself lives in memory-hygiene.ts — it is asked by the review
+// queue and the browser filter too, and three copies of "how old is too old" is
+// three places for the answer to drift.
+import { isMemoryStale, MEMORY_STALE_MS } from './memory-hygiene.js';
 import type {
   InjectedMemory,
   MemoryInjectionQuery,
@@ -156,35 +161,68 @@ function comparePrecedence(a: MemoryItem, b: MemoryItem): number {
 }
 
 /**
- * Rank candidates: most RELEVANT to this turn first, with the Phase-1.5
- * precedence order (scope → type → recency) breaking every exact tie.
+ * Rank candidates: most RELEVANT to this turn first, then FRESH before STALE,
+ * with the Phase-1.5 precedence order (scope → type → recency) breaking every
+ * remaining tie.
  *
  * THE FALLBACK IS STRUCTURAL, NOT INCIDENTAL, and that is the point. There is no
  * "did the query help?" branch to get wrong: when `queryText` is absent the score
  * map is EMPTY, and when no candidate shares a word with the turn every lookup
- * returns the same 0. Either way `scoreB - scoreA` is 0 for every pair, the
- * comparator falls through to `comparePrecedence` for every pair, and the result
- * is the array the old code produced — byte for byte, because `Array#sort` is
- * stable (ES2019) so even genuinely equal elements keep their input order.
+ * returns the same 0. Either way `scoreB - scoreA` is 0 for every pair and the
+ * comparator falls through — as it did before relevance existed. `Array#sort` is
+ * stable (ES2019), so genuinely equal elements keep their input order.
  *
  * Which is the guarantee contract §5 needs: a turn that relevance cannot help is
  * not made worse than it was, and the scope-precedence invariant still decides
- * every tie.
+ * every tie relevance and freshness both leave open.
+ *
+ * WHERE FRESHNESS SITS, AND WHY EXACTLY THERE (P3-M10, memory-hygiene §2.2).
+ * It is the SECOND comparison, never the first. The order of the two is the whole
+ * design decision:
+ *
+ *   * RELEVANCE FIRST means a stale memory that genuinely answers this turn still
+ *     beats a fresh one that does not. Demoting it would trade the "confidently
+ *     wrong from an old fact" failure for the strictly worse "did not know a fact
+ *     it has written down" one.
+ *   * FRESHNESS SECOND means decay decides only what was otherwise ARBITRARY —
+ *     two memories the turn matches equally well, or (on a query-less turn) every
+ *     memory at once. That is where a month-dead fact was previously winning
+ *     budget on nothing but scope order.
+ *
+ * It is a BOOLEAN tier, not a decaying weight: `stale` or not. A continuous decay
+ * curve would let accumulated age out-argue a relevance difference somewhere, and
+ * "somewhere" is not a property anyone can check. A tier cannot, by construction.
+ *
+ * `now` is a parameter rather than a `Date.now()` call so the ordering is a pure
+ * function of its inputs and a spike can pin it.
  */
-function rankCandidates(items: readonly MemoryItem[], queryText?: string): MemoryItem[] {
+function rankCandidates(
+  items: readonly MemoryItem[],
+  queryText?: string,
+  now: number = Date.now(),
+): MemoryItem[] {
   const queryTokens = new Set(tokenizeForRelevance(queryText ?? ''));
   const scores = new Map<string, number>();
-  // An empty query token set scores nothing, so the map stays empty and the sort
-  // below is exactly the pre-M8c sort.
+  // An empty query token set scores nothing, so the map stays empty and the
+  // relevance comparison below is a constant 0 for every pair.
   if (queryTokens.size > 0) {
     for (const item of items) {
       const score = relevanceScore(queryTokens, item);
       if (score > 0) scores.set(item.id, score);
     }
   }
+  // Computed once per item rather than inside the comparator: a comparator runs
+  // O(n log n) times and this is a subtraction, but more importantly it must
+  // answer identically for the same item every time it is asked — a `Date.now()`
+  // read inside the comparison could flip an answer mid-sort and produce an
+  // inconsistent ordering, which V8 is entitled to turn into anything at all.
+  const stale = new Map<string, boolean>();
+  for (const item of items) stale.set(item.id, isMemoryStale(item, now, MEMORY_STALE_MS));
   return [...items].sort((a, b) => {
     const relevance = (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0);
     if (relevance !== 0) return relevance;
+    const freshness = Number(stale.get(a.id) ?? false) - Number(stale.get(b.id) ?? false);
+    if (freshness !== 0) return freshness; // fresh (false=0) before stale (true=1)
     return comparePrecedence(a, b);
   });
 }
@@ -196,19 +234,25 @@ function rankCandidates(items: readonly MemoryItem[], queryText?: string): Memor
  * dropped and counted. `tokensUsed` is the summed cost of the included item
  * lines and is ALWAYS ≤ tokenBudget.
  *
- * `queryText` is the turn's own words (P3-M8c). Omit it and the ranking is the
- * pre-M8c one; the BUDGET half is untouched either way, so relevance changes
- * WHICH memory wins a contested budget and never how much of it is spent.
+ * `queryText` is the turn's own words (P3-M8c). Omit it and relevance ranks
+ * nothing; the BUDGET half is untouched either way, so relevance changes WHICH
+ * memory wins a contested budget and never how much of it is spent — and the same
+ * is true of the P3-M10 freshness tier, which is why neither can breach the hard
+ * ceiling.
+ *
+ * `now` (P3-M10) is what staleness is measured against; it defaults to the clock
+ * and exists so a spike can make a memory 40 days old without waiting.
  */
 export function selectMemoryForInjection(
   candidates: readonly MemoryItem[],
   tokenBudget: number,
   queryText?: string,
+  now: number = Date.now(),
 ): InjectedMemory {
   const budget = Math.max(0, Math.floor(tokenBudget));
   // Only confirmed memory injects (contract §5).
   const confirmed = candidates.filter((c) => c.status === 'confirmed');
-  const ranked = rankCandidates(confirmed, queryText);
+  const ranked = rankCandidates(confirmed, queryText, now);
 
   const items: MemoryItem[] = [];
   let tokensUsed = 0;
@@ -266,12 +310,13 @@ export function gatherCandidates(
 export function retrieveForInjection(
   store: Store,
   query: MemoryInjectionQuery,
-  opts?: { userId?: string; orgId?: string },
+  opts?: { userId?: string; orgId?: string; now?: number },
 ): InjectedMemory {
   return selectMemoryForInjection(
     gatherCandidates(store, query, opts),
     query.tokenBudget,
     query.queryText,
+    opts?.now ?? Date.now(),
   );
 }
 

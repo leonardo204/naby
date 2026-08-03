@@ -58,6 +58,17 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
   check('seed creates the persona', persona.id === BUILTIN_PERSONA_ID);
   check('persona is kind=persona', persona.kind === 'persona');
   check('persona default name', persona.name === BUILTIN_PERSONA_NAME);
+  // Pinned to the LITERAL, not just to the constant (2026-08-03 user decision):
+  // the handle is part of the product's identity, so a rename has to be a
+  // deliberate edit here rather than something a constant quietly carries.
+  check('the built-in handle is @naby', persona.name === 'naby');
+  check(
+    'the seed identifies itself as naby',
+    persona.systemPrompt.startsWith('You are naby, the user\'s personal agent.'),
+  );
+  // The KIND did NOT move with the name: every invariant (undeletable,
+  // uneditable, single-row) keys on kind='persona', and so does the engine.
+  check('the kind discriminator is still persona', persona.kind === 'persona');
   check('persona memoryScope=user', persona.memoryScope === 'user');
   check('seed idempotent (still one agent)', (seedBuiltinPersona(store), store.listAgents().length === 1));
 
@@ -140,10 +151,16 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
   // edited, so the seed must write it back — through the one door the store
   // opens for it. Driven here with `restoreBuiltinPersona` standing in for that
   // older build's edit, then healed by an ordinary `seedBuiltinPersona`.
+  //
+  // The drifted row is named `persona` on purpose (2026-08-03): that is the handle
+  // EVERY install made before the rename carries, so this is not a synthetic edit
+  // — it is the upgrade path itself. `name` is a seeded field, so the ordinary
+  // boot heal renames the row to `@naby` in place. No migration exists because
+  // none is needed.
   const beforeDrift = store.getAgent(BUILTIN_PERSONA_ID)!;
   store.restoreBuiltinPersona({
     id: BUILTIN_PERSONA_ID,
-    name: 'aria',
+    name: 'persona',
     kind: 'persona',
     description: 'hand-edited',
     systemPrompt: 'edited by an older build',
@@ -181,6 +198,11 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
     healed.systemPrompt.includes('Escalate ONLY genuinely critical or irreversible'),
   );
   check('seed restored the name', healed.name === BUILTIN_PERSONA_NAME);
+  // Stated as the migration it is: a pre-rename row comes out of boot as @naby,
+  // and the old handle stops resolving.
+  check('an old @persona row is renamed to @naby on boot', healed.name === 'naby');
+  check('the old handle no longer resolves', store.getAgentByName('persona') === undefined);
+  check('the new handle resolves to the same row', store.getAgentByName('naby')?.id === BUILTIN_PERSONA_ID);
   check('seed restored the description', healed.description === BUILTIN_PERSONA_SEED.description);
   check('seed restored memoryScope', healed.memoryScope === 'user');
   check('seed restored autonomy', healed.autonomy.escalation === 'inline' && healed.autonomy.maxSteps === undefined);
@@ -196,6 +218,25 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
     const again = seedBuiltinPersona(store);
     return again.updatedAt === healed.updatedAt && store.listAgents().length === 2;
   })());
+
+  // THE CONCESSION (2026-08-03). The rename above is a heal, and a heal must not
+  // damage data the user made. Drive the one case where it would: an install whose
+  // persona is still `@persona` and whose user already made a custom `@naby`.
+  // Taking the handle back would throw on the unique-name invariant — i.e. break
+  // boot — so the seed restores everything EXCEPT the name.
+  store.restoreBuiltinPersona({ ...BUILTIN_PERSONA_SEED, name: 'persona', systemPrompt: 'drifted again' });
+  const squatter = store.putAgent(customAgent('naby'));
+  const conceded = seedBuiltinPersona(store);
+  check('name collision does not break boot', conceded.id === BUILTIN_PERSONA_ID);
+  check('collision keeps the handle the user holds', store.getAgentByName('naby')?.id === squatter.id);
+  check('collision leaves the persona on its old handle', conceded.name === 'persona');
+  // What actually governs behaviour is still restored — the concession is about a
+  // handle, not about letting a drifted prompt stand.
+  check('collision still restores the prompt', conceded.systemPrompt === BUILTIN_PERSONA_SEED.systemPrompt);
+  store.removeAgent(squatter.id);
+  const renamedLater = seedBuiltinPersona(store);
+  check('the rename lands once the handle frees up', renamedLater.name === 'naby');
+  check('collision minted no extra row', store.listAgents().length === 2);
 
   // Custom agent IS deletable.
   store.removeAgent(drafter.id);

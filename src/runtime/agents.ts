@@ -39,8 +39,15 @@ export const BUILTIN_PERSONA_ID = 'agent-persona-builtin';
 
 /** The `@name` the built-in persona is addressed by. It is part of the seed, so
  *  it is what the persona is called; the only way it differs is the collision
- *  corner described on `seedBuiltinPersona`. */
-export const BUILTIN_PERSONA_NAME = 'persona';
+ *  corner described on `seedBuiltinPersona`.
+ *
+ *  2026-08-03 (user decision): the handle is `naby` — the persona IS the product,
+ *  not a role the product hosts, and `@persona` named it as if it were one of
+ *  several. Specialist roles are harness subagents; there is exactly one naby
+ *  agent. Only the NAME moved: `kind='persona'` stays as the type discriminator
+ *  every invariant keys on, and so does BUILTIN_PERSONA_ID, so no install loses
+ *  its ledger, memory or growth history over a rename. */
+export const BUILTIN_PERSONA_NAME = 'naby';
 
 /** The seed row for the built-in persona. Deliberately conservative: no tool
  *  restriction (inherits the turn's toolset), memory scoped to the user (so what
@@ -64,9 +71,9 @@ export const BUILTIN_PERSONA_SEED: AgentInput = {
   id: BUILTIN_PERSONA_ID,
   name: BUILTIN_PERSONA_NAME,
   kind: 'persona',
-  description: 'Your personal persona agent — learns how you decide and acts on your behalf.',
+  description: 'naby — your personal agent. Learns how you decide and acts on your behalf.',
   systemPrompt: [
-    'You are the user\'s personal persona agent inside naby.',
+    'You are naby, the user\'s personal agent.',
     'Your job is to act ON THE USER\'S BEHALF: carry out delegated work the way',
     'they would, using what you have learned about their judgment, preferences and',
     'style (provided to you as injected memory).',
@@ -151,14 +158,20 @@ export function builtinPersonaMatchesSeed(agent: Agent, seed: AgentInput): boole
  *      row keeps its id and createdAt, so its ledger, memory and growth history
  *      all stay attached.
  *
+ * THE HEAL IS ALSO THE RENAME CHANNEL (2026-08-03). Every install made before the
+ * handle became `naby` holds a row named `persona`, which `builtinPersonaMatchesSeed`
+ * reads as drift (`name` is a seeded field) — so the ordinary boot heal renames it
+ * to `@naby` in place, keeping id, createdAt and therefore its whole history. No
+ * migration is needed and none is written.
+ *
  * THE ONE CONCESSION, and it is about not damaging the user's own data. Restoring
- * the seed restores the seed NAME, and an old install could have renamed the
- * persona to `@aria` and then created a custom agent called `@persona`. Taking
- * that name back would either throw (breaking boot) or require renaming an agent
- * the user made. Neither is worth it for a handle, so in that one case the row is
- * restored in full EXCEPT its name, which stays as the user left it. Everything
- * that governs behaviour — the prompt, the scope, the autonomy — is still the
- * seed's.
+ * the seed restores the seed NAME, and a user could already hold a custom agent
+ * called `@naby` (or, before this rename, `@persona`). Taking that name back would
+ * either throw (breaking boot) or require renaming an agent the user made. Neither
+ * is worth it for a handle, so in that one case the row is restored in full EXCEPT
+ * its name, which stays as the user left it — a pre-rename install simply keeps
+ * `@persona`. Everything that governs behaviour — the prompt, the scope, the
+ * autonomy — is still the seed's.
  */
 export function seedBuiltinPersona(store: Store): Agent {
   const existing = store.getAgent(BUILTIN_PERSONA_ID);
