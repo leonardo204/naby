@@ -2,16 +2,16 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian)
 type: design
-version: 0.2.0
+version: 0.4.0
 status: active
 scope: 사내 표준 MCP(skill-hub, mcp-atlassian)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
-related: [phase-3-persona-agent, phase-1_6-harness-ownership]
-updated: 2026-07-31
+related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone]
+updated: 2026-08-03
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian)
 
-> 상태: 설계 확정(2026-07-31, 0.2.0에서 Atlassian 추가·레지스트리로 일반화). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
+> 상태: 설계 확정(2026-08-03, 0.4.0에서 §2.5 이중 스캔 규칙을 폐기하고 naby 단일 베이스로 개정). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
 
 ## 1. 배경과 원칙
 
@@ -49,7 +49,19 @@ updated: 2026-07-31
 - secret 필드는 텔레그램 관례(빈 입력은 유지, 새 값만 교체, 저장값 미표시). username 같은 비밀 아닌 필드는 저장값을 보여준다.
 - 에이전트가 `naby_add_mcp`로 같은 이름을 제안하면 프리셋 행이 proposed 상태와 승인 버튼을 보여준다(기존 `mcp.approve` 재사용).
 
-### 2.5 바꾸지 않는 것
+### 2.5 naby 하네스 홈 — 설치는 벤더 디렉터리가 아니라 내 자산 디렉터리로 (0.4.0에서 개정)
+
+skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르므로, 모델이 스킬을 **벤더 디렉터리**에 설치한다. naby의 철학("기억과 하네스를 벤더 밖 내 자산으로")과 어긋나고, dev-claude 엔진에서는 SDK 네이티브 로드와 naby 주입이 같은 파일을 이중 전달하는 비대칭도 있다. 해법은 셋이다.
+
+- **naby 하네스 홈 신설**: `~/.naby/{skills,commands,agents}`(user)과 `<cwd>/.naby/{skills,commands,agents}`(project). 이 위치의 파일은 어떤 엔진에서도 SDK가 직접 읽지 않으므로 **모든 엔진에서 전달 경로가 naby 스토어 하나**가 된다(D4 import-then-own의 대칭적 완성).
+- **스캔은 naby 홈 하나뿐이다**(0.4.0 개정). 0.3.0의 "이중 스캔"은 폐기한다 — 목록 스캔은 `.claude`를 읽지 않는다. `.claude`는 **명시적 가져오기 버튼 안에서만** 읽고, 읽는 순간 아티팩트를 naby 홈으로 **복사**해 `provenance.origin`을 naby 경로로 기록한다(벤더 경로는 감사용 `importedFrom`에만 남는다). 이름이 겹치면 **naby 홈이 이긴다** — 벤더 사본은 건너뛰고 요약에 보고한다. 근거와 전체 계획은 [하네스 단독 소유](harness-standalone.md) §2.1·§2.2에 있다.
+- **설치 유도 지침**: skill-hub MCP가 이 턴에 연결돼 있을 때만, 턴 시스템 조립(`turnSystem`)에 한 줄을 넣는다 — 스킬/커맨드/서브에이전트를 설치할 때는 `~/.claude`가 아니라 naby 하네스 홈에 설치하라, 설치 안내가 `~/.claude`를 가리키면 경로만 치환하라. 기존 지침 주입 관례(능력과 짝지어진 조건부 주입)를 그대로 따른다.
+
+이 지침은 0.4.0에서 **더 중요해진다**. 이제 목록 스캔이 `.claude`를 보지 않으므로, 모델이 벤더 디렉터리에 설치한 스킬은 사용자가 가져오기를 누르기 전까지 나타나지 않는다. 지침이 목적지를 naby 홈으로 돌려놓는 것이 첫 번째 방어선이고, 가져오기 버튼은 이미 잘못 설치된 것을 회수하는 두 번째 수단이다.
+
+신뢰 규칙은 그대로다: naby 홈의 파일도 모델이 쓴 외부 콘텐츠이므로 `external`로 임포트되어 disabled로 도착하고, 사람이 활성화해야 산다.
+
+### 2.6 바꾸지 않는 것
 
 - MCP 로더·게이트·정책·스킬 주입·엔진 경로는 무변경. 연결되면 도구는 기존 경로로 자동 노출되고, `readOnlyHint` 없는 skill-hub 도구는 결과적(consequential)으로 집계된다(M8d fail-closed 그대로).
 - 토큰 암호화(vault 승격)는 하지 않는다. `app.db` 암호화 미결(전략 §7.2)과 함께 다룰 일이다.
