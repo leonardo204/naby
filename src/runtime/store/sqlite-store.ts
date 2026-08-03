@@ -376,7 +376,7 @@ CREATE TABLE IF NOT EXISTS harness_items (
   kind              TEXT NOT NULL,   -- command | skill | subagent
   name              TEXT NOT NULL,   -- verb / skill / subagent name (upsert target within scope+kind)
   description       TEXT,
-  status            TEXT NOT NULL,   -- enabled | disabled (imported => disabled)
+  status            TEXT NOT NULL,   -- enabled | disabled | removed (imported => disabled; removed = user-deleted tombstone, no migration: free-text column, no CHECK)
   prov_source       TEXT NOT NULL,   -- user | artifact | external (trust tier)
   prov_origin       TEXT,            -- '~/.claude/...' | 'set:name@ver' (rollback)
   prov_format       TEXT,            -- claude-skill-md | claude-agent-md | claude-command-md | naby
@@ -639,9 +639,18 @@ type HarnessRow = {
   updated_at: number;
 };
 
-/** The payload JSON as stored — exactly the three optional kind-specific fields
- * of HarnessItem (one populated). */
-type HarnessPayload = Pick<HarnessItem, 'command' | 'skill' | 'subagent'>;
+/** The payload JSON as stored — the three optional kind-specific fields of
+ * HarnessItem (one populated), plus `importedFrom`.
+ *
+ * WHY importedFrom RIDES IN THE JSON. It is an audit-only string added by
+ * harness-standalone §2.1, and nothing queries or indexes it — so it earns a
+ * JSON key, not a column. Adding a column would mean an ALTER on a table shipped
+ * installations already have; the payload column is already free-form and
+ * forward-compatible, which is the same trick eval_events uses for its
+ * kind-specific fields. A row written before this existed simply has no key. */
+type HarnessPayload = Pick<HarnessItem, 'command' | 'skill' | 'subagent'> & {
+  importedFrom?: string;
+};
 
 function toHarnessItem(row: HarnessRow): HarnessItem {
   const provenance: HarnessProvenance = { source: row.prov_source as HarnessTrust };
@@ -653,6 +662,8 @@ function toHarnessItem(row: HarnessRow): HarnessItem {
     provenance.importedAt = Number(row.prov_imported_at);
 
   const payload = JSON.parse(row.payload) as HarnessPayload;
+  if (typeof payload.importedFrom === 'string' && payload.importedFrom.length > 0)
+    provenance.importedFrom = payload.importedFrom;
 
   const item: HarnessItem = {
     id: row.id,
@@ -673,16 +684,20 @@ function toHarnessItem(row: HarnessRow): HarnessItem {
   return item;
 }
 
-/** Extract just the kind-specific payload for JSON storage. */
+/** Extract the JSON-stored slice: the kind-specific payload plus the audit-only
+ *  `provenance.importedFrom` (see HarnessPayload for why it lives here). */
 function harnessPayloadOf(item: {
   command?: HarnessItem['command'];
   skill?: HarnessItem['skill'];
   subagent?: HarnessItem['subagent'];
+  provenance?: HarnessProvenance;
 }): HarnessPayload {
   const payload: HarnessPayload = {};
   if (item.command !== undefined) payload.command = item.command;
   if (item.skill !== undefined) payload.skill = item.skill;
   if (item.subagent !== undefined) payload.subagent = item.subagent;
+  if (item.provenance?.importedFrom !== undefined)
+    payload.importedFrom = item.provenance.importedFrom;
   return payload;
 }
 
@@ -1571,10 +1586,21 @@ export class SqliteStore implements Store {
   setHarnessEnabled(id: string, enabled: boolean): void {
     this.assertOpen();
     // The ONLY path an imported (external) item becomes enabled (§4 invariant 1).
-    // No-op if absent.
+    // No-op if absent. An explicit toggle also LEAVES the 'removed' tombstone —
+    // that is the restore action (store.ts setHarnessEnabled).
     this.db
       .prepare('UPDATE harness_items SET status = ?, updated_at = ? WHERE id = ?')
       .run(enabled ? 'enabled' : 'disabled', Date.now(), id);
+  }
+
+  setHarnessStatus(id: string, status: HarnessStatus): void {
+    this.assertOpen();
+    // The tombstone path. `status` is a TEXT column with no CHECK constraint, so
+    // 'removed' needs no migration — an older build reading such a row simply
+    // sees a status it never treats as enabled, which is the safe direction.
+    this.db
+      .prepare('UPDATE harness_items SET status = ?, updated_at = ? WHERE id = ?')
+      .run(status, Date.now(), id);
   }
 
   removeHarness(sel: HarnessRemoveSelector): void {

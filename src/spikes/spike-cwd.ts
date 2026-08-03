@@ -122,10 +122,33 @@ function runStructural(): void {
     )}`,
   });
 
+  // INVERTED at harness-standalone §2.3, and the inversion is the assertion.
+  // This check used to PASS on ['user','project','local'] — naby loading the
+  // user's and the project's `.claude` settings, CLAUDE.md and hooks into every
+  // dev-engine turn. A standalone app loads none of them: naby's own injection is
+  // the single path anything reaches the model by. `[]` is the SDK's documented
+  // way to say so ("Pass [] to disable filesystem settings").
   checks.push({
-    name: "A2. settingSources is set EXPLICITLY to ['user','project','local']",
-    pass: JSON.stringify(withCwd.settingSources) === JSON.stringify(['user', 'project', 'local']),
-    evidence: `query() options carry settingSources=${JSON.stringify(withCwd.settingSources)}`,
+    name: 'A2. settingSources is [] — UNCONDITIONALLY, for every turn',
+    pass:
+      JSON.stringify(withCwd.settingSources) === '[]' &&
+      JSON.stringify(withoutCwd.settingSources) === '[]',
+    evidence: `with cwd: settingSources=${JSON.stringify(withCwd.settingSources)}; ` +
+      `without cwd: settingSources=${JSON.stringify(withoutCwd.settingSources)}`,
+  });
+
+  // The other half of §2.3: the SDK's own skill/command loaders are off, so a
+  // file under `~/.claude/skills` cannot reach a turn natively either.
+  checks.push({
+    name: 'A5. native skills are empty-listed and the Skill/SlashCommand tools are denied',
+    pass:
+      JSON.stringify(withCwd.skills) === '[]' &&
+      (withCwd.disallowedTools ?? []).includes('Skill') &&
+      (withCwd.disallowedTools ?? []).includes('SlashCommand') &&
+      (withCwd.disallowedTools ?? []).includes('AskUserQuestion'),
+    evidence: `skills=${JSON.stringify(withCwd.skills)} disallowedTools=${JSON.stringify(
+      withCwd.disallowedTools,
+    )}`,
   });
 
   checks.push({
@@ -138,10 +161,15 @@ function runStructural(): void {
     } (process.cwd()=${JSON.stringify(process.cwd())})`,
   });
 
+  // `tools` is UNSET, deliberately — and this check was stale for a whole release
+  // asserting the opposite. Setting `tools: []` stripped every built-in executor
+  // (Task, Read, delegation), so the harness could not run and its activity could
+  // not be shown; safety comes from the PreToolUse gate + the Phase-1 floor
+  // instead, which sees every built-in call including those inside a subagent.
   checks.push({
-    name: 'A4. tools stays [] — built-ins are NOT re-enabled (gate is permissive)',
-    pass: Array.isArray(withCwd.tools) && withCwd.tools.length === 0,
-    evidence: `query() options carry tools=${JSON.stringify(withCwd.tools)}`,
+    name: 'A4. tools is UNSET — built-ins stay live, and the GATE is what restrains them',
+    pass: withCwd.tools === undefined,
+    evidence: `query() options carry tools=${JSON.stringify(withCwd.tools)} (undefined = unset)`,
   });
 
   rmSync(PROBE_DIR, { recursive: true, force: true });
@@ -196,8 +224,17 @@ async function runEmpirical(): Promise<void> {
       return;
     }
 
+    // WHAT THIS PROVES, AND WHAT IT NO LONGER PROVES. The token exists in exactly
+    // one file, inside DIR. A model that answers it was working in DIR — which is
+    // the original bug this spike exists for (the engine ran in the Electron main
+    // process's cwd, not the opened project).
+    //
+    // It is no longer evidence that CLAUDE.md was AUTO-LOADED: since
+    // harness-standalone §2.3 `settingSources: []` stops that, and the gate here
+    // allows reads, so the model reaches the file the ordinary way — by reading
+    // it. Directory, not harness inheritance, is the claim.
     checks.push({
-      name: `B1. the model read CLAUDE.md from the cwd we named (token ${TOKEN})`,
+      name: `B1. the turn ran in the directory we named — its CLAUDE.md was reachable (token ${TOKEN})`,
       pass: text.includes(TOKEN),
       evidence: `cwd=${DIR}; model answered ${JSON.stringify(text.slice(0, 200))}`,
     });
@@ -216,12 +253,17 @@ async function runEmpirical(): Promise<void> {
 // belonging to some other project could fire into our loop and leave no trace
 // anywhere. That is precisely how the wrong-`.claude/` bug stayed hidden.
 //
-// The probe installs a real project hook in the temp cwd (reachable only
-// because `cwd` and `settingSources:'project'` now agree), fires a turn, and
+// The probe installs a real project hook in the temp cwd, fires a turn, and
 // asserts a `harness` event comes out. It also asserts the event is a LABEL and
 // not the hook's text: the hook prints a canary string, and that string must
 // NOT appear anywhere in the emitted event, because hook output is arbitrary
 // project content and this ends up in the UI.
+//
+// SINCE harness-standalone §2.3 THE PLANTED HOOK IS ALSO THE NEGATIVE CONTROL.
+// `settingSources: []` means a project's `.claude/settings.json` is not loaded,
+// so that hook must NEVER RUN — and C3 says so empirically, which is the one
+// claim in this file that a structural assertion cannot make. (C1 stands on the
+// other harness message types the loop used to drop; it never needed the hook.)
 
 async function runHarnessProbe(): Promise<void> {
   const CANARY = `CANARY-${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -276,6 +318,17 @@ async function runHarnessProbe(): Promise<void> {
       name: 'C2. the hook body is NOT leaked into the harness event (label only)',
       pass: !serialized.includes(CANARY),
       evidence: `hook printed ${CANARY}; emitted harness events=${serialized.slice(0, 300)}`,
+    });
+
+    // The whole point of §2.3, measured rather than argued: a project hook that
+    // WOULD have fired (and did, before this change — the events carried
+    // `system/hook_started` / `system/hook_response`) does not fire at all.
+    const hookSubtypes = harness.map((h) => h.subtype).filter((s) => s.includes('hook'));
+    checks.push({
+      name: "C3. the project's `.claude` HOOK never ran — settingSources:[] holds empirically",
+      pass: hookSubtypes.length === 0,
+      evidence: `hook-related harness subtypes=${JSON.stringify(hookSubtypes)} (must be empty); ` +
+        `planted ${join(DIR, '.claude', 'settings.json')}`,
     });
   } finally {
     rmSync(DIR, { recursive: true, force: true });

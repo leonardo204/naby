@@ -634,7 +634,16 @@ export class MemoryStore implements Store {
     const item = this.harnessItems.get(id);
     if (!item) return; // no-op if absent
     // The ONLY path an imported (external) item becomes enabled (§4 invariant 1).
+    // An explicit toggle also LEAVES the 'removed' tombstone — the restore path.
     item.status = enabled ? 'enabled' : 'disabled';
+    item.updatedAt = Date.now();
+  }
+
+  setHarnessStatus(id: string, status: HarnessStatus): void {
+    const item = this.harnessItems.get(id);
+    if (!item) return; // no-op if absent
+    // The tombstone path (status:'removed'); see store.ts setHarnessStatus.
+    item.status = status;
     item.updatedAt = Date.now();
   }
 

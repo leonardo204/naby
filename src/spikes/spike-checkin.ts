@@ -378,8 +378,10 @@ const TAKE_RECOMMENDED = (q: CheckinQuestion): CheckinAnswer => ({ chosen: q.rec
     onStderr: () => {},
   });
   const disallowed = opts.disallowedTools ?? [];
-  // `tools` must STAY unset — denying one built-in is not an excuse to strip the
-  // harness (Task / Skill / Read), which is what `tools: []` used to do.
+  // `tools` must STAY unset — denying individual built-ins by name is not an
+  // excuse to strip the harness wholesale (Task / Read / Glob), which is what
+  // `tools: []` used to do. The named denials are AskUserQuestion (this check)
+  // plus the two vendor-artifact loaders (harness-standalone §2.3).
   const builtinsStillLive = (opts as { tools?: unknown }).tools === undefined;
   record(
     '(l) the native AskUserQuestion is disallowed, so naby_checkin is the only way to ask',

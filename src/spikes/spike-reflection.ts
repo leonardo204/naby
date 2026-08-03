@@ -386,11 +386,16 @@ async function checkJudgeUnavailable(store: Store, label: string): Promise<void>
  * verified by nobody: WHAT THE ENGINE ASKS THE SDK FOR.
  *
  * The trap being pinned: "give it no cwd" does NOT mean "it loads no harness".
- * The SDK documents `cwd` as defaulting to `process.cwd()`, and `settingSources`
- * is set unconditionally — so a judge call that merely omits `cwd` would load the
- * CLAUDE.md, settings and HOOKS of whatever directory the Electron main process
- * happens to sit in (naby's own checkout, in development) into a background call
- * the user never made and cannot see. `isolated` is what actually prevents it.
+ * The SDK documents `cwd` as defaulting to `process.cwd()`, so a judge call that
+ * merely omits `cwd` would load the CLAUDE.md, settings and HOOKS of whatever
+ * directory the Electron main process happens to sit in (naby's own checkout, in
+ * development) into a background call the user never made and cannot see.
+ *
+ * This used to be bought with an `isolated: true` the judge passed and a turn did
+ * not. Since harness-standalone §2.3 there is no flag: `settingSources: []` is
+ * unconditional, so the judge and the user's turn are isolated by the same line.
+ * The assertion below therefore checks BOTH — a regression that re-enabled
+ * setting sources for turns would otherwise sail past a judge-only check.
  */
 function checkHeadlessJudgeIsolation(): void {
   const input = {
@@ -407,21 +412,25 @@ function checkHeadlessJudgeIsolation(): void {
     abortController: new AbortController(),
     onStderr: () => {},
   };
-  const headless = buildQueryOptions({ input, ...other, isolated: true });
+  const headless = buildQueryOptions({ input, ...other });
   const turn = buildQueryOptions({ input, ...other });
 
   record(
-    '(aa) the headless judge loads NO setting sources, while an ordinary turn still loads all three',
+    '(aa) NEITHER the headless judge NOR an ordinary turn loads any setting source',
     JSON.stringify(headless.settingSources) === '[]' &&
-      JSON.stringify(turn.settingSources) === JSON.stringify(['user', 'project', 'local']) &&
+      JSON.stringify(turn.settingSources) === '[]' &&
       // No cwd is named either way here — which is exactly why settingSources had
       // to be the lever: absent cwd silently becomes process.cwd().
       headless.cwd === undefined &&
       // Isolation is not a licence: the gate hook and the disallowed native
       // ask-the-user tool are unchanged on the background path.
       headless.hooks !== undefined &&
-      (headless.disallowedTools ?? []).includes('AskUserQuestion'),
+      (headless.disallowedTools ?? []).includes('AskUserQuestion') &&
+      // …and the native skill/command loaders are denied on both paths too.
+      JSON.stringify(headless.skills) === '[]' &&
+      (headless.disallowedTools ?? []).includes('Skill'),
     `headless settingSources=${JSON.stringify(headless.settingSources)} cwd=${String(headless.cwd)} ` +
+      `skills=${JSON.stringify(headless.skills)} ` +
       `disallowedTools=${JSON.stringify(headless.disallowedTools)}; turn settingSources=${JSON.stringify(turn.settingSources)}`,
   );
 }

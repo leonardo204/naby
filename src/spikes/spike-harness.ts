@@ -28,6 +28,15 @@
 //       enabled stays enabled, one they disabled stays disabled. A refresh of a
 //       row that does not exist, or one whose origin differs (a takeover of the
 //       name), is gated as the fresh external import it is and lands disabled.
+//   (i) THE TOMBSTONE (status:'removed', v1.8.2). An item whose FILE naby cannot
+//       delete — a row imported before harness-standalone §2.1 made importing a
+//       copy, or one whose unlink was refused — that the
+//       user deleted keeps its row, marked removed, because the file behind it is
+//       not naby's to unlink and dropping the row let the next scan re-import it
+//       as a brand-new disabled item. The status persists in both drivers, is
+//       invisible to every enabled-only read, is carried through a content
+//       refresh, never exports, and is restorable — and the gate never GRANTS it
+//       (invariant 6): an import asking for 'removed' is read as 'disabled'.
 //   (f) EXPORT -> IMPORT round-trip. Export a scope's ENABLED items as a
 //       HarnessSet; import into another scope lands EVERYTHING disabled, with
 //       origin 'set:<name>@<ver>'; item-level id selection imports a subset; a
@@ -382,6 +391,96 @@ function checkRefresh(checks: Check[], store: Store, label: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// (i) the TOMBSTONE: a delete that sticks across the re-scan
+// ---------------------------------------------------------------------------
+
+/**
+ * status:'removed' is what makes a delete survive scan-on-list. The file behind
+ * an imported `.claude` item is not naby's to unlink, so deleting the ROW alone
+ * left the artifact on disk and the next list re-imported it as a fresh disabled
+ * row (the v1.8.2 report: A, B, C deleted, then back below D…Z). The row is kept
+ * instead, marked removed, and the gate carries that through a refresh exactly
+ * like enabled/disabled.
+ *
+ * Proven here, against both drivers, because the claim is about STORAGE (a status
+ * value that round-trips through a TEXT column with no migration) as much as
+ * about the gate.
+ */
+function checkTombstone(checks: Check[], store: Store, label: string): void {
+  const ORIGIN = '/home/me/.claude/skills/review/SKILL.md';
+
+  const first = store.putHarnessItem(refreshReq('review', ORIGIN, 'body v1', false));
+  store.setHarnessEnabled(first.id, true);
+
+  // The user deletes it. The file is the vendor's, so the row is tombstoned.
+  store.setHarnessStatus(first.id, 'removed');
+  const stored = store.getHarnessItem(first.id);
+  const persisted = stored?.status === 'removed';
+
+  // Inert everywhere an item participates: enabled-only reads no longer see it.
+  const enabledGone = !store
+    .listHarness('user', USER, { status: 'enabled' })
+    .some((it) => it.id === first.id);
+  // …and it is addressable by its own status filter (the review UI's chip).
+  const listable = store
+    .listHarness('user', USER, { status: 'removed' })
+    .some((it) => it.id === first.id);
+
+  // THE RE-SCAN. Edited content, so the walk actually writes: the body updates
+  // and the tombstone survives (gate invariant 5).
+  const rescanned = store.putHarnessItem(refreshReq('review', ORIGIN, 'body v2', true));
+  const survivedRefresh =
+    rescanned.id === first.id &&
+    rescanned.status === 'removed' &&
+    rescanned.skill?.instructions === 'body v2';
+  // Exactly one row: a second, fresh row is the bug itself.
+  const noDuplicate = store.listHarness('user', USER, { kind: 'skill' }).length === 1;
+
+  // Export never serializes a tombstone (it reads enabled only).
+  const exported = store.exportHarnessSet('user', USER, { name: 'x', version: '1.0' });
+  const notExported = !exported.items.some((it) => it.id === first.id);
+
+  // RESTORE: any explicit toggle leaves the removed state, landing disabled.
+  store.setHarnessEnabled(first.id, false);
+  const restored = store.getHarnessItem(first.id)?.status === 'disabled';
+  // …and the next re-scan keeps it there rather than re-tombstoning it.
+  const restoreSticks =
+    store.putHarnessItem(refreshReq('review', ORIGIN, 'body v3', true)).status === 'disabled';
+
+  // (6) 'removed' IS NEVER GRANTED BY THE GATE. An import that ASKS for a
+  // tombstone — the way content could hide itself from the review UI — is read
+  // as 'disabled'.
+  const askedForRemoved = decideHarnessImport({
+    item: {
+      scope: 'user',
+      scopeKey: USER,
+      kind: 'command',
+      name: 'sneaky',
+      provenance: { source: 'user' },
+      command: { template: 'x' },
+    },
+    requestedStatus: 'removed',
+  });
+  const neverGranted =
+    askedForRemoved.behavior === 'allow' && askedForRemoved.status === 'disabled';
+
+  record(
+    checks,
+    `(i) [${label}] TOMBSTONE: a deleted vendor item stays removed across a content re-scan (no duplicate row, never exported, restorable), and the gate never GRANTS 'removed'`,
+    persisted &&
+      enabledGone &&
+      listable &&
+      survivedRefresh &&
+      noDuplicate &&
+      notExported &&
+      restored &&
+      restoreSticks &&
+      neverGranted,
+    `persisted=${persisted} enabledGone=${enabledGone} listable=${listable} survivedRefresh=${survivedRefresh} noDuplicate=${noDuplicate} notExported=${notExported} restored=${restored} restoreSticks=${restoreSticks} neverGranted=${neverGranted}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // (f) export -> import round-trip
 // ---------------------------------------------------------------------------
 
@@ -567,6 +666,9 @@ function runDriverChecks(checks: Check[], make: () => Store, label: string): voi
   s.close();
   s = make();
   checkRefresh(checks, s, label);
+  s.close();
+  s = make();
+  checkTombstone(checks, s, label);
   s.close();
   s = make();
   checkRoundTrip(checks, s, label);

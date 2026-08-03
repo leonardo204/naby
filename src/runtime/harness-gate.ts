@@ -30,17 +30,29 @@
 //       (1)+(3); asserted in the harness spike.)
 //   (5) A CONTENT REFRESH of an item the user already reviewed preserves that
 //       row's status. `req.refresh` marks a re-read of the SAME file at the SAME
-//       origin (the local `.claude` re-scan); it may restate the body, never the
+//       origin (the naby harness home re-scan); it may restate the body, never the
 //       trust decision. This is not a hole in (1)/(3): a refresh only ever hands
 //       back the STORED status, which nothing but setHarnessEnabled can have set,
 //       and a brand-new row has no stored status to preserve so it still lands
 //       disabled. A different origin claiming the same identity is a takeover,
 //       not a refresh, and is gated normally (lands disabled).
+//       THE TOMBSTONE RIDES THIS SAME RULE. A row the user deleted while its
+//       source file stayed on disk is stored 'removed' (store.ts HarnessStatus),
+//       and a refresh carries THAT through exactly like enabled/disabled — which
+//       is what stops the re-scan of an edited artifact naby could not delete from
+//       resurrecting a deletion. It is carried, never granted: see (6).
+//   (6) 'removed' IS NEVER GRANTED, ONLY CARRIED. No import may REQUEST a
+//       tombstone: `requestedStatus:'removed'` is read as 'disabled'. A tombstone
+//       is a user action recorded by setHarnessStatus; an import that could ask
+//       for one would be a way for written content to hide itself from the very
+//       review UI that is supposed to show it. (5) is unaffected — it hands back
+//       the STORED status, which only a user action can have set to 'removed'.
 
 import type {
   HarnessImportDecision,
   HarnessImportRequest,
   HarnessItem,
+  HarnessStatus,
 } from './store/store.js';
 // The trust ordering (user > artifact > external) is factored into trust.ts and
 // SHARED with the memory write-gate (memory-gate.ts) — the two gates rank
@@ -63,7 +75,12 @@ export function decideHarnessImport(
   const source = req.item.provenance.source;
   // A missing requestedStatus defaults to the SAFE choice, 'disabled' — the
   // contract's "imported items default 'disabled'" (§3/§4).
-  const requested = req.requestedStatus ?? 'disabled';
+  //
+  // (6) An explicit 'removed' is read as 'disabled': a tombstone is a user
+  // action (setHarnessStatus), never something an import may ask for. Written
+  // here, once, so every branch below sees a requestable status.
+  const asked = req.requestedStatus ?? 'disabled';
+  const requested: HarnessStatus = asked === 'removed' ? 'disabled' : asked;
 
   // (2) TRUST ORDERING — a lower-tier import may not overwrite an ENABLED
   // higher-tier item without an explicit user action. (A same-or-higher tier
@@ -91,6 +108,11 @@ export function decideHarnessImport(
   // kind,name) is a takeover of that name, not a refresh of that item, and must
   // be gated as the new import it is. An existing row with no recorded origin has
   // nothing to match, so it likewise falls through.
+  //
+  // `existing.status` is handed back WHATEVER it is — enabled, disabled, or the
+  // 'removed' tombstone. Carrying the tombstone is the point: the re-scan of an
+  // artifact the user deleted (whose file naby does not own, so it is still on
+  // disk) restates its body and leaves it deleted.
   if (
     req.refresh &&
     existing &&

@@ -259,6 +259,27 @@ type QueryOptions = NonNullable<Parameters<AgentSdk['query']>[0]['options']>;
  * shell's viewer still renders them; nothing here rewrites the past.
  */
 export const NATIVE_ASK_USER_QUESTION_TOOL = 'AskUserQuestion';
+
+/**
+ * The SDK built-in that RUNS AN ON-DISK SKILL — the loader for
+ * `~/.claude/skills/<name>/SKILL.md` and friends. Denied outright
+ * (harness-standalone §2.3).
+ *
+ * naby's skills do not arrive through it. They are imported into the store,
+ * reviewed, enabled, and then INJECTED AS TEXT into the turn's system field
+ * (`runtime/skill-inject.ts`) — the same way on every engine. So the only thing
+ * this tool could add is a second, engine-specific path that loads files naby
+ * neither owns nor gated: the exact asymmetry §2.3 exists to end.
+ */
+export const NATIVE_SKILL_TOOL = 'Skill';
+
+/**
+ * The SDK built-in that RUNS AN ON-DISK SLASH COMMAND (`~/.claude/commands/*.md`).
+ * Denied for the same reason as `Skill`: naby owns commands as store rows and
+ * expands them ABOVE the engine seam (`lib/slashCommands`), so a vendor
+ * command file has no route into a naby turn.
+ */
+export const NATIVE_SLASH_COMMAND_TOOL = 'SlashCommand';
 type SdkMcpServer = ReturnType<AgentSdk['createSdkMcpServer']>;
 
 /**
@@ -281,23 +302,6 @@ export function buildQueryOptions(args: {
   preToolUse: HookCallback;
   abortController: AbortController;
   onStderr: (data: string) => void;
-  /**
-   * HEADLESS MODE — for a call that is not a user's turn.
-   *
-   * A background caller (the reflection judge) asks the model one question and
-   * reads one JSON answer. It has no project, no cwd worth naming, and no reason
-   * to inherit a harness. Omitting `cwd` is NOT enough to get that: the SDK
-   * documents `cwd` as defaulting to `process.cwd()`, and `settingSources` below
-   * is set unconditionally — so an "absent cwd" call would silently load the
-   * CLAUDE.md, settings and HOOKS of whatever directory the Electron main process
-   * happens to sit in (naby's own checkout, in development). A hook there could
-   * delay or interfere with a call the user never asked for and cannot see.
-   *
-   * `isolated` says so explicitly: no setting sources at all. Everything else —
-   * the gate, the disallowed built-in, the MCP restriction — is unchanged,
-   * because a background call has LESS licence than a turn, not more.
-   */
-  isolated?: boolean;
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
   return {
@@ -311,14 +315,9 @@ export function buildQueryOptions(args: {
     // built-in call — including calls issued INSIDE a spawned subagent — and can
     // authoritatively deny mutation/exec before it runs. See the header block.
     mcpServers: { [MCP_SERVER_NAME]: mcpServer },
-    // THE ONE BUILT-IN WE TAKE BACK. `tools` stays unset (above) so the harness
-    // built-ins stay live, but `disallowedTools` removes this single name from
-    // the model's context entirely — the SDK documents it as "removed from the
-    // model's context and cannot be used, even if they would otherwise be
-    // allowed", which is stronger than a gate denial: the model never sees a
-    // second way to ask, so it cannot prefer one. See
-    // `NATIVE_ASK_USER_QUESTION_TOOL` for what went wrong when it could.
-    disallowedTools: [NATIVE_ASK_USER_QUESTION_TOOL],
+    // THE BUILT-INS WE TAKE BACK are listed further down, on `disallowedTools`,
+    // next to the isolation options they belong with. `tools` stays unset (above)
+    // so the rest of the harness built-ins stay live.
     hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
     // deny is authoritative even here:
     permissionMode: 'bypassPermissions',
@@ -336,24 +335,53 @@ export function buildQueryOptions(args: {
     // loaded NABY's `.claude/` harness instead of the opened project's.
     // Absent stays absent — we never substitute a default here.
     ...(input.cwd ? { cwd: input.cwd } : {}),
-    // SET EXPLICITLY, and the explicitness is the point.
+    // NO FILESYSTEM SETTINGS. EVER. (harness-standalone §2.3.)
     //
-    // The SDK's own type doc: "When omitted, all sources are loaded
-    // (matches CLI defaults)." So this was never off — leaving it unset was
-    // already loading user + project + local settings, including the
-    // project's CLAUDE.md and hooks. Being IMPLICIT is precisely what kept
-    // the wrong-cwd bug invisible: a whole harness was being loaded from a
-    // directory nobody had chosen, and no line of code said so.
+    // The SDK's own type doc: "When omitted, all sources are loaded (matches CLI
+    // defaults). Pass `[]` to disable filesystem settings (SDK isolation mode)."
+    // So this was never off by accident — until now naby LOADED `~/.claude`'s and
+    // the opened project's `.claude/` settings, CLAUDE.md and HOOKS into every
+    // dev-engine turn. That was defensible while the dev engine was understood as
+    // "Claude Code, driven by us". It is not defensible for a standalone app: it
+    // is a second, invisible delivery path for instructions and hooks that naby
+    // does not own, cannot show the user, and cannot gate.
     //
-    // Loading the OPENED PROJECT's harness is intentional and desirable —
-    // its CLAUDE.md and hooks are what the user expects to apply. But that
-    // is only TRUE now that `cwd` above points at the opened project; with
-    // the old inherited cwd this same setting was actively harmful. The two
-    // lines are a pair: do not keep this one without that one.
+    // The concrete asymmetry it created: a skill under `~/.claude/skills` reached
+    // the dev engine TWICE (natively here, and again through naby's own store
+    // injection) and every other engine ONCE. Behaviour differed by engine for
+    // reasons no line of code stated. With `[]`, naby's injection is the SINGLE
+    // path by which a skill, a memory or an instruction reaches any model.
     //
-    // …EXCEPT for a headless call, which names no directory and must not adopt
-    // one's harness. See `isolated` on this function's argument.
-    settingSources: args.isolated ? [] : ['user', 'project', 'local'],
+    // What this does NOT touch: the SDK's credential read (`~/.claude/
+    // .credentials.json`) and its own session transcripts. Those are
+    // authentication and engine-internal storage, explicitly out of scope (§1).
+    settingSources: [],
+    // AND NO NATIVE HARNESS DISCOVERY, as far as the SDK lets us say so.
+    //
+    // `settingSources: []` governs settings files; skills are discovered on their
+    // own path, and the SDK documents omitting `skills` as "no SDK
+    // auto-configuration — the CLI's own defaults still apply, so this is **not**
+    // skills off". The documented way to say off is the allowlist form with
+    // nothing in it: "only skills whose names match an entry are loaded into the
+    // main session system prompt". An empty list matches nothing.
+    skills: [],
+    // Belt and braces, because the option above is documented as "a context
+    // filter, not a sandbox". `disallowedTools` is stronger — the SDK removes
+    // those tools from the model's context entirely — so the two built-ins that
+    // exist to run on-disk vendor artifacts are removed outright. naby delivers
+    // its own skills as text and its own commands by expanding them ABOVE the
+    // engine seam, so neither tool has a job here.
+    //
+    // KNOWN LIMIT (§5): there is no documented option that stops on-disk
+    // SUBAGENT frontmatter (`~/.claude/agents/*.md`) from being discovered. The
+    // `agents` option adds ours; it does not exclude theirs. What holds anyway:
+    // a delegated subagent's every tool call still passes through THIS turn's
+    // PreToolUse gate, so it cannot exceed the turn's policy.
+    disallowedTools: [
+      NATIVE_ASK_USER_QUESTION_TOOL,
+      NATIVE_SKILL_TOOL,
+      NATIVE_SLASH_COMMAND_TOOL,
+    ],
     // NABY OWNS MCP. Without this the SDK MERGES the user's global MCP servers
     // (`~/.claude` settings, project `.mcp.json`, plugins) into the session, so a
     // server the user configured for Claude Code elsewhere leaks in as
@@ -1036,14 +1064,11 @@ export class ClaudeAgentSdkEngine implements Engine {
   /** Diagnostics from the most recent run(); the spike asserts on this. */
   diagnostics: ClaudeEngineDiagnostics = { stderr: [], shadowWarningSeen: false };
 
-  /** See `isolated` on `buildQueryOptions`. Set by background callers (the
-   *  reflection judge) that are not answering a user and must not adopt any
-   *  directory's harness. Defaults to false: a turn behaves exactly as before. */
-  private readonly isolated: boolean;
-
-  constructor(opts: { isolated?: boolean } = {}) {
-    this.isolated = opts.isolated === true;
-  }
+  // NO CONSTRUCTOR OPTIONS. There used to be one — `isolated`, which background
+  // callers passed to get `settingSources: []` for a call the user never made.
+  // Every turn is isolated now (harness-standalone §2.3), so the flag would only
+  // be a way to ask for what is already true, and a reader would reasonably infer
+  // that NOT passing it means something is loaded. Nothing is.
 
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
     // The SDK is loaded HERE, inside run(), so that constructing the engine is
@@ -1245,7 +1270,6 @@ export class ClaudeAgentSdkEngine implements Engine {
           diagnostics.stderr.push(data);
           if (data.includes(SHADOW_WARNING)) diagnostics.shadowWarningSeen = true;
         },
-        ...(this.isolated ? { isolated: true } : {}),
       }),
     });
 

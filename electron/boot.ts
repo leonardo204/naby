@@ -155,6 +155,23 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
   process.env.NABY_DB_PATH ??= dbPath;
   process.env.NABY_HOME ??= nabyHome;
 
+  // THE NABY HARNESS HOME (skill-hub-builtin §2.5). `~/.naby/{skills,commands,
+  // agents}` is where an install driven by this product belongs — a file there is
+  // loaded by no vendor SDK, so every engine receives it by the one path naby
+  // owns (the store, after the import gate). The importer treats a missing
+  // directory as empty, so this is not required for correctness; it exists so the
+  // model and the user find a REAL directory when they go to install something,
+  // instead of the vendor's `~/.claude` that already exists on their disk.
+  // Best-effort: a home that cannot be written is a reason to skip the mkdir, not
+  // to refuse to boot.
+  for (const dir of ['skills', 'commands', 'agents']) {
+    try {
+      mkdirSync(join(nabyHome, dir), { recursive: true });
+    } catch (e) {
+      log(`[boot] could not create ~/.naby/${dir}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   // WHERE THIS INSTALL LIVES, published for code that cannot work it out itself.
   //
   // `appRoot` is derived here from `app.getAppPath()` and this module's own

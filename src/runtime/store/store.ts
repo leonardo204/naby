@@ -441,8 +441,28 @@ export type HarnessScope = 'user' | 'project' | 'org';
 export type HarnessTrust = 'user' | 'artifact' | 'external';
 
 /** enabled participates in a turn (injection/expansion); disabled is visible in
- * the review UI but never injected. Imported items default 'disabled' (§4). */
-export type HarnessStatus = 'enabled' | 'disabled';
+ * the review UI but never injected. Imported items default 'disabled' (§4).
+ *
+ * 'removed' is a TOMBSTONE. It exists because deleting the ROW of an item that
+ * came from a file naby could not delete (a row imported before harness-standalone
+ * §2.1 made importing a COPY, or one whose unlink the containment check refused)
+ * does not
+ * delete the file, and the next scan-on-list re-imports that file as a brand-new
+ * disabled row — the delete visibly undid itself. A tombstoned row stays in the
+ * table so the scan keeps recognizing the artifact as ALREADY SEEN (an existing
+ * row, unchanged => skipped; changed => a refresh that carries the status
+ * through, gate invariant 5), and it therefore never resurfaces.
+ *
+ * A 'removed' row is inert EVERYWHERE an item participates: every injection and
+ * expansion path reads `status:'enabled'` only, and export serializes enabled
+ * only, so the tombstone adds no new filtering duty to those readers. It is
+ * visible solely in the review UI's "removed" filter, where the user can restore
+ * it (setHarnessEnabled => enabled|disabled, i.e. ANY explicit toggle leaves the
+ * removed state).
+ *
+ * It is stored in the existing TEXT `status` column — no schema migration, no
+ * CHECK constraint to widen. */
+export type HarnessStatus = 'enabled' | 'disabled' | 'removed';
 
 /** Where a harness item came from — the rollback/provenance handle (contract
  * §3). `source` drives the import gate (§4); `origin`/`format` let export
@@ -450,8 +470,21 @@ export type HarnessStatus = 'enabled' | 'disabled';
 export type HarnessProvenance = {
   /** WHICH trust tier this came from — drives the import gate (§4). */
   source: HarnessTrust;
-  /** e.g. '~/.claude/skills/foo/SKILL.md', 'set:team-onboarding@1.2'. */
+  /** WHERE THE LIVE FILE IS — and since harness-standalone §2.1 that is always a
+   * path naby OWNS ('~/.naby/skills/foo/SKILL.md', '<cwd>/.naby/...') or a
+   * non-path handle ('set:team-onboarding@1.2'). An explicit import of a vendor
+   * tree COPIES the artifact into the naby home first and records the copy here;
+   * the vendor path it was read from is kept, inert, in `importedFrom`. Rows
+   * written before that change can still carry a `.claude` path — the tombstone
+   * machinery exists for exactly those (harness-standalone §2.6). */
   origin?: string;
+  /** THE VENDOR PATH THIS WAS COPIED FROM, for audit only (harness-standalone
+   * §2.1). Nothing reads it back: no scan walks it, no delete targets it, no
+   * refresh re-reads it. It answers "where did this come from" after the file
+   * became naby's, which `origin` no longer can. Absent for anything naby did
+   * not copy in (a user-authored row, a set import, a file already in the naby
+   * home). Stored in the payload JSON — no column, no migration. */
+  importedFrom?: string;
   /** Interchange format the row came from, for round-trip export. */
   format?: 'claude-skill-md' | 'claude-agent-md' | 'claude-command-md' | 'naby';
   /** epoch ms the item was imported, if it was. */
@@ -472,7 +505,8 @@ export type HarnessItem = {
    * (scope, scopeKey, kind). */
   name: string;
   description?: string;
-  /** enabled | disabled (imported => disabled until reviewed). */
+  /** enabled | disabled | removed (imported => disabled until reviewed;
+   *  removed => a tombstone the scan must not resurrect). */
   status: HarnessStatus;
   provenance: HarnessProvenance;
   /** epoch ms */
@@ -511,7 +545,7 @@ export type HarnessImportRequest = {
   requestedStatus?: HarnessStatus;
   /**
    * CONTENT REFRESH of an item the user has already reviewed — set ONLY by the
-   * re-scan of a local `.claude` tree, never by an agent-driven write.
+   * re-scan of the naby harness home, never by an agent-driven write.
    *
    * A refresh re-reads the SAME file at the SAME origin and re-states its body.
    * Without this flag such a write goes through the gate as a brand-new external
@@ -949,8 +983,25 @@ export interface Store {
   getHarnessItem(id: string): HarnessItem | undefined;
 
   /** Enable/disable — the ONLY path an imported (external) item becomes enabled
-   *  (§4 invariant 1). No-op if absent. */
+   *  (§4 invariant 1). No-op if absent.
+   *
+   *  ON A TOMBSTONE ('removed'): an explicit toggle LEAVES the removed state —
+   *  true lands 'enabled', false lands 'disabled'. That is the restore action,
+   *  and it is deliberately the same call: a user pressing enable/restore on a
+   *  row they can see has made exactly the explicit decision this method exists
+   *  to record, and inventing a second "un-tombstone" verb would only create a
+   *  state where a row is both restored and still hidden. */
   setHarnessEnabled(id: string, enabled: boolean): void;
+
+  /** Set a row's status directly — the TOMBSTONE path (status:'removed').
+   *
+   *  Separate from setHarnessEnabled because a tombstone is not an enablement
+   *  decision: it records "the user deleted this, and the file it came from is
+   *  not ours to delete", which is what stops scan-on-list from re-importing the
+   *  artifact as a fresh row. Like setHarnessEnabled this is a USER-ACTION path,
+   *  not an import path: it never runs the gate, and nothing agent-driven calls
+   *  it (imports go through putHarnessItem). No-op if absent. */
+  setHarnessStatus(id: string, status: HarnessStatus): void;
 
   /** Delete one item by id, or every item from a provenance origin (rollback of
    *  a bad imported set). Exactly one selector. */
