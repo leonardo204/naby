@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.8.2",
+  "version": "1.9.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
