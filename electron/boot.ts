@@ -11,6 +11,7 @@
 
 import { app, BrowserWindow } from 'electron';
 import { existsSync, mkdirSync } from 'node:fs';
+import * as net from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -38,6 +39,44 @@ import type {
 // statically imported — it is reached through a computed dynamic import below —
 // so this type import adds nothing to `main.mjs`.
 import type * as ChatgptOauthModule from './chatgpt-oauth.js';
+
+// ---------------------------------------------------------------------------
+// Outbound connect timeout — Happy Eyeballs (RFC 8305)
+// ---------------------------------------------------------------------------
+//
+// THIS RUNS AT MODULE LOAD, WHICH IS THE POINT. `main.ts` imports this module,
+// so ESM evaluates this block before a single line of `main.ts`'s own body —
+// therefore before `app.whenReady()`, before the embedded Next server exists,
+// and before anything in this process can issue a `fetch`. The setting is
+// process-wide and read by `net.connect` at CALL time, so every later outbound
+// connection (Telegram, the updater, skill hub, provider APIs) inherits it.
+//
+// WHAT IT FIXES. Node enables `autoSelectFamily` by default: it resolves both A
+// and AAAA records and races the addresses, starting the next attempt when the
+// current one has not connected within `autoSelectFamilyAttemptTimeout` —
+// DEFAULT 250 ms. On a network where the IPv4 TCP handshake to a host straddles
+// that boundary (api.telegram.org measured ~250-280 ms here) and IPv6 is
+// EHOSTUNREACH, the race walks the whole address list and gives up while the
+// v4 attempt it started is STILL PENDING and about to succeed. `fetch` then
+// rejects with the famously uninformative `TypeError: fetch failed`, cause
+// ETIMEDOUT — intermittently, because the RTT sits right on the threshold.
+// `curl` on the same box succeeds, because it runs its own Happy Eyeballs with
+// a 200 ms *head start* rather than a 250 ms *deadline*, and never abandons a
+// live attempt.
+//
+// 5 s is chosen to be far above any plausible TCP handshake while staying far
+// below a request timeout, so a genuinely dead address family still fails over
+// quickly. This does NOT disable Happy Eyeballs — a truly unreachable family is
+// still abandoned, just not one that is merely slow.
+export const HAPPY_EYEBALLS_ATTEMPT_TIMEOUT_MS = 5_000;
+
+// Guarded because the API is a relatively recent addition (Node >= 18.13/19.4).
+// Electron 43 ships Node 22, so the guard is belt-and-braces rather than a real
+// branch — but a main process that refuses to boot because a tuning knob moved
+// would be a far worse bug than the one this fixes.
+if (typeof net.setDefaultAutoSelectFamilyAttemptTimeout === 'function') {
+  net.setDefaultAutoSelectFamilyAttemptTimeout(HAPPY_EYEBALLS_ATTEMPT_TIMEOUT_MS);
+}
 
 /** The subset of the runtime bundle the main process calls into. */
 type NabyRuntime = {

@@ -39,6 +39,7 @@
     "spike:skill": "tsx src/spikes/spike-skill-inject.ts",
     "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",
     "spike:devmode": "tsx src/spikes/spike-devmode.ts",
+    "spike:net": "npm run build:electron && tsx src/spikes/spike-net-timeout.ts",
     "spike:sdk-resolve": "npm run build:runtime && tsx src/spikes/spike-sdk-resolve.ts",
     "spike:add-mcp": "npm run build:runtime && tsx src/spikes/spike-add-mcp.ts",
     "spike:fetch-url": "npm run build:runtime && tsx src/spikes/spike-fetch-url.ts",

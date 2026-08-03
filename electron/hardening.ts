@@ -27,6 +27,12 @@
 //      loopback is not an authentication boundary, and every other user-level
 //      process on the machine can reach the port.
 //
+// THE ONE WAIVER. `GET /manifest.webmanifest` is served without a token,
+// because a browser fetches the web-app manifest with credentials omitted and
+// therefore cannot present one. Host and Origin still apply, the match is on the
+// exact pathname, and nothing else is exempt — see the block above
+// `isPublicManifestRequest` for the full argument.
+//
 // PORT RANDOMIZATION IS NOT A MITIGATION and is not treated as one. The Claude
 // Code attack defeated it by scanning from the attacker's page. The ephemeral
 // port exists to avoid a collision (design §2.2), not to hide.
@@ -156,6 +162,40 @@ function readQueryToken(url: string | undefined): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// The one unauthenticated path
+// ---------------------------------------------------------------------------
+//
+// A browser fetches `<link rel="manifest">` with credentials OMITTED — it is a
+// CORS request in "same-origin-credentials-off" mode, and no attribute we can
+// set through Next's Metadata API changes that. So the session COOKIE is not
+// attached, the token check fails, and every launch logs a 403 for
+// /manifest.webmanifest. Nothing breaks (the manifest only supplies an install
+// name and icons), but a permanent 403 in a security log is worse than useless:
+// it trains whoever reads it to ignore the very line that would matter.
+//
+// The exemption is drawn as narrowly as it can be:
+//   * EXACT pathname — not a prefix. `/manifest.webmanifest.evil` and
+//     `/x/manifest.webmanifest` are not it.
+//   * GET only — nothing is written through this path.
+//   * HTTP only — never upgrades (see the call site: `requireOrigin` marks a
+//     WebSocket handshake, and a socket is never exempt).
+//   * Host and Origin are STILL enforced. Only the token is waived, so a
+//     DNS-rebound page still cannot reach even this.
+//
+// What leaks is the app's own name and icon list, which is shipped in the
+// artifact anyway. Nothing else may be added here without the same argument.
+
+const PUBLIC_MANIFEST_PATH = '/manifest.webmanifest';
+
+function isPublicManifestRequest(req: IncomingMessage): boolean {
+  if ((req.method ?? '').toUpperCase() !== 'GET') return false;
+  const url = req.url ?? '';
+  const q = url.indexOf('?');
+  const pathname = q === -1 ? url : url.slice(0, q);
+  return pathname === PUBLIC_MANIFEST_PATH;
+}
+
+// ---------------------------------------------------------------------------
 // The guard
 // ---------------------------------------------------------------------------
 
@@ -187,6 +227,14 @@ export function createGuard({ token, port, host = '127.0.0.1' }: GuardOptions): 
     }
     if (origin === undefined && requireOrigin) {
       return { ok: false, status: 403, reason: 'missing-origin' };
+    }
+
+    // -- The manifest exemption (numbered nowhere: it is a WAIVER, not a
+    //    control) ----------------------------------------------------------
+    // AFTER Host and Origin, so those two still gate it; before the token,
+    // which is the only control this waives. Upgrades are excluded outright.
+    if (!requireOrigin && isPublicManifestRequest(req)) {
+      return { ok: true };
     }
 
     // -- 4. Session token ---------------------------------------------------

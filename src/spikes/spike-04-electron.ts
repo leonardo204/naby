@@ -25,7 +25,11 @@
 //   (b) the window loads http://127.0.0.1:<port> — did-finish-load fired, HTTP
 //       200, and no main-frame did-fail-load
 //   (c) hardening: foreign Host → 403, foreign Origin → 403, no token → 403,
-//       wrong token → 403, all correct → 200
+//       wrong token → 403, all correct → 200 — plus the one deliberate
+//       exemption (GET /manifest.webmanifest, which a browser can only fetch
+//       without credentials) and the three edges that keep it narrow
+//   (h) the outbound Happy Eyeballs attempt timeout is raised in this process,
+//       so a >250ms-RTT endpoint does not fail with `fetch failed`
 //   (d) bound to 127.0.0.1 only — NOT reachable on the machine's LAN address
 //   (e) node:sqlite works in the Electron main process and the runtime store
 //       writes a real file under userData
@@ -202,6 +206,25 @@ function evaluate(outcome: ChildOutcome): Check[] {
     { key: 'no-token', expect: 403, label: 'no session token → 403' },
     { key: 'bad-token', expect: 403, label: 'wrong session token → 403' },
     { key: 'all-correct', expect: 200, label: 'correct Host + Origin + token → 200' },
+    // The single deliberate exemption (a browser fetches the manifest with
+    // credentials omitted, so it can never present the cookie) and the three
+    // edges that keep it narrow.
+    {
+      key: 'manifest-no-token',
+      expect: 200,
+      label: 'GET /manifest.webmanifest without a token → 200 (the one exemption)',
+    },
+    {
+      key: 'manifest-lookalike-no-token',
+      expect: 403,
+      label: 'a path merely STARTING with the manifest name → 403 (exact match, not a prefix)',
+    },
+    { key: 'manifest-post-no-token', expect: 403, label: 'POST /manifest.webmanifest → 403 (GET only)' },
+    {
+      key: 'manifest-foreign-host',
+      expect: 403,
+      label: 'foreign Host on the manifest → 403 (Host is still checked first)',
+    },
   ];
   for (const c of hardenCases) {
     const o = findHarden(obs, c.key);
@@ -213,6 +236,27 @@ function evaluate(outcome: ChildOutcome): Check[] {
         : `no probe result for '${c.key}'`,
     });
   }
+
+  // -- (h) outbound connect timeout ----------------------------------------
+  //
+  // Node's Happy Eyeballs abandons a connection attempt that has not completed
+  // within `autoSelectFamilyAttemptTimeout` — 250ms by default. On a network
+  // where the IPv4 handshake sits on that boundary and IPv6 is unreachable, the
+  // address list is exhausted while a live attempt is still pending, and `fetch`
+  // fails with `TypeError: fetch failed` (ETIMEDOUT). That is what made Telegram
+  // sends fail intermittently while curl always worked. boot.ts raises it at
+  // module scope; this reads the value back from inside the REAL main process,
+  // which is the only place the claim can actually be checked.
+  const netObs = findOne(obs, 'net');
+  const attemptTimeout = typeof netObs?.attemptTimeoutMs === 'number' ? netObs.attemptTimeoutMs : 0;
+  checks.push({
+    name: '(h) outbound Happy Eyeballs attempt timeout is raised in the Electron main process (≥5000ms)',
+    pass: attemptTimeout >= 5000,
+    evidence: netObs
+      ? `net.getDefaultAutoSelectFamilyAttemptTimeout() = ${String(netObs.attemptTimeoutMs)}ms ` +
+        `(Node's default 250ms is the value that broke outbound fetch)`
+      : 'no `net` observation',
+  });
 
   // -- (d) loopback only ---------------------------------------------------
   const lo = findOne(obs, 'loopback');

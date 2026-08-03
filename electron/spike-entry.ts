@@ -20,7 +20,7 @@ import { app } from 'electron';
 import { request as httpRequest } from 'node:http';
 import { existsSync, statSync, writeSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
-import { connect } from 'node:net';
+import { connect, getDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 import { boot, createMainWindow } from './boot.js';
 import { TOKEN_HEADER } from './hardening.js';
 import type { Store } from '../dist/naby-runtime.mjs';
@@ -89,10 +89,11 @@ function probe(
   port: number,
   headers: Record<string, string>,
   path = '/',
+  method = 'GET',
 ): Promise<ProbeResult> {
   return new Promise((resolve) => {
     const req = httpRequest(
-      { host: '127.0.0.1', port, path, method: 'GET', headers, setHost: false },
+      { host: '127.0.0.1', port, path, method, headers, setHost: false },
       (res) => {
         // Drain, or the socket lingers and the process will not exit cleanly —
         // which assertion (f) would then catch as a hang.
@@ -205,6 +206,73 @@ async function run(): Promise<void> {
       origin: goodOrigin,
       [TOKEN_HEADER]: token,
     })),
+  });
+
+  // -- (c) the ONE unauthenticated path, and its edges ---------------------
+  //
+  // A browser fetches `<link rel="manifest">` with credentials omitted, so the
+  // session cookie is not attached and every launch logged a 403 for
+  // /manifest.webmanifest. The manifest is a name and an icon list, so the token
+  // is waived for it — and the next three probes are the reason that is a
+  // narrow exemption rather than a hole: a lookalike path, a write method, and
+  // a rebound Host all still get 403.
+  emit('harden', {
+    case: 'manifest-no-token',
+    expect: 200,
+    ...(await probe(
+      server.port,
+      { host: goodHost, origin: goodOrigin },
+      '/manifest.webmanifest',
+    )),
+  });
+
+  emit('harden', {
+    case: 'manifest-lookalike-no-token',
+    expect: 403,
+    ...(await probe(
+      server.port,
+      { host: goodHost, origin: goodOrigin },
+      // Prefix-matching would let this through; the exemption matches the whole
+      // pathname, so it is refused before Next ever sees it.
+      '/manifest.webmanifest.evil',
+    )),
+  });
+
+  emit('harden', {
+    case: 'manifest-post-no-token',
+    expect: 403,
+    ...(await probe(
+      server.port,
+      { host: goodHost, origin: goodOrigin },
+      '/manifest.webmanifest',
+      'POST',
+    )),
+  });
+
+  emit('harden', {
+    case: 'manifest-foreign-host',
+    expect: 403,
+    ...(await probe(
+      server.port,
+      // Host is checked BEFORE the exemption, so a DNS-rebound page cannot even
+      // read the manifest.
+      { host: 'evil.example.com', origin: goodOrigin },
+      '/manifest.webmanifest',
+    )),
+  });
+
+  // -- (h) outbound connect timeout ---------------------------------------
+  //
+  // Read from INSIDE the real Electron main process, after boot() — so this is
+  // the runtime half of the Happy Eyeballs fix (the source half is
+  // src/spikes/spike-net-timeout.ts). 250ms, the Node default, is the value
+  // that made Telegram sends fail intermittently on a network whose IPv4
+  // handshake straddles it while IPv6 is unreachable.
+  emit('net', {
+    attemptTimeoutMs:
+      typeof getDefaultAutoSelectFamilyAttemptTimeout === 'function'
+        ? getDefaultAutoSelectFamilyAttemptTimeout()
+        : null,
   });
 
   // -- (d) loopback only ---------------------------------------------------
