@@ -34,6 +34,17 @@
 //   (q) The implicit window caps at IMPLICIT_WINDOW, and the weight is real
 //       (40 clean actions move the bound by less than 10 check-ins would).
 //   (r) A detected change point drops the implicit rows from before the cut.
+// P3-M12c — DRILLS, the discounted third label source (fast-evolution §3.4):
+//   (s) Practice cannot start the measurement: drills alone leave an egg, and a
+//       ledger four real answers short stays an egg however much was practised.
+//   (t) The blend is exactly `s + 0.5·drill_s` over `n + 0.5·drill_n`, and the
+//       real counts the panel prints are untouched by it.
+//   (u) The daily cap holds: twelve drills in one day count as ten, and the
+//       eleventh and twelfth are ignored rather than deleted.
+//   (v) The drill window caps at DRILL_WINDOW, across days that each respect the
+//       cap.
+//   (w) NO DRILL PERTURBS AN EXISTING AXIS: with drills added, every other number
+//       the meter exports is identical to the same ledger without them.
 //
 // Pure arithmetic, no store and no engine — runs in milliseconds.
 
@@ -42,6 +53,9 @@ import {
   askDecisionQuality,
   brierScore,
   BUTTERFLY_THRESHOLD,
+  DRILL_DAILY_CAP,
+  DRILL_WEIGHT,
+  DRILL_WINDOW,
   GROWTH_MIN_SAMPLE,
   GROWTH_WINDOW,
   IMPLICIT_WEIGHT,
@@ -599,6 +613,189 @@ function reviewedOf(
     `cut=${String(withOldImplicit.changePointAt)}; 20 clean actions BEFORE the cut → implicit=${String(withOldImplicit.implicitTrials)}` +
       ` bound=${withOldImplicit.lowerBound.toFixed(4)} (unchanged from ${withoutImplicit.lowerBound.toFixed(4)});` +
       ` the same 20 AFTER it → implicit=${String(withNewImplicit.implicitTrials)} bound=${withNewImplicit.lowerBound.toFixed(4)}`,
+  );
+}
+
+// ===========================================================================
+// P3-M12c — drills, the discounted third label source (fast-evolution §3.4)
+// ===========================================================================
+
+/** One UTC day in ms — the bucket `DRILL_DAILY_CAP` counts within. */
+const DAY = 86_400_000;
+
+/** `n` answered DRILLS, the first `hits` of them landing. `day` places the whole
+ *  run inside one UTC day, which is what the cap buckets on. */
+function drillsOf(
+  n: number,
+  hits: number,
+  opts?: { day?: number; offset?: number },
+): CheckinRecord[] {
+  const base = (opts?.day ?? 0) * DAY + (opts?.offset ?? 1_000);
+  return Array.from({ length: n }, (_, i) => ({
+    at: base + i,
+    agentId: 'a1',
+    kind: 'checkin' as const,
+    drill: true,
+    hit: i < hits,
+  }));
+}
+
+// ---- (s) practice cannot START the measurement -----------------------------
+{
+  // Five perfect drills and not one real answer. If practice could fill the
+  // minimum sample, this would read pupa on the strength of five questions naby
+  // wrote for itself — the exact self-grading loop §2 of the spec forbids.
+  const drillsOnly = computeGrowth(drillsOf(5, 5));
+  // Four real answers plus a full drill window is STILL an egg: the fifth real
+  // answer cannot be bought.
+  const almost = computeGrowth([...runOf(4, 4, { t0: 1_000 }), ...drillsOf(DRILL_WINDOW, DRILL_WINDOW, { day: 1 })]);
+  record(
+    '(s) drills alone leave an egg, and they cannot buy the missing real answers',
+    drillsOnly.stage === 'egg' &&
+      drillsOnly.percent === 0 &&
+      drillsOnly.trials === 0 &&
+      drillsOnly.hits === 0 &&
+      drillsOnly.lowerBound === 0 &&
+      drillsOnly.needsMoreSamples === GROWTH_MIN_SAMPLE &&
+      drillsOnly.drillTrials === 5 &&
+      drillsOnly.drillHits === 5 &&
+      almost.stage === 'egg' &&
+      almost.needsMoreSamples === 1 &&
+      almost.lowerBound === computeGrowth(runOf(4, 4, { t0: 1_000 })).lowerBound,
+    `5 perfect drills: stage=${drillsOnly.stage} percent=${drillsOnly.percent}% realTrials=${drillsOnly.trials}` +
+      ` bound=${drillsOnly.lowerBound.toFixed(4)} needsMore=${drillsOnly.needsMoreSamples}` +
+      ` (drills reported raw as ${drillsOnly.drillHits}/${drillsOnly.drillTrials});` +
+      ` 4 real + ${DRILL_WINDOW} drills: stage=${almost.stage} needsMore=${almost.needsMoreSamples}` +
+      ` bound unchanged at ${almost.lowerBound.toFixed(4)}`,
+  );
+}
+
+// ---- (t) the blend is the arithmetic the spec wrote down --------------------
+{
+  const real = runOf(4, 5, { t0: 1_000 }); // 4 of 5 — a larva, and over the minimum
+  const alone = computeGrowth(real);
+  const withDrills = computeGrowth([...real, ...drillsOf(8, 6, { day: 1 })]);
+  const withMissedDrills = computeGrowth([...real, ...drillsOf(8, 0, { day: 1 })]);
+  // Computed by hand from the formula in §3.4, not from the implementation.
+  const expected = wilsonLowerBound(4 + DRILL_WEIGHT * 6, 5 + DRILL_WEIGHT * 8);
+  // The same eight answers, had they been REAL, would move the bound further:
+  // that difference IS the discount.
+  const asReal = computeGrowth([...real, ...runOf(6, 8, { t0: DAY + 1_000 })]);
+  record(
+    `(t) the bound blends drills at exactly ${DRILL_WEIGHT}, and the real counts the panel prints stay real`,
+    Math.abs(withDrills.lowerBound - expected) < 1e-12 &&
+      withDrills.hits === alone.hits &&
+      withDrills.trials === alone.trials &&
+      withDrills.observedRate === alone.observedRate &&
+      withDrills.lifetimeTrials === alone.lifetimeTrials &&
+      withDrills.drillTrials === 8 &&
+      withDrills.drillHits === 6 &&
+      withDrills.drillWeight === DRILL_WEIGHT &&
+      withDrills.lowerBound > alone.lowerBound &&
+      withMissedDrills.lowerBound < alone.lowerBound &&
+      withDrills.lowerBound < asReal.lowerBound &&
+      alone.drillTrials === undefined,
+    `4/5 alone bound=${alone.lowerBound.toFixed(4)} → +6/8 drills=${withDrills.lowerBound.toFixed(4)}` +
+      ` (hand-computed ${expected.toFixed(4)}) → +0/8 drills=${withMissedDrills.lowerBound.toFixed(4)};` +
+      ` the same 6/8 as REAL check-ins would give ${asReal.lowerBound.toFixed(4)};` +
+      ` real counts stayed ${withDrills.hits}/${withDrills.trials} (lifetime ${withDrills.lifetimeTrials})`,
+  );
+}
+
+// ---- (u) the daily cap ------------------------------------------------------
+{
+  const real = runOf(5, 5, { t0: 1_000 });
+  // Twelve drills inside ONE day, all hits. Only the first DRILL_DAILY_CAP count.
+  const twelve = computeGrowth([...real, ...drillsOf(12, 12, { day: 1 })]);
+  const ten = computeGrowth([...real, ...drillsOf(DRILL_DAILY_CAP, DRILL_DAILY_CAP, { day: 1 })]);
+  // Spread over two days, all twelve count — the cap is per day, not per ledger.
+  const spread = computeGrowth([
+    ...real,
+    ...drillsOf(6, 6, { day: 1 }),
+    ...drillsOf(6, 6, { day: 2 }),
+  ]);
+  record(
+    `(u) ${DRILL_DAILY_CAP} drills a day count; the 11th and 12th of one day do not`,
+    twelve.drillTrials === DRILL_DAILY_CAP &&
+      Math.abs(twelve.lowerBound - ten.lowerBound) < 1e-12 &&
+      spread.drillTrials === 12 &&
+      spread.lowerBound > twelve.lowerBound,
+    `12 drills in one day → counted ${twelve.drillTrials} bound=${twelve.lowerBound.toFixed(4)}` +
+      ` (identical to exactly ${DRILL_DAILY_CAP}: ${ten.lowerBound.toFixed(4)});` +
+      ` the same 12 spread over two days → counted ${spread.drillTrials} bound=${spread.lowerBound.toFixed(4)}`,
+  );
+}
+
+// ---- (v) the drill window ---------------------------------------------------
+{
+  const real = runOf(5, 5, { t0: 1_000 });
+  // Enough days, each within the cap, to overrun the window twice over.
+  const many: CheckinRecord[] = [];
+  for (let day = 1; day <= 6; day += 1) many.push(...drillsOf(DRILL_DAILY_CAP, DRILL_DAILY_CAP, { day }));
+  const capped = computeGrowth([...real, ...many]);
+  // Exactly one window's worth, taken from the NEWEST days — what the slice keeps.
+  const exactly = computeGrowth([
+    ...real,
+    ...drillsOf(DRILL_DAILY_CAP, DRILL_DAILY_CAP, { day: 5 }),
+    ...drillsOf(DRILL_DAILY_CAP, DRILL_DAILY_CAP, { day: 6 }),
+  ]);
+  const effective = wilsonLowerBound(
+    5 + DRILL_WEIGHT * DRILL_WINDOW,
+    5 + DRILL_WEIGHT * DRILL_WINDOW,
+  );
+  record(
+    `(v) the drill pool stops at ${DRILL_WINDOW}, however many days of practice sit behind it`,
+    capped.drillTrials === DRILL_WINDOW &&
+      Math.abs(capped.lowerBound - exactly.lowerBound) < 1e-12 &&
+      Math.abs(capped.lowerBound - effective) < 1e-12,
+    `${6 * DRILL_DAILY_CAP} capped drills over 6 days → drillTrials=${capped.drillTrials}` +
+      ` bound=${capped.lowerBound.toFixed(4)} (identical to the newest ${DRILL_WINDOW}:` +
+      ` ${exactly.lowerBound.toFixed(4)}, and to a hand-computed ${effective.toFixed(4)})`,
+  );
+}
+
+// ---- (w) a drill perturbs NOTHING else --------------------------------------
+{
+  // The same ledger twice, once with a pile of drills mixed in. Every axis but
+  // the bound and the drill counts must be identical — that is what "drills are
+  // a separate pool" has to mean if the panel's other numbers are to stay
+  // checkable against the user's own memory of what happened.
+  const base: CheckinRecord[] = [
+    ...runOf(8, 10, { t0: 1_000 }),
+    ...Array.from({ length: 6 }, (_, i) => ({
+      at: 2_000 + i,
+      agentId: 'a1',
+      kind: 'autonomous' as const,
+      correctedAfter: i < 1,
+      reviewedAt: 2_500 + i,
+    })),
+    { at: 2_900, agentId: 'a1', kind: 'checkin' as const, hit: true, confidence: 0.9 },
+  ];
+  const withDrills = [
+    ...base,
+    ...drillsOf(DRILL_DAILY_CAP, 7, { day: 1 }),
+    // …including a degenerate one, which must be dropped from the drill pool the
+    // same way a degenerate real check-in is dropped from the real one.
+    { at: DAY + 5_000, agentId: 'a1', kind: 'checkin' as const, drill: true, hit: true, excludedFromScoring: true },
+  ];
+  const a = computeGrowth(base);
+  const b = computeGrowth(withDrills);
+  const strip = (g: typeof a) => {
+    const { lowerBound, percent, stage, drillTrials, drillHits, drillWeight, ...rest } = g;
+    return JSON.stringify(rest);
+  };
+  record(
+    '(w) adding drills changes the bound and nothing else — not the counts, coverage, calibration, ask quality or the diagnosis',
+    strip(a) === strip(b) &&
+      b.drillTrials === DRILL_DAILY_CAP &&
+      b.lowerBound !== a.lowerBound &&
+      JSON.stringify(diagnoseChange(base)) === JSON.stringify(diagnoseChange(withDrills)) &&
+      JSON.stringify(brierScore(base)) === JSON.stringify(brierScore(withDrills)) &&
+      JSON.stringify(askDecisionQuality(base)) === JSON.stringify(askDecisionQuality(withDrills)),
+    strip(a) === strip(b)
+      ? `every non-bound field identical with ${b.drillTrials} drills added (an 11th, degenerate one was dropped);` +
+        ` bound ${a.lowerBound.toFixed(4)} → ${b.lowerBound.toFixed(4)}; diagnosis, Brier and ask quality byte-identical`
+      : `DIFFERED: ${strip(a)} !== ${strip(b)}`,
   );
 }
 

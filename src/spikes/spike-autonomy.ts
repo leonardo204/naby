@@ -42,6 +42,25 @@
 //       budget from the USER's settings rather than from its locked row — with
 //       the row provably untouched — while a custom agent still reads its own.
 //
+// P3-M12b adds one more, and it is about the turn a real user actually takes:
+//
+//   (j) THE FAST-GROWTH SESSION INTERVIEWS WITHOUT BEING ADDRESSED. The button
+//       opens a session and the person types an ordinary message into it; the
+//       interview instruction has to be in that turn's system prompt with no `@`
+//       anywhere. And a session without the flag must never see it.
+//
+// P3-M12b-5 adds the half that a real session proved was missing:
+//
+//   (k) AN EGG CAN ACTUALLY PRACTISE. A user ran a whole fast-growth sitting, was
+//       interviewed well, and got a growth report reading "check-ins 0/0, egg" —
+//       naby never called `naby_checkin` once. The instruction was the cause (it
+//       branched to interview-only below ten confirmed facts), but the question it
+//       raised is about the WIRING: with the persona at the egg stage, is the
+//       check-in sink even live in that session, and does the row it writes carry
+//       the session's practice stamp? Driven here for real — scripted tool call,
+//       prompt answered through the same registry the API route uses, ledger read
+//       back — plus the two numbers that turn's instruction was handed.
+//
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -66,6 +85,10 @@ import {
 // fail loudly — it just runs an ordinary unrouted turn, and every assertion below
 // about the persona's settings would then be measuring the wrong thing.
 import { BUILTIN_PERSONA_ID, BUILTIN_PERSONA_NAME } from '../runtime-entry.js';
+// The USER's half of a check-in. The same module `POST /api/naby
+// {checkin.resolve}` calls, so (k) answers the prompt through the production
+// path rather than reaching into the sink.
+import { resolveCheckin } from '../../shell/packages/feature/agent/src/server/lib/checkinRegistry.js';
 import type {
   RunCtx,
   RunEvent,
@@ -95,6 +118,26 @@ function toolCall(id: string): LanguageModelV4GenerateResult {
         toolCallId: id,
         toolName: 'send_message',
         input: JSON.stringify({ to: 'alice', text: 'working' }),
+      },
+    ],
+    finishReason: { unified: 'tool-calls', raw: 'tool_use' },
+    usage: USAGE,
+    warnings: [],
+  };
+}
+
+/** A `naby_checkin` call — the practice question of check (k). */
+function checkinCall(
+  id: string,
+  input: { question: string; options: string[]; recommended: number },
+): LanguageModelV4GenerateResult {
+  return {
+    content: [
+      {
+        type: 'tool-call',
+        toolCallId: id,
+        toolName: 'naby_checkin',
+        input: JSON.stringify(input),
       },
     ],
     finishReason: { unified: 'tool-calls', raw: 'tool_use' },
@@ -143,18 +186,31 @@ function scripted(script: LanguageModelV4GenerateResult[]): Scripted {
 
 type Harness = { ctx: RunCtx; events: RunEvent[]; sessionId: () => string };
 
-function makeHarness(controller: AbortController, prompt: string): Harness {
+function makeHarness(
+  controller: AbortController,
+  prompt: string,
+  // RESUMING a session rather than minting one. Needed by the fast-growth check
+  // (j): that flag lives on the SESSION ROW and is set by the user before any
+  // turn runs, so the only honest way to exercise it is to hand the engine a
+  // session that already carries it.
+  sessionId?: string,
+  // The USER, for a turn that stops and asks one something. A check-in suspends
+  // the turn on a promise, so a spike that only collects events would deadlock
+  // until the TTL; this is where (j3) plays the person clicking an option.
+  onEvent?: (event: RunEvent) => void,
+): Harness {
   const events: RunEvent[] = [];
-  let key = 'provisional-run-key';
+  let key = sessionId ?? 'provisional-run-key';
   const ctx: RunCtx = {
     prompt,
     images: undefined,
     cwd: TMP_DIR,
-    sessionId: undefined,
+    sessionId,
     params: { prompt, engine: 'naby' },
     signal: controller.signal,
     emit(event: RunEvent): void {
       events.push(event);
+      onEvent?.(event);
     },
     rekey(realSessionId: string): void {
       key = realSessionId;
@@ -191,12 +247,13 @@ function stepBars(events: RunEvent[]): string[] {
 
 /** Register an agent and return the `@name <task>` prompt that routes to it.
  *
- *  P3-M9 (G2): ROUTING NOW REQUIRES THE BUTTERFLY STAGE. The engine runs the same
- *  gate the `@` palette does, so a freshly created agent — an egg, no measured
- *  history — is deliberately NOT addressable and its turn runs unrouted. That is
- *  the new contract, not an obstacle to work around, so an agent that is meant to
- *  be delegated to EARNS the stage here the only way it can be earned: a clean
- *  run of check-ins in its ledger. 8 straight hits puts the Wilson lower bound at
+ *  P3-M9 (G2), AS AMENDED BY P3-M12a: AUTONOMY REQUIRES THE BUTTERFLY STAGE —
+ *  routing no longer does. A freshly created agent (an egg, no measured history)
+ *  IS routed to: it answers as itself, but its stage contract pins it to one step
+ *  and refuses every tool that changes anything (fast-evolution §3.1). Since every
+ *  run below is about the multi-step loop, an agent meant to be delegated to still
+ *  EARNS the stage here the only way it can be earned: a clean run of check-ins in
+ *  its ledger. 8 straight hits puts the Wilson lower bound at
  *  ~0.68, over the 0.60 butterfly line (runtime/growth.ts).
  *
  *  `addressable:false` is the deliberate opposite, for the gate's own checks. */
@@ -239,9 +296,11 @@ function growUp(agentId: string): void {
 async function runOnce(
   prompt: string,
   script: LanguageModelV4GenerateResult[],
+  sessionId?: string,
+  onEvent?: (event: RunEvent) => void,
 ): Promise<{ h: Harness; s: Scripted }> {
   const controller = new AbortController();
-  const h = makeHarness(controller, prompt);
+  const h = makeHarness(controller, prompt, sessionId, onEvent);
   const s = scripted(script);
   const resolveModel: ModelResolver = () => s.model;
   await createNabySpec({ resolveModel }).runner.run(h.ctx);
@@ -453,27 +512,43 @@ async function main(): Promise<void> {
     `bars: ${JSON.stringify(bars6)}, model calls: ${s6.calls()}`,
   );
 
-  // ==== Run 7 (P3-M9 G2): the `@` gate, driven through the real engine =====
+  // ==== Run 7 (P3-M9 G2 → P3-M12a): the `@` gate, driven through the real engine
   //
-  // A fresh agent is an EGG — no measured history — so `@`-addressing it must not
-  // adopt its identity. What the palette has always shown, routing now honours.
+  // ASSERTIONS UPDATED FOR M12a, deliberately and not reluctantly. What run 7 used
+  // to prove — "an egg is not routed to, the turn runs unrouted" — stopped being
+  // the product's rule: an agent nobody may address never gets the conversations
+  // it would grow from, so the butterfly line moved off the mention and onto
+  // AUTONOMOUS DELEGATION (trust-meter §4.9 0.7.0, fast-evolution §3.1). The
+  // property worth proving is now the stronger one: the egg IS routed to, answers
+  // as itself, and is held to its stage contract — one step and no tool that
+  // leaves a trace.
   const prompt7 = makeAgent('autoegg', 4, { addressable: false });
-  const { h: h7, s: s7 } = await runOnce(prompt7, [text('Answered as a plain turn.')]);
+  const { h: h7, s: s7 } = await runOnce(prompt7, [text('Answered as a draft.')]);
   const gatePills = harnessPills(h7.events, 'routing-gate');
   record(
     checks,
-    '(h) a non-butterfly agent is NOT routed to — no identity, no autonomy',
-    // No persona prompt adopted, and no autonomy: its maxSteps=4 is ignored
-    // because there is no routed agent to read it from.
-    s7.prompts.every((p) => !p.includes('You are autoegg, a test agent.')) &&
+    '(h) an EGG agent IS routed to — it adopts its identity, but its stage caps it at one step',
+    // The identity is adopted (that is the M12a change), and its maxSteps=4 is
+    // narrowed to the egg contract's 1, so no autonomy protocol and no step bars.
+    s7.prompts.every((p) => p.includes('You are autoegg, a test agent.')) &&
       s7.prompts.every((p) => !p.includes('AUTONOMOUS MODE')) &&
       stepBars(h7.events).length === 0 &&
       results(h7.events).length === 1,
-    `prompts adopting the persona: ${s7.prompts.filter((p) => p.includes('You are autoegg')).length}, step bars: ${stepBars(h7.events).length}`,
+    `prompts adopting the identity: ${s7.prompts.filter((p) => p.includes('You are autoegg')).length}/${s7.prompts.length}, step bars: ${stepBars(h7.events).length}`,
   );
   record(
     checks,
-    '(h2) the refused turn still RUNS, on the task text with the @name stripped',
+    '(h1b) the stage contract is STATED in the system prompt, with the real numbers behind it',
+    s7.prompts.every((p) => p.includes('YOUR STAGE: egg')) &&
+      // The honest-refusal protocol and the ledger's own count of what is missing
+      // — not a number the model estimated.
+      s7.prompts.every((p) => p.includes('WHEN A REQUEST NEEDS MORE THAN YOU MAY DO')) &&
+      s7.prompts.every((p) => p.includes('5 more check-in(s)')),
+    `prompts carrying the stage block: ${s7.prompts.filter((p) => p.includes('YOUR STAGE: egg')).length}/${s7.prompts.length}`,
+  );
+  record(
+    checks,
+    '(h2) the turn RUNS on the task text with the @name stripped',
     s7.calls() === 1 &&
       s7.prompts.some((p) => p.includes('send a message to alice')) &&
       s7.prompts.every((p) => !p.includes('@autoegg')),
@@ -481,18 +556,56 @@ async function main(): Promise<void> {
   );
   record(
     checks,
-    '(h3) the user is told, on a muted harness pill carrying a locale-free code',
-    gatePills.length === 1 && gatePills[0] === 'not-butterfly:autoegg',
+    '(h3) the user is told the SCOPE, on a muted harness pill carrying a locale-free code',
+    gatePills.length === 1 && gatePills[0] === 'stage-limited:egg:autoegg',
     `routing-gate pills: ${JSON.stringify(gatePills)}`,
   );
-  // …and the same agent, once it has earned the stage, routes exactly as before.
-  growUp(getStore().getAgentByName('autoegg')!.id);
+
+  // ==== Run 8 (P3-M12a): the contract is a GATE, not a suggestion ==========
+  //
+  // The egg tries to send a message anyway. Two things must be true, and the
+  // second is the one that is easy to get wrong:
+  //
+  //   * the call does not run, and the model is told why in words it can act on;
+  //   * NO LEDGER ROW IS WRITTEN. A `tripwire` row is the meter's hard block on
+  //     butterfly, so filing one here would mean an agent that obeyed its own
+  //     contract had thereby made the stage it needs unreachable.
+  const eggId = getStore().getAgentByName('autoegg')!.id;
+  const ledgerBefore = getStore().listEvalEvents(eggId).length;
+  const { h: h7b } = await runOnce(prompt7, [toolCall('e1'), text('I cannot send it — here is the draft.')]);
+  const ledgerAfter = getStore().listEvalEvents(eggId);
+  const toolResults = h7b.events
+    .filter((e) => typeOf(e) === 'user')
+    .flatMap((e) => {
+      const content = (e as { message?: { content?: unknown[] } }).message?.content ?? [];
+      return content.map((c) => String((c as { content?: unknown }).content ?? ''));
+    });
+  record(
+    checks,
+    '(h5) a consequential tool is REFUSED at the egg stage, with a reason the model can act on',
+    toolResults.some((r) => r.includes('Blocked by the stage contract')) &&
+      toolResults.some((r) => r.includes('send_message')),
+    `tool results: ${JSON.stringify(toolResults.map((r) => r.slice(0, 70)))}`,
+  );
+  record(
+    checks,
+    '(h6) and the refusal writes NO ledger row — obeying the contract is not a safety violation',
+    ledgerAfter.length === ledgerBefore &&
+      ledgerAfter.every((e) => e.kind !== 'tripwire') &&
+      ledgerAfter.every((e) => e.kind !== 'autonomous'),
+    `ledger rows ${ledgerBefore} → ${ledgerAfter.length}; kinds: ${JSON.stringify([...new Set(ledgerAfter.map((e) => e.kind))])}`,
+  );
+  // …and the same agent, once it has earned the stage, gets the autonomy its row
+  // asks for: the contract stops narrowing, the protocol appears, the tool runs
+  // and the scope pill is gone.
+  growUp(eggId);
   const { h: h8, s: s8 } = await runOnce(prompt7, [toolCall('g1'), text('Routed.\n[[VERIFIED: sent]]\n[[DONE]]')]);
   record(
     checks,
-    '(h4) the SAME agent routes once it is a butterfly — the gate is the only thing that changed',
+    '(h4) the SAME agent becomes autonomous once it is a butterfly — the stage is the only thing that changed',
     s8.prompts.every((p) => p.includes('You are autoegg, a test agent.')) &&
       s8.prompts.every((p) => p.includes('AUTONOMOUS MODE')) &&
+      s8.prompts.every((p) => !p.includes('YOUR STAGE:')) &&
       harnessPills(h8.events, 'routing-gate').length === 0 &&
       results(h8.events).length === 1,
     `prompts adopting the persona: ${s8.prompts.filter((p) => p.includes('You are autoegg')).length}/${s8.prompts.length}, gate pills: ${harnessPills(h8.events, 'routing-gate').length}`,
@@ -507,6 +620,93 @@ async function main(): Promise<void> {
   // which is the invariant that made this necessary in the first place.
   const store = getStore();
   const personaRow = store.getAgent(BUILTIN_PERSONA_ID)!;
+
+  // ==== Run 8b: AN EGG PRACTISES, AND THE ROW LANDS STAMPED ================
+  //
+  // (k) P3-M12b-5, and it has to run HERE — before `growUp` below gives the persona
+  // a record. Everything this proves is about the agent at the EGG stage with an
+  // EMPTY ledger, which is the only state a real user's naby is in when they
+  // press the fast-growth button.
+  //
+  // Nothing about a stage may gate a check-in. Check-ins are how an egg grows
+  // (trust-meter §4.1: the ledger is the only input to the stage), so a sink
+  // withheld until the agent is trusted is the M5 deadlock rebuilt — and the
+  // session that produced no check-ins at all raised exactly this question. The
+  // assertion is deliberately end to end: the model calls the tool, the turn
+  // SUSPENDS, the user answers through the same registry the API route resolves
+  // through, and the row that lands is read back off the store.
+  const eggLedgerBefore = store.listEvalEvents(BUILTIN_PERSONA_ID, { kind: 'checkin' }).length;
+  const practiceRef = store.createSession('', 'fast-growth practice', TMP_DIR);
+  store.setSessionFastGrowth(practiceRef.sessionId, true);
+  const { h: h8b, s: s8b } = await runOnce(
+    'ok, ask me something.',
+    [
+      checkinCall('d1', {
+        question: 'For the release notes on this project, would you rather I draft them or outline them?',
+        options: ['draft the notes in full', 'outline the headings only'],
+        recommended: 0,
+      }),
+      text('Understood — I will draft them in full next time.'),
+    ],
+    practiceRef.sessionId,
+    // THE USER. Answering synchronously inside the emit is safe and deliberate:
+    // the sink registers the resolver BEFORE it emits the request (checkinTurn),
+    // so the prompt is already answerable by the time this runs.
+    (event) => {
+      if (String(event.type ?? '') !== 'checkin_request') return;
+      resolveCheckin(String((event as { checkinId?: unknown }).checkinId ?? ''), { chosen: 0 });
+    },
+  );
+  const eggRows = store.listEvalEvents(BUILTIN_PERSONA_ID, {
+    kind: 'checkin',
+    sessionId: practiceRef.sessionId,
+  });
+  const eggRow = eggRows[0] as { drill?: boolean; hit?: boolean } | undefined;
+  record(
+    checks,
+    '(k) an EGG persona in a fast-growth session really checks in, and the row is stamped as practice',
+    eggLedgerBefore === 0 &&
+      eggRows.length === 1 &&
+      eggRow?.drill === true &&
+      eggRow?.hit === true &&
+      // The turn RESUMED rather than dying on the TTL: the model was called again
+      // once the answered tool result came back.
+      s8b.calls() === 2 &&
+      results(h8b.events).length === 1,
+    `ledger before: ${eggLedgerBefore}, rows for this session: ${eggRows.length}, ` +
+      `drill: ${eggRow?.drill}, hit: ${eggRow?.hit}, model calls: ${s8b.calls()}`,
+  );
+
+  // …and the sitting was HANDED the numbers rather than left to estimate them.
+  // `5` is GROWTH_MIN_SAMPLE against an empty ledger — the same figure the growth
+  // panel shows the user, which is the whole reason the engine computes it.
+  const numbered = s8b.prompts.filter(
+    (p) =>
+      p.includes('PART 2 — PRACTISE PREDICTING THEM') &&
+      p.includes('still needed before your stage can be read at all: 5'),
+  );
+  record(
+    checks,
+    '(k2) …and it was told the REAL numbers, from the same ledger the growth panel reads',
+    numbered.length === s8b.prompts.length && s8b.prompts.length > 0,
+    `prompts: ${s8b.prompts.length}, carrying part 2 with the ledger's number: ${numbered.length}`,
+  );
+
+  // The SECOND turn of the same sitting sees the count the first one produced.
+  // That is what makes the closing sentence ("this session has run N") a fact
+  // rather than a guess, and it can only hold if the count is re-read per turn
+  // from the rows themselves.
+  const { s: s8c } = await runOnce('go on then.', [text('One more?')], practiceRef.sessionId);
+  record(
+    checks,
+    '(k3) the next turn of that sitting counts the practice check-in it already ran',
+    s8c.prompts.length > 0 &&
+      s8c.prompts.every((p) => p.includes('One has been recorded in it so far')),
+    `prompts: ${s8c.prompts.length}, carrying the running count: ${
+      s8c.prompts.filter((p) => p.includes('One has been recorded in it so far')).length
+    }`,
+  );
+
   growUp(BUILTIN_PERSONA_ID);
   store.setSetting('persona.autonomy.maxSteps', '3');
   store.setSetting('persona.autonomy.escalation', 'inline');
@@ -560,6 +760,84 @@ async function main(): Promise<void> {
     '(i4) a custom agent still reads its OWN row — the persona setting does not leak',
     stepBars(h11.events).length === 2 && stepBars(h11.events)[1] === 'step 2/2 — stopped (max-steps)',
     `bars: ${JSON.stringify(stepBars(h11.events))} (persona setting is 1, this agent's row says 2)`,
+  );
+
+  // ==== Run 12: THE FAST-GROWTH SESSION INTERVIEWS ON AN ORDINARY TURN ======
+  //
+  // (j) P3-M12b, and the thing a user actually does. The button mints a session
+  // and drops the person into it; what they type there is "안녕" — a plain
+  // message, no `@naby`. If the interview block only rode ADDRESSED turns, the
+  // session the product just told them to open would behave exactly like every
+  // other conversation, and the feature would be invisible in the one place it
+  // exists. So this asserts the ORDINARY path: no `@`, and the instruction is in
+  // the system prompt anyway.
+  //
+  // It works because `growthSubject` is `routedAgent ?? persona` — an unrouted
+  // turn IS the persona's turn (P3-M5) — which is the same reason ordinary turns
+  // already learn and check in. This check pins that down, because the condition
+  // is one `?? persona` away from silently becoming @-only again.
+  const fastRef = store.createSession('', 'fast-growth', TMP_DIR);
+  store.setSessionFastGrowth(fastRef.sessionId, true);
+  const { s: s12 } = await runOnce(
+    'hello — I would like you to get to know me.',
+    [text('Sure. What are you working on at the moment?')],
+    fastRef.sessionId,
+  );
+  const interviewed = s12.prompts.filter((p) => p.includes('FAST-GROWTH SESSION'));
+  record(
+    checks,
+    '(j) a fast-growth session interviews on an ORDINARY, unaddressed turn',
+    interviewed.length === s12.prompts.length && s12.prompts.length > 0,
+    `prompts: ${s12.prompts.length}, carrying the interview block: ${interviewed.length}`,
+  );
+
+  // …and an ordinary session is untouched, byte for byte. Without this the check
+  // above would pass just as happily if the block were injected into every turn
+  // the engine ever ran, which is a different (and worse) bug.
+  const plainRef = store.createSession('', 'plain', TMP_DIR);
+  const { s: s13 } = await runOnce('hello.', [text('Hi.')], plainRef.sessionId);
+  record(
+    checks,
+    '(j2) …and a session WITHOUT the flag never sees the interview block',
+    s13.prompts.length > 0 && s13.prompts.every((p) => !p.includes('FAST-GROWTH SESSION')),
+    `prompts: ${s13.prompts.length}, carrying the interview block: ${
+      s13.prompts.filter((p) => p.includes('FAST-GROWTH SESSION')).length
+    }`,
+  );
+
+  // ==== THE CHECK-IN WORDING FOLLOWS THE SUBJECT'S RECORD (P3-M12e) ========
+  //
+  // Why this is checked end to end rather than in a unit test alone: the unit
+  // test proves `checkinInstruction(stage)` produces two wordings, and the bug it
+  // guards against is the engine never HANDING it a stage — which is exactly the
+  // shape of the failure this milestone came from (a working check-in machine
+  // that nothing ever pushed to ask, giving a ledger of ~197 autonomous rows and
+  // zero real check-ins; trust-meter §4.12).
+  //
+  // Both sides are read off runs that already happened above, so the assertion
+  // costs no extra turn and cannot drift from what those runs actually did:
+  //
+  //   s8b  the EGG persona's turn (run 11 — `eggLedgerBefore === 0`, before
+  //        `growUp`): the eager clause must be in the system prompt.
+  //   s13  an ordinary turn AFTER `growUp` made the persona a butterfly: the
+  //        eager clause must be gone, and the original block still there.
+  const EAGER = 'PREFER asking over deciding on your own';
+  const BASE = 'CHECKING IN: right before you do something';
+  record(
+    checks,
+    "(l) an EGG's turn is pushed to ask before deciding for the user",
+    s8b.prompts.length > 0 && s8b.prompts.every((p) => p.includes(EAGER) && p.includes(BASE)),
+    `prompts: ${s8b.prompts.length}, carrying the eager clause: ${
+      s8b.prompts.filter((p) => p.includes(EAGER)).length
+    }`,
+  );
+  record(
+    checks,
+    '(l2) …and a butterfly goes back to the light wording, with the block itself intact',
+    s13.prompts.length > 0 && s13.prompts.every((p) => !p.includes(EAGER) && p.includes(BASE)),
+    `prompts: ${s13.prompts.length}, carrying the eager clause: ${
+      s13.prompts.filter((p) => p.includes(EAGER)).length
+    }, carrying the check-in block: ${s13.prompts.filter((p) => p.includes(BASE)).length}`,
   );
 
   // ---- report -------------------------------------------------------------

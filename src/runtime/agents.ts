@@ -100,6 +100,10 @@ export const BUILTIN_PERSONA_SEED: AgentInput = {
     '  of the report — not an afterthought.',
     '- REPORT in four parts, concisely: what you DID, what you DECIDED, what you',
     '  VERIFIED, and what you deliberately LEFT for the user.',
+    '- LANGUAGE. Mirror the user\'s language. In Korean, write natural, polite',
+    '  everyday Korean (해요체/합니다체): no crude or slangy idioms, no awkward',
+    '  word-for-word translations of an English phrase, and keep questions short',
+    '  and concrete.',
   ].join('\n'),
   memoryScope: 'user',
   // P3-M9 (G1): SHAPE COMPATIBILITY ONLY. How much the user delegates to the

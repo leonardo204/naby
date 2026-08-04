@@ -84,6 +84,16 @@ export type CheckinRecord = {
    *  (P3-M6/M7). Kept for the record and ignored by every axis — see
    *  `withoutImported`. */
   imported?: boolean;
+  /** kind='checkin': this question was asked inside a FAST-GROWTH (drill)
+   *  session (P3-M12c). Stamped by the sink from the SESSION's flag — the model
+   *  cannot set it, because a model able to label its own rows could file its
+   *  real misses as practice (checkin-contracts §4, invariant 9).
+   *
+   *  A drill is still a genuine prediction the user answered, so it is evidence;
+   *  it is just not the same evidence. It enters the bound at `DRILL_WEIGHT`,
+   *  gets its own window and daily cap, and can NEVER fill `GROWTH_MIN_SAMPLE` —
+   *  see `drillPool`. */
+  drill?: boolean;
 };
 
 /**
@@ -104,10 +114,20 @@ function withoutImported(records: readonly CheckinRecord[]): CheckinRecord[] {
   return records.filter((r) => !r.imported);
 }
 
-/** Rows that count toward accuracy: real check-ins that were not excluded. */
+/** Rows that count toward accuracy: real check-ins that were not excluded.
+ *
+ *  DRILL ROWS ARE NOT AMONG THEM (P3-M12c). Everything downstream of this
+ *  function — the minimum sample, the recent window, ADWIN, the Brier axis, the
+ *  lifetime totals — is therefore REAL-ONLY by construction rather than by six
+ *  separate filters that could drift apart. A drill's only path into the meter is
+ *  `drillPool`, at a discount. */
 function scorable(records: readonly CheckinRecord[]): CheckinRecord[] {
   return records.filter(
-    (r) => (r.kind ?? 'checkin') === 'checkin' && !r.excludedFromScoring && r.hit !== undefined,
+    (r) =>
+      (r.kind ?? 'checkin') === 'checkin' &&
+      !r.drill &&
+      !r.excludedFromScoring &&
+      r.hit !== undefined,
   );
 }
 
@@ -161,6 +181,51 @@ export const IMPLICIT_WEIGHT = 0.25;
  *  explicit one: a full implicit window still counts for less than a full
  *  check-in window. */
 export const IMPLICIT_WINDOW = 40;
+
+// ---------------------------------------------------------------------------
+// Drill labels (P3-M12c) — fast-evolution §3.4
+// ---------------------------------------------------------------------------
+//
+// THE THIRD LABEL SOURCE, AND WHY IT IS WORTH A HALF. In a fast-growth session
+// naby invents a decision the user could plausibly face, commits to what it
+// thinks they would pick, and asks. The user's answer grades it. That IS a real
+// prediction — the examiner does not mark its own paper, which is the property
+// self-scored practice lacks and the reason self-play is otherwise banned from
+// this ledger (LLM self-evaluation is measurably self-flattering, NeurIPS 2024
+// openreview Ns8zGZ0lmM, and the bias compounds over loops).
+//
+// But it cannot be worth what real work is worth, for two reasons that have
+// nothing to do with the user's honesty:
+//
+//   1. NABY CHOSE THE QUESTION. It will pick scenarios it has some purchase on,
+//      the way any examiner writing its own paper would. Voyager keeps the same
+//      separation from the other side — the agent proposes tasks, the ENVIRONMENT
+//      judges them (arXiv:2305.16291).
+//   2. A HYPOTHETICAL ANSWER IS NOT A DECISION. What someone says they would do
+//      about a file they are not actually holding is weaker evidence than what
+//      they did when it was their afternoon on the line.
+//
+// So: half of a real check-in, its own window, a daily cap, and — the load-
+// bearing rule — no power whatsoever to fill the minimum sample. Practice can
+// speed up a measured agent; it cannot start the measurement.
+
+/** What one answered drill is worth against one real check-in. Heavier than an
+ *  implicit accept (0.25, where the user only failed to object) and lighter than
+ *  a decision they actually made. */
+export const DRILL_WEIGHT = 0.5;
+
+/** How many drills the pool holds — its OWN window, separate from
+ *  `GROWTH_WINDOW`. 20 at weight 0.5 is an effective sample of at most 10: half a
+ *  check-in window, so a marathon practice session still cannot outweigh the real
+ *  record it sits beside. */
+export const DRILL_WINDOW = 20;
+
+/** How many drills can count in ONE DAY. Without it, twenty minutes of rapid-fire
+ *  practice would fill the whole window, and the fastest route to a stage would be
+ *  the one with the least real work in it. Rows past the cap are still STORED and
+ *  still shown — they are dropped from SCORING only, which is the same "keep
+ *  everything, count honestly" rule the degenerate exclusion follows. */
+export const DRILL_DAILY_CAP = 10;
 
 /** z for a 95% interval. */
 const Z_95 = 1.96;
@@ -318,7 +383,12 @@ export type AskQuality = {
  */
 export function askDecisionQuality(records: readonly CheckinRecord[]): AskQuality | undefined {
   const rows = withoutImported(records);
-  const asks = rows.filter((r) => (r.kind ?? 'checkin') === 'checkin' && r.hit !== undefined);
+  // Real asks only (P3-M12c). A drill is naby asking about a situation it made
+  // up, so counting it here would grade the decision to ask about a decision that
+  // was never going to happen.
+  const asks = rows.filter(
+    (r) => (r.kind ?? 'checkin') === 'checkin' && !r.drill && r.hit !== undefined,
+  );
   const acts = rows.filter((r) => r.kind === 'autonomous');
   if (asks.length + acts.length === 0) return undefined;
 
@@ -398,6 +468,19 @@ export type GrowthState = {
    *  than hardcoded in the UI: a sentence with a hand-typed 0.25 in it goes
    *  quietly wrong the day the constant is retuned. */
   implicitWeight?: number;
+
+  // -- the drill axis (fast-evolution §3.4, P3-M12c) -------------------------
+  //
+  // Reported for the same reason as the implicit trio, and one more: the panel
+  // has to be able to say "real N · practice M" separately. A gauge that moves on
+  // practice while the screen only shows real answers is a number the user will
+  // stop believing the first time they notice — and they will notice.
+  /** Answered drills inside the drill window, after the daily cap. */
+  drillTrials?: number;
+  /** How many of them naby called correctly. */
+  drillHits?: number;
+  /** What each of them counted for against one real check-in. */
+  drillWeight?: number;
   /** Where the surviving window starts, if a pattern change was detected. */
   changePointAt?: number;
   /** True when accuracy alone would have earned butterfly but a safety refusal in
@@ -448,6 +531,67 @@ function implicitPool(ordered: readonly CheckinRecord[], afterAt?: number): Chec
 }
 
 /**
+ * Apply `DRILL_DAILY_CAP` to a chronological run of drills: within one calendar
+ * day only the FIRST `DRILL_DAILY_CAP` of them count.
+ *
+ * THE DAY IS THE UTC CALENDAR DAY, not a rolling 24-hour window, and the choice
+ * is deliberate. A rolling window makes "does this row count" depend on which
+ * other rows exist near it, so the same ledger can score differently depending on
+ * where the sweep starts — and the answer would silently change as time passed
+ * even though nothing was added. A calendar bucket is stable, reproducible and
+ * explainable to a user in one sentence ("ten a day count"), which is worth more
+ * here than the marginal fairness of a sliding boundary.
+ *
+ * FIRST-OF-DAY rather than last: the cap exists to stop a practice binge from
+ * filling the window, and taking the earliest rows means an honest morning of
+ * work is not retroactively erased by an evening of grinding.
+ *
+ * Rows are never mutated — the overflow is simply not returned, exactly as the
+ * excluded-but-kept rule requires.
+ */
+function capDrillsPerDay(ordered: readonly CheckinRecord[]): CheckinRecord[] {
+  const perDay = new Map<number, number>();
+  const kept: CheckinRecord[] = [];
+  for (const r of ordered) {
+    const day = Math.floor(r.at / 86_400_000); // UTC day index
+    const seen = perDay.get(day) ?? 0;
+    if (seen >= DRILL_DAILY_CAP) continue;
+    perDay.set(day, seen + 1);
+    kept.push(r);
+  }
+  return kept;
+}
+
+/**
+ * The rows the drill half of the bound is computed over (§3.4): answered check-ins
+ * from fast-growth sessions, capped per day and cut to the newest `DRILL_WINDOW`.
+ *
+ * @param ordered  the agent's rows, oldest first, imported ones already dropped
+ * @param afterAt  the ADWIN cut's timestamp when a pattern change was detected.
+ *   Drills from before the cut are stale for the same reason the explicit and
+ *   implicit rows are: the detector said this user's preferences moved, and
+ *   practice against the person they used to be is not evidence about the person
+ *   they are now.
+ *
+ * The degenerate defence needs no special case here. A drill goes through the
+ * SAME sink as a real check-in, so `degenerateReason` compares it against
+ * `recentQuestions` — which reads the ledger by kind, not by drill flag — and a
+ * near-duplicate lands with `excludedFromScoring` set and is filtered out below.
+ * That is what stops naby from asking one easy question twenty ways.
+ */
+function drillPool(ordered: readonly CheckinRecord[], afterAt?: number): CheckinRecord[] {
+  const pool = ordered.filter(
+    (r) =>
+      (r.kind ?? 'checkin') === 'checkin' &&
+      r.drill === true &&
+      !r.excludedFromScoring &&
+      r.hit !== undefined &&
+      (afterAt === undefined || r.at > afterAt),
+  );
+  return capDrillsPerDay(pool).slice(-DRILL_WINDOW);
+}
+
+/**
  * Compute an agent's growth from its check-in history. Pure: the same records
  * always give the same stage, so the meter is reproducible and explainable.
  */
@@ -486,12 +630,28 @@ export function computeGrowth(
   const implicitTrials = implicit.length;
   const implicitHits = implicit.filter((r) => !r.correctedAfter).length;
 
+  // THE DRILL HALF (§3.4, P3-M12c). Same treatment as the implicit pool — its own
+  // window, the same change-point cut — and one extra rule that is the whole
+  // point of the section: practice does not enter the bound AT ALL until the real
+  // record has reached the minimum sample. Otherwise an agent with four real
+  // answers and twenty drills would leave the egg on the strength of questions it
+  // wrote itself, which is precisely the loop §2 of the spec forbids. Below the
+  // minimum the stage is 'egg' regardless, so this only keeps the BOUND honest;
+  // the raw counts are still reported (below), because a panel that hides the
+  // practice while the gauge moves is a panel nobody can audit.
+  const drills = drillPool(ordered, cutAt);
+  const drillTrials = drills.length;
+  const drillHits = drills.filter((r) => r.hit).length;
+  const drillsCount = trials >= GROWTH_MIN_SAMPLE;
+  const drillTrialsScored = drillsCount ? drillTrials : 0;
+  const drillHitsScored = drillsCount ? drillHits : 0;
+
   // The blend. `hits`/`trials` stay the EXPLICIT counts, because they are what
   // the panel prints as "guessed right, N of M" and what the stage's minimum
   // sample counts — only the bound is blended.
   const lowerBound = wilsonLowerBound(
-    hits + IMPLICIT_WEIGHT * implicitHits,
-    trials + IMPLICIT_WEIGHT * implicitTrials,
+    hits + DRILL_WEIGHT * drillHitsScored + IMPLICIT_WEIGHT * implicitHits,
+    trials + DRILL_WEIGHT * drillTrialsScored + IMPLICIT_WEIGHT * implicitTrials,
   );
   const observedRate = trials > 0 ? hits / trials : 0;
 
@@ -505,7 +665,11 @@ export function computeGrowth(
   // so it did not act on its own. Leaving it out would make padding questions
   // free — an agent could ask a hundred meaningless things at no cost to coverage,
   // which is the very hole the exclusion exists to close.
-  const checkins = spanRows.filter((r) => (r.kind ?? 'checkin') === 'checkin');
+  // Drills are left out of coverage too (P3-M12c): they measure whether naby can
+  // predict this user, not whether it interrupts them at the right moments, and a
+  // practice run would otherwise make its "handled without asking" share collapse
+  // for having practised.
+  const checkins = spanRows.filter((r) => (r.kind ?? 'checkin') === 'checkin' && !r.drill);
   const tripwires = spanRows.filter((r) => r.kind === 'tripwire').length;
   const decisions = autonomous.length + checkins.length;
 
@@ -544,10 +708,14 @@ export function computeGrowth(
     coverage: decisions > 0 ? autonomous.length / decisions : 0,
     correctedAfter: autonomous.filter((r) => r.correctedAfter).length,
     tripwires,
-    excluded: spanRows.filter((r) => r.excludedFromScoring).length,
+    excluded: spanRows.filter((r) => r.excludedFromScoring && !r.drill).length,
     ...(implicitTrials > 0
       ? { implicitTrials, implicitHits, implicitWeight: IMPLICIT_WEIGHT }
       : {}),
+    // RAW drill counts, and the weight they entered at — the same shape (and the
+    // same reasoning) as the implicit trio: all three absent when nothing was
+    // practised, so a ledger with no drills is deep-equal to a pre-M12c one.
+    ...(drillTrials > 0 ? { drillTrials, drillHits, drillWeight: DRILL_WEIGHT } : {}),
     ...(cut > 0 ? { changePointAt: cut } : {}),
     ...(blockedByTripwire ? { blockedByTripwire: true } : {}),
     // Computed over the SAME span as accuracy, so the panel never mixes a recent
@@ -603,7 +771,12 @@ export type GrowthChange = {
  * as the agent improving.
  */
 export function diagnoseChange(records: readonly CheckinRecord[]): GrowthChange {
-  const all = withoutImported(records).sort((a, b) => a.at - b.at);
+  // Drills are excluded here too (P3-M12c): this sentence explains a movement of
+  // the REAL record to the user, and "your patterns changed" must not be inferred
+  // from questions naby invented for practice.
+  const all = withoutImported(records)
+    .filter((r) => !r.drill)
+    .sort((a, b) => a.at - b.at);
   if (all.length < GROWTH_MIN_SAMPLE) {
     return { direction: 'flat', code: 'not-measured', boundDeltaPoints: 0 };
   }

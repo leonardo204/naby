@@ -30,7 +30,13 @@
 // staleness rule itself lives in memory-hygiene.ts — it is asked by the review
 // queue and the browser filter too, and three copies of "how old is too old" is
 // three places for the answer to drift.
-import { isMemoryStale, MEMORY_STALE_MS } from './memory-hygiene.js';
+//
+// P3-M13b REPLACES THE BOOLEAN TIER WITH THE CONTINUOUS ONE it was standing in
+// for (conversational-learning-hardening §3.2). `retrievability` is still asked
+// of memory-hygiene, still lives strictly BELOW relevance, and still cannot
+// change how much budget is spent — see `rankCandidates` for why moving from a
+// boolean to a real number does not weaken the invariant P3-M10 wrote it for.
+import { retrievability } from './memory-hygiene.js';
 import type {
   InjectedMemory,
   MemoryInjectionQuery,
@@ -160,10 +166,45 @@ function comparePrecedence(a: MemoryItem, b: MemoryItem): number {
   return b.updatedAt - a.updatedAt; // newest first
 }
 
+// ---------------------------------------------------------------------------
+// MMR duplicate suppression (P3-M13b §3.2)
+// ---------------------------------------------------------------------------
+
 /**
- * Rank candidates: most RELEVANT to this turn first, then FRESH before STALE,
- * with the Phase-1.5 precedence order (scope → type → recency) breaking every
- * remaining tie.
+ * How similar two memories may be before the second one is pushed to the back of
+ * the queue (§3.2). Jaccard over their key+value token sets.
+ *
+ * 0.6 is a first guess with a shape behind it rather than a measurement: two
+ * memories sharing over half their distinct words are almost always the same
+ * fact written twice ("prefers metric units" / "wants measurements in metric"),
+ * while genuinely different facts about one topic overlap far less because the
+ * TOPIC words are a small part of either sentence.
+ */
+export const MMR_SIM_THRESHOLD = 0.6;
+
+/**
+ * Token-set Jaccard similarity of two memories, in [0, 1].
+ *
+ * JACCARD RATHER THAN THE `relevanceScore` NORMALIZATION, deliberately: this
+ * question is symmetric ("are these two the same thing?") where relevance is not
+ * ("how much does this memory have to do with the turn?"), and a one-sided
+ * measure would call a long memory a duplicate of a short one it merely
+ * contains.
+ */
+export function memorySimilarity(a: MemoryItem, b: MemoryItem): number {
+  const left = new Set(tokenizeForRelevance(`${a.key} ${a.value}`));
+  const right = new Set(tokenizeForRelevance(`${b.key} ${b.value}`));
+  if (left.size === 0 || right.size === 0) return 0;
+  let shared = 0;
+  for (const token of left) if (right.has(token)) shared += 1;
+  const union = left.size + right.size - shared;
+  return union === 0 ? 0 : shared / union;
+}
+
+/**
+ * Rank candidates: most RELEVANT to this turn first, then by RETRIEVABILITY
+ * (descending), with the Phase-1.5 precedence order (scope → type → recency)
+ * breaking every remaining tie.
  *
  * THE FALLBACK IS STRUCTURAL, NOT INCIDENTAL, and that is the point. There is no
  * "did the query help?" branch to get wrong: when `queryText` is absent the score
@@ -176,22 +217,31 @@ function comparePrecedence(a: MemoryItem, b: MemoryItem): number {
  * not made worse than it was, and the scope-precedence invariant still decides
  * every tie relevance and freshness both leave open.
  *
- * WHERE FRESHNESS SITS, AND WHY EXACTLY THERE (P3-M10, memory-hygiene §2.2).
- * It is the SECOND comparison, never the first. The order of the two is the whole
- * design decision:
+ * WHERE DECAY SITS, AND WHY EXACTLY THERE (P3-M10 §2.2, generalized by P3-M13b
+ * §3.2). It is the SECOND comparison, never the first. The order of the two is
+ * the whole design decision:
  *
- *   * RELEVANCE FIRST means a stale memory that genuinely answers this turn still
- *     beats a fresh one that does not. Demoting it would trade the "confidently
- *     wrong from an old fact" failure for the strictly worse "did not know a fact
- *     it has written down" one.
- *   * FRESHNESS SECOND means decay decides only what was otherwise ARBITRARY —
- *     two memories the turn matches equally well, or (on a query-less turn) every
+ *   * RELEVANCE FIRST means a decayed memory that genuinely answers this turn
+ *     still beats a fresh one that does not. Demoting it would trade the
+ *     "confidently wrong from an old fact" failure for the strictly worse "did
+ *     not know a fact it has written down" one. This is a BINDING invariant
+ *     (§4 rejects multiplying decay into relevance), and it holds STRUCTURALLY
+ *     here: the retrievability comparison is only reached when the relevance
+ *     difference is exactly 0, so no amount of accumulated age can out-argue any
+ *     relevance difference at all.
+ *   * DECAY SECOND means it decides only what was otherwise ARBITRARY — two
+ *     memories the turn matches equally well, or (on a query-less turn) every
  *     memory at once. That is where a month-dead fact was previously winning
  *     budget on nothing but scope order.
  *
- * It is a BOOLEAN tier, not a decaying weight: `stale` or not. A continuous decay
- * curve would let accumulated age out-argue a relevance difference somewhere, and
- * "somewhere" is not a property anyone can check. A tier cannot, by construction.
+ * WHAT CHANGED IN M13b, AND WHAT DID NOT. P3-M10 used a BOOLEAN tier (stale or
+ * not) and said so, on the grounds that "a continuous decay curve would let
+ * accumulated age out-argue a relevance difference somewhere". That risk was
+ * real for a curve MULTIPLIED into the score; it does not exist for a curve
+ * confined to a strictly lower comparison tier, which is what this is. The gain
+ * is that two memories that are both stale — previously indistinguishable, and
+ * therefore ordered by scope alone — are now ordered by how strongly they are
+ * still held, which is the whole point of tracking strength.
  *
  * `now` is a parameter rather than a `Date.now()` call so the ordering is a pure
  * function of its inputs and a spike can pin it.
@@ -212,19 +262,60 @@ function rankCandidates(
     }
   }
   // Computed once per item rather than inside the comparator: a comparator runs
-  // O(n log n) times and this is a subtraction, but more importantly it must
-  // answer identically for the same item every time it is asked — a `Date.now()`
-  // read inside the comparison could flip an answer mid-sort and produce an
+  // O(n log n) times and this is arithmetic, but more importantly it must answer
+  // identically for the same item every time it is asked — a `Date.now()` read
+  // inside the comparison could flip an answer mid-sort and produce an
   // inconsistent ordering, which V8 is entitled to turn into anything at all.
-  const stale = new Map<string, boolean>();
-  for (const item of items) stale.set(item.id, isMemoryStale(item, now, MEMORY_STALE_MS));
+  const retention = new Map<string, number>();
+  for (const item of items) retention.set(item.id, retrievability(item, now));
   return [...items].sort((a, b) => {
     const relevance = (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0);
     if (relevance !== 0) return relevance;
-    const freshness = Number(stale.get(a.id) ?? false) - Number(stale.get(b.id) ?? false);
-    if (freshness !== 0) return freshness; // fresh (false=0) before stale (true=1)
+    // DESCENDING: the more retrievable memory first. Two rows with identical
+    // access history and strength give exactly 0 here and fall through, which is
+    // what keeps the Phase-1.5 precedence order deciding everything it used to.
+    const decay = (retention.get(b.id) ?? 0) - (retention.get(a.id) ?? 0);
+    if (decay !== 0) return decay;
     return comparePrecedence(a, b);
   });
+}
+
+/**
+ * Push near-duplicates of something already selected to the BACK of the queue
+ * (§3.2 — Maximal Marginal Relevance, Carbonell & Goldstein 1998).
+ *
+ * DEFERRED, NEVER DROPPED, and the difference is the entire design. A dropped
+ * near-duplicate is a fact the turn cannot see because some other fact happened
+ * to share its vocabulary — an invisible loss, caused by a threshold nobody
+ * tuned. A deferred one simply loses its place: if the budget still has room
+ * after everything distinct has been taken, it comes back in. So the worst case
+ * of a badly-chosen threshold is a slightly odd ORDER, never a missing memory.
+ *
+ * THE BUDGET LOGIC IS UNTOUCHED (contract §5). This reorders the queue and
+ * nothing else; the caller still walks it greedily and still counts every drop
+ * as a budget drop, so `tokensUsed ≤ tokenBudget` cannot be affected by anything
+ * here.
+ *
+ * Comparison is against what has ALREADY BEEN KEPT rather than against the whole
+ * list, which is what makes it MMR rather than plain deduplication: the first of
+ * a family of near-identical memories is kept in full standing, and only its
+ * echoes are demoted.
+ */
+export function deferNearDuplicates(
+  ranked: readonly MemoryItem[],
+  threshold: number = MMR_SIM_THRESHOLD,
+): MemoryItem[] {
+  if (ranked.length < 2) return [...ranked];
+  const kept: MemoryItem[] = [];
+  const deferred: MemoryItem[] = [];
+  for (const item of ranked) {
+    const duplicate = kept.some((chosen) => memorySimilarity(chosen, item) > threshold);
+    if (duplicate) deferred.push(item);
+    else kept.push(item);
+  }
+  // The deferred keep their relative order: among echoes, the better-ranked one
+  // is still the better one.
+  return [...kept, ...deferred];
 }
 
 /**
@@ -250,9 +341,22 @@ export function selectMemoryForInjection(
   now: number = Date.now(),
 ): InjectedMemory {
   const budget = Math.max(0, Math.floor(tokenBudget));
-  // Only confirmed memory injects (contract §5).
-  const confirmed = candidates.filter((c) => c.status === 'confirmed');
-  const ranked = rankCandidates(confirmed, queryText, now);
+  // Only confirmed memory injects (contract §5) — and, since P3-M13a, only
+  // memory nothing has REPLACED (§3.1).
+  //
+  // THE TWO CONDITIONS SIT TOGETHER ON PURPOSE. Both answer the same question —
+  // "may this row shape a turn?" — and both are the reason a row can exist in the
+  // store while being invisible to the model. Splitting them across two layers is
+  // how one of them ends up applied on one read path and not another; the store
+  // therefore has no opinion about supersession on the injection path at all, and
+  // this line is the whole rule.
+  const injectable = candidates.filter(
+    (c) => c.status === 'confirmed' && c.supersededAt === undefined,
+  );
+  // MMR (P3-M13b §3.2) reorders AFTER the ranking and BEFORE the budget walk, so
+  // it can only change which of two equally-affordable memories is reached first
+  // — never the ceiling, and never whether something is reachable at all.
+  const ranked = deferNearDuplicates(rankCandidates(injectable, queryText, now));
 
   const items: MemoryItem[] = [];
   let tokensUsed = 0;

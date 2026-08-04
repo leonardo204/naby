@@ -63,6 +63,33 @@
 //       included, and leaves an action that never reached the judge unstamped.
 //   (x) Those stamps arrive in the meter as the implicit half of the bound, with
 //       the raw counts reported and the check-in record untouched.
+// P3-M13a (conversational-learning-hardening §3.1) — the four-op update and
+// supersession, against BOTH drivers:
+//   (bb) THE DECISION TABLE, driven directly: equivalent→NOOP, refines→UPDATE of
+//       the existing key, contradicts→ADD + reservation, unrelated→plain ADD —
+//       and a verdict with nothing matched is an ADD whatever it claimed.
+//   (bb2) A TRANSIENT candidate never reserves over a stable (or untagged) row.
+//   (bb3) MATCHING IS CODE and is the gate on the model: it finds the row a
+//       candidate is about, ignores an unrelated one, and never crosses scope.
+//   (cc) A PROPOSED contradiction retires NOTHING — the reservation is recorded
+//       and the old fact goes on living.
+//   (dd) CONFIRMATION is what stamps it, through the same helper `/api/memory`
+//       calls, and the old row is kept rather than deleted.
+//   (ee) The store enforces the transient rule and never re-stamps a row that is
+//       already superseded.
+//   (ff) `style/<taskType>` is auto-confirmed at the threshold; `style/global/*`
+//       NEVER is, whatever the opt-in says (§3.3).
+//   (gg) A superseded row is out of injection AND out of the evidence pool.
+//   (hh) EQUIVALENT writes nothing and corroborates; REFINES rewrites the
+//       existing key instead of minting a near-duplicate beside it.
+//   (ii) A relation whose quote the user never typed is dropped and counted.
+// P3-M13c (§3.3) — style:
+//   (jj) Style preferences are ordinary proposed `procedural`/`user` memory under
+//       `style/<target>/<slug>`, travelling the identical machinery.
+//   (kk) The FINGERPRINT is counted (no model), stored under one settings key,
+//       injected only above the sample floor, silenced by the learning gate with
+//       NO new switch, and merged with a cap so a long history cannot freeze it.
+//
 // And once, against a real file:
 //   (i) LOSSLESS MIGRATION v7 -> current: reflection_state appears and works, and
 //       the pre-existing session / messages / ledger rows all survive.
@@ -79,25 +106,52 @@ import { join } from 'node:path';
 
 import { MemoryStore } from '../runtime/store/memory-store.js';
 import { SCHEMA_VERSION, SqliteStore } from '../runtime/store/sqlite-store.js';
-import type { Store } from '../runtime/store/store.js';
+import type { MemoryItem, MemoryWriteRequest, Store } from '../runtime/store/store.js';
 import {
   CORROBORATION_THRESHOLD,
+  isGlobalStyleMemoryKey,
+  isStyleMemoryKey,
   parseReflectionAnswer,
   REFLECTION_IDLE_MS,
   REFLECTION_MIN_USER_MESSAGES,
   REFLECTION_SWEEP_CAP,
+  shouldAutoConfirmMemory,
   validateReflectionVerdicts,
   type ReflectionCase,
   type ReflectionJudge,
   type ReflectionMemoryCandidate,
+  type ReflectionPairRelation,
+  type ReflectionStyleCandidate,
 } from '../runtime/reflection.js';
+// P3-M13a (§3.1): the decision table and the matcher — pure, so the spike drives
+// the very functions the sweep calls rather than a second copy of the rules.
+import {
+  applyConsolidation,
+  matchCandidates,
+  maySupersede,
+  memoryHandle,
+} from '../runtime/memory-consolidation.js';
+// P3-M13c (§3.3): the deterministic half.
+import {
+  computeStyleFingerprint,
+  mergeStyleFingerprint,
+  parseStyleFingerprint,
+  renderStyleFingerprintLine,
+  STYLE_FINGERPRINT_KEY,
+  STYLE_FINGERPRINT_MIN_SAMPLES,
+  STYLE_SAMPLE_CAP,
+} from '../runtime/style-fingerprint.js';
 import {
   askDecisionQuality,
   computeGrowth,
   IMPLICIT_WEIGHT,
   type CheckinRecord,
 } from '../runtime/growth.js';
-import { DEFAULT_USER_ID, retrieveForInjection } from '../runtime/memory-inject.js';
+import {
+  DEFAULT_USER_ID,
+  retrieveForInjection,
+  selectMemoryForInjection,
+} from '../runtime/memory-inject.js';
 // P3-M10 (memory-hygiene §2.2/§3): the decay window and the app-wide learning
 // switch, imported from the runtime so the spike drives the SAME rules the sweep
 // does rather than a second copy of them.
@@ -109,6 +163,7 @@ import {
 import { buildQueryOptions } from '../engines/claude-agent-sdk-engine.js';
 import type { EngineRunInput } from '../runtime/engine.js';
 import {
+  activateSupersession,
   MEMORY_AUTO_CONFIRM_KEY,
   ReflectionJudgeUnavailableError,
   runReflectionSweep,
@@ -1036,7 +1091,11 @@ async function checkStaleReview(store: Store, label: string): Promise<void> {
     confidence: 1,
     requestedStatus: 'confirmed',
   });
-  store.markMemoriesInjected([stale.id], cutoff - 1);
+  // ONE ACCESS STAMP ALSO RAISES STRENGTH TO 2 (P3-M13b §3.2), so this row's
+  // review window is now TWO of them — the queue asks "has it lost its hold",
+  // not "is it old". Aged past the strength-scaled window rather than the fixed
+  // one, which is precisely the behaviour change §3.2 describes.
+  store.markMemoriesInjected([stale.id], cutoff - MEMORY_DECAY_REVIEW_MS - 1);
 
   const fresh = store.putMemory({
     scope: 'user',
@@ -1073,6 +1132,29 @@ async function checkStaleReview(store: Store, label: string): Promise<void> {
     `(t2) [${label}] "keep this" removes a row from the stale queue by stamping access`,
     kept.staleForReview === 0,
     `staleForReview after keepAlive = ${kept.staleForReview}`,
+  );
+
+  // (t3) THE QUEUE IS NOW "LOST ITS HOLD", NOT "IS OLD" (P3-M13b §3.2). A row
+  // used often enough to reach strength 3 sits 91 days idle and is NOT offered
+  // for review, where an S=1 row at the same age would be — which is the whole
+  // point of the change, and the thing an existing install feels.
+  const wellUsed = store.putMemory({
+    scope: 'user',
+    scopeKey: DEFAULT_USER_ID,
+    type: 'semantic',
+    key: 'much-used-preference',
+    value: 'Something the turns kept reaching for.',
+    provenance: { source: 'user' },
+    confidence: 1,
+    requestedStatus: 'confirmed',
+  });
+  // Three injections ⇒ strength 4 ⇒ four review windows before it is asked about.
+  for (let i = 0; i < 3; i += 1) store.markMemoriesInjected([wellUsed.id], cutoff - 1);
+  const strong = await runReflectionSweep(store, proposingJudge([]), { now, cap: 10 });
+  record(
+    `(t3) [${label}] a well-used memory idle past 90 days is NOT in the review queue — the queue tracks strength, not age`,
+    strong.staleForReview === 0 && (store.getMemoryById(wellUsed.id)?.strength ?? 0) === 4,
+    `staleForReview=${strong.staleForReview} strength=${String(store.getMemoryById(wellUsed.id)?.strength)}`,
   );
 }
 
@@ -1478,6 +1560,538 @@ function withAgent(make: () => Store): () => Store {
   };
 }
 
+// ===========================================================================
+// P3-M13a + P3-M13c — the four-op update, supersession, and style
+// (specs/phase-3-conversational-learning-hardening.md §3.1 / §3.3)
+// ===========================================================================
+
+/** The user's own words in an M13 session — the evidence space for BOTH the
+ *  candidate's quote and the pair relation's. */
+const MOVED_QUOTE = 'I moved to Porto last month';
+const STYLE_QUOTE = 'give me the conclusion first when you review something';
+
+/** A purely conversational session saying one thing, twice (the memory task's
+ *  own floor is two user messages). */
+function seedM13Session(store: Store, sessionId: string, texts: string[]): void {
+  store.touchSession(sessionId, 'test-provider');
+  for (const text of texts) {
+    store.appendMessage(sessionId, { role: 'user', content: text });
+    store.appendMessage(sessionId, { role: 'assistant', content: 'Noted.' });
+  }
+}
+
+/** Seed an EXISTING confirmed memory for a candidate to be related to. */
+function seedExisting(store: Store, key: string, value: string, over: Partial<MemoryWriteRequest> = {}) {
+  return store.putMemory({
+    scope: 'user',
+    scopeKey: DEFAULT_USER_ID,
+    type: 'semantic',
+    key,
+    value,
+    provenance: { source: 'artifact' },
+    confidence: 0.5,
+    requestedStatus: 'confirmed',
+    ...over,
+  } as MemoryWriteRequest);
+}
+
+/** A judge that answers the memory task AND the relation/style tasks — the shape
+ *  a real model returns once §3.1 and §3.3 are in the prompt. */
+const m13Judge = (
+  memories: ReflectionMemoryCandidate[],
+  relations: ReflectionPairRelation[] = [],
+  styles: ReflectionStyleCandidate[] = [],
+): ReflectionJudge => {
+  return async (cases) => ({
+    corrections: cases.map((c) => ({ caseId: c.caseId, corrected: false })),
+    memories,
+    relations,
+    styles,
+  });
+};
+
+/**
+ * (bb) THE DECISION TABLE, driven directly. Pure, so it is asserted here rather
+ * than inferred from four sweeps — and the point of §3.1 is that this table, not
+ * the model, decides what happens.
+ */
+function checkFourOps(): void {
+  const existing: MemoryItem = {
+    id: 'old-1',
+    scope: 'user',
+    scopeKey: DEFAULT_USER_ID,
+    type: 'semantic',
+    key: 'home-city',
+    value: 'Lives in Lisbon.',
+    provenance: { source: 'artifact' },
+    confidence: 0.5,
+    status: 'confirmed',
+    createdAt: 1,
+    updatedAt: 1,
+    strength: 1,
+  };
+  const candidate = {
+    scope: 'user' as const,
+    key: 'home-city-now',
+    value: 'Lives in Porto.',
+    volatility: 'stable' as const,
+  };
+
+  const equivalent = applyConsolidation('equivalent', candidate, existing);
+  const refines = applyConsolidation('refines', candidate, existing);
+  const contradicts = applyConsolidation('contradicts', candidate, existing);
+  const unrelated = applyConsolidation('unrelated', candidate, existing);
+  const noMatch = applyConsolidation('contradicts', candidate);
+
+  record(
+    '(bb) the four-op decision table: equivalent→NOOP on the existing row, refines→UPDATE of its key, contradicts→ADD + reservation, unrelated→plain ADD',
+    equivalent.op === 'noop' &&
+      equivalent.targetId === 'old-1' &&
+      equivalent.value === 'Lives in Lisbon.' &&
+      refines.op === 'update' &&
+      refines.key === 'home-city' &&
+      refines.value === 'Lives in Porto.' &&
+      contradicts.op === 'add' &&
+      contradicts.key === 'home-city-now' &&
+      (contradicts.op === 'add' ? contradicts.supersedes === 'old-1' : false) &&
+      unrelated.op === 'add' &&
+      (unrelated.op === 'add' ? unrelated.supersedes === undefined : false) &&
+      // A relation to NOTHING is not a relation: with no match it is an ADD
+      // whatever the verdict claimed.
+      noMatch.op === 'add' &&
+      (noMatch.op === 'add' ? noMatch.supersedes === undefined : false),
+    `equivalent=${equivalent.op}(${equivalent.op === 'noop' ? equivalent.targetId : ''}) refines=${refines.op}(key=${refines.key}) ` +
+      `contradicts=${contradicts.op}(supersedes=${contradicts.op === 'add' ? String(contradicts.supersedes) : '-'}) ` +
+      `unrelated=${unrelated.op} noMatch=${noMatch.op}`,
+  );
+
+  // The volatility rule, at the decision layer. A transient claimant produces NO
+  // reservation at all — both facts simply live, which is correct because they
+  // were never in competition.
+  const transientContradiction = applyConsolidation(
+    'contradicts',
+    { ...candidate, volatility: 'transient', key: 'travel-now', value: 'In Berlin this week.' },
+    existing,
+  );
+  record(
+    '(bb2) a TRANSIENT candidate never reserves a supersession over a stable row — it is a plain ADD, so both facts live',
+    transientContradiction.op === 'add' &&
+      (transientContradiction.op === 'add'
+        ? transientContradiction.supersedes === undefined
+        : false) &&
+      maySupersede({ volatility: 'transient' }, { volatility: 'stable' }) === false &&
+      // An UNTAGGED row is stable — which is what protects every pre-v12 row.
+      maySupersede({ volatility: 'transient' }, {}) === false &&
+      maySupersede({ volatility: 'stable' }, { volatility: 'stable' }) === true,
+    `op=${transientContradiction.op} supersedes=${transientContradiction.op === 'add' ? String(transientContradiction.supersedes) : '-'}; ` +
+      `transient→stable=${maySupersede({ volatility: 'transient' }, { volatility: 'stable' })} ` +
+      `transient→untagged=${maySupersede({ volatility: 'transient' }, {})}`,
+  );
+
+  // (bb3) MATCHING IS CODE, and it is the gate on the model: a relation naming a
+  // pair the matcher never produced can never be acted on, because the pair is
+  // never looked up. Asserted on the matcher itself.
+  const unrelatedRow: MemoryItem = {
+    ...existing,
+    id: 'old-2',
+    key: 'coffee-order',
+    value: 'Drinks oat flat whites.',
+  };
+  const matches = matchCandidates(candidate, [existing, unrelatedRow]);
+  const crossScope = matchCandidates({ ...candidate, scope: 'project' }, [existing]);
+  record(
+    '(bb3) matching is CODE: it finds the row a candidate is about, ignores an unrelated one, and never crosses scope',
+    matches.length === 1 &&
+      matches[0]?.item.id === 'old-1' &&
+      crossScope.length === 0 &&
+      memoryHandle(existing) === 'user:home-city',
+    `matches=${matches.map((m) => `${m.item.key}@${m.score.toFixed(2)}`).join(',')} crossScope=${crossScope.length} handle=${memoryHandle(existing)}`,
+  );
+}
+
+/**
+ * (cc)+(dd) THE SUPERSESSION LIFECYCLE, through the REAL sweep and the REAL
+ * store: a proposal reserves and retires NOTHING, and confirmation is what makes
+ * the stamp.
+ */
+async function checkSupersessionLifecycle(store: Store, label: string): Promise<void> {
+  const older = seedExisting(store, 'home-city', 'Lives in Lisbon.');
+  seedM13Session(store, 'sess-m13a', [MOVED_QUOTE, 'so update my address please']);
+
+  const out = await runReflectionSweep(
+    store,
+    m13Judge(
+      [
+        {
+          scope: 'user',
+          type: 'semantic',
+          key: 'home-city-now',
+          value: 'Lives in Porto.',
+          volatility: 'stable',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+      [
+        {
+          key: 'home-city-now',
+          existing: 'user:home-city',
+          verdict: 'contradicts',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+    ),
+    { now: LATER(), cap: 10 },
+  );
+
+  const newer = userMemory(store).find((m) => m.key === 'home-city-now');
+  const oldAfterProposal = store.getMemoryById(older.id);
+  record(
+    `(cc) [${label}] a PROPOSED contradiction reserves the supersession and retires nothing — the old fact still lives`,
+    out.supersessionsReserved === 1 &&
+      out.supersessionsActivated === 0 &&
+      newer?.status === 'proposed' &&
+      newer.provenance.supersedes === older.id &&
+      oldAfterProposal?.supersededAt === undefined &&
+      oldAfterProposal?.status === 'confirmed',
+    `reserved=${out.supersessionsReserved} activated=${out.supersessionsActivated}; ` +
+      `new row ${newer?.status} supersedes=${String(newer?.provenance.supersedes)}; ` +
+      `old row supersededAt=${String(oldAfterProposal?.supersededAt)}`,
+  );
+
+  // CONFIRMATION is the activation — the same two calls `/api/memory` makes when
+  // a person clicks confirm.
+  store.confirmMemory(newer!.id);
+  const activated = activateSupersession(store, newer!.id, LATER());
+  const oldAfterConfirm = store.getMemoryById(older.id);
+  record(
+    `(dd) [${label}] confirming the replacement STAMPS the old row — superseded_at + superseded_by, and the row is kept`,
+    activated &&
+      oldAfterConfirm?.supersededAt !== undefined &&
+      oldAfterConfirm?.supersededBy === newer!.id &&
+      oldAfterConfirm?.value === 'Lives in Lisbon.',
+    `activated=${activated} supersededBy=${String(oldAfterConfirm?.supersededBy)} value kept="${oldAfterConfirm?.value}"`,
+  );
+
+  // (gg) A superseded row is out of the injection candidates AND out of the
+  // evidence pool — corroboration must not accrue behind a replaced belief.
+  const injected = selectMemoryForInjection(userMemory(store), 2_000, 'where do I live?', LATER());
+  const corroborationRefused = store.corroborateMemory(older.id, 'sess-anything');
+  record(
+    `(gg) [${label}] a superseded row is excluded from injection and can no longer accrue corroboration`,
+    !injected.items.some((i) => i.id === older.id) &&
+      injected.items.some((i) => i.id === newer!.id) &&
+      corroborationRefused === false,
+    `injected=${injected.items.map((i) => i.key).join(',')}; corroborateMemory(old)=${corroborationRefused}`,
+  );
+}
+
+/** (ee) The transient rule, enforced by the STORE as well as by the decision —
+ *  it has to hold however the reservation was made. */
+function checkTransientNeverSupersedes(store: Store, label: string): void {
+  const stable = seedExisting(store, 'home-base', 'Lives in Lisbon.');
+  const transient = seedExisting(store, 'travel-now', 'In Berlin this week.', {
+    volatility: 'transient',
+  });
+  const refused = store.supersedeMemory(stable.id, transient.id, LATER());
+
+  // …while a stable replacement is allowed.
+  const stableReplacement = seedExisting(store, 'home-base-new', 'Lives in Porto.');
+  const allowed = store.supersedeMemory(stable.id, stableReplacement.id, LATER());
+
+  record(
+    `(ee) [${label}] the STORE refuses a transient row superseding a stable one, and allows a stable one`,
+    refused === false &&
+      allowed === true &&
+      store.getMemoryById(stable.id)?.supersededBy === stableReplacement.id,
+    `transient→stable refused=${!refused}; stable→stable allowed=${allowed}`,
+  );
+
+  // Already-superseded rows are never re-stamped: history names the row that
+  // actually replaced this one, not the latest claimant.
+  const third = seedExisting(store, 'home-base-newer', 'Lives in Madrid.');
+  const reStamp = store.supersedeMemory(stable.id, third.id, LATER());
+  record(
+    `(ee2) [${label}] an already-superseded row is not re-stamped by a later claimant`,
+    reStamp === false && store.getMemoryById(stable.id)?.supersededBy === stableReplacement.id,
+    `reStamp=${reStamp} supersededBy still ${String(store.getMemoryById(stable.id)?.supersededBy)}`,
+  );
+}
+
+/** (hh) `equivalent` writes nothing and corroborates; `refines` rewrites the
+ *  EXISTING key rather than minting a near-duplicate. */
+async function checkNoopAndUpdate(store: Store, label: string): Promise<void> {
+  const existing = seedExisting(store, 'metric-units', 'Prefers metric units in every answer.');
+  seedM13Session(store, 'sess-m13b', [MOVED_QUOTE, 'and keep using metric units please']);
+
+  const before = store.getMemoryCorroboration([existing.id])[existing.id] ?? 0;
+  const noop = await runReflectionSweep(
+    store,
+    m13Judge(
+      [
+        {
+          scope: 'user',
+          type: 'semantic',
+          key: 'metric-please',
+          value: 'Wants metric units used in answers.',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+      [
+        {
+          key: 'metric-please',
+          existing: 'user:metric-units',
+          verdict: 'equivalent',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+    ),
+    { now: LATER(), cap: 10 },
+  );
+  const after = store.getMemoryCorroboration([existing.id])[existing.id] ?? 0;
+  const rowsAfterNoop = userMemory(store);
+  const unchanged = store.getMemoryById(existing.id);
+
+  record(
+    `(hh) [${label}] EQUIVALENT is a NOOP: no new row, the existing value and status untouched, and one more session of corroboration`,
+    noop.consolidatedNoops === 1 &&
+      noop.proposedMemories === 0 &&
+      rowsAfterNoop.length === 1 &&
+      unchanged?.value === 'Prefers metric units in every answer.' &&
+      unchanged?.status === 'confirmed' &&
+      after === before + 1,
+    `noops=${noop.consolidatedNoops} proposed=${noop.proposedMemories} rows=${rowsAfterNoop.length} ` +
+      `value unchanged=${unchanged?.value === 'Prefers metric units in every answer.'} status=${unchanged?.status} ` +
+      `corroboration ${before} → ${after}`,
+  );
+
+  // REFINES lands on the SAME key — the whole point is that it does not create a
+  // second, slightly better row beside the first.
+  seedM13Session(store, 'sess-m13c', [MOVED_QUOTE, 'metric, and to two decimal places']);
+  const refined = await runReflectionSweep(
+    store,
+    m13Judge(
+      [
+        {
+          scope: 'user',
+          type: 'semantic',
+          key: 'metric-precise',
+          value: 'Prefers metric units to two decimal places.',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+      [
+        {
+          key: 'metric-precise',
+          existing: 'user:metric-units',
+          verdict: 'refines',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+    ),
+    { now: LATER(), cap: 10 },
+  );
+  const rowsAfterRefine = userMemory(store);
+  const refinedRow = store.getMemoryById(existing.id);
+  record(
+    `(hh2) [${label}] REFINES rewrites the EXISTING key instead of minting a near-duplicate row`,
+    refined.consolidatedUpdates === 1 &&
+      rowsAfterRefine.length === 1 &&
+      refinedRow?.key === 'metric-units' &&
+      refinedRow?.value === 'Prefers metric units to two decimal places.',
+    `updates=${refined.consolidatedUpdates} rows=${rowsAfterRefine.length} key=${refinedRow?.key} value="${refinedRow?.value}"`,
+  );
+}
+
+/** (ii) An UNGROUNDED relation is thrown away and the candidate falls back to a
+ *  plain ADD — the model cannot claim a contradiction it did not evidence. */
+async function checkRelationEvidence(store: Store, label: string): Promise<void> {
+  const older = seedExisting(store, 'home-city', 'Lives in Lisbon.');
+  seedM13Session(store, 'sess-m13d', [MOVED_QUOTE, 'please update it']);
+
+  const out = await runReflectionSweep(
+    store,
+    m13Judge(
+      [
+        {
+          scope: 'user',
+          type: 'semantic',
+          key: 'home-city-now',
+          value: 'Lives in Porto.',
+          evidenceQuote: MOVED_QUOTE,
+        },
+      ],
+      [
+        {
+          key: 'home-city-now',
+          existing: 'user:home-city',
+          verdict: 'contradicts',
+          // A quote nobody typed. The candidate itself is grounded, so this
+          // isolates the RELATION's evidence rule.
+          evidenceQuote: 'the user said they no longer live in Lisbon',
+        },
+      ],
+    ),
+    { now: LATER(), cap: 10 },
+  );
+
+  const newer = userMemory(store).find((m) => m.key === 'home-city-now');
+  record(
+    `(ii) [${label}] a relation whose quote the user never typed is DROPPED and counted — the candidate lands as a plain ADD with no reservation`,
+    out.droppedRelations === 1 &&
+      out.supersessionsReserved === 0 &&
+      newer !== undefined &&
+      newer.provenance.supersedes === undefined &&
+      store.getMemoryById(older.id)?.supersededAt === undefined,
+    `droppedRelations=${out.droppedRelations} reserved=${out.supersessionsReserved} ` +
+      `supersedes=${String(newer?.provenance.supersedes)}`,
+  );
+}
+
+/**
+ * (jj) STYLE preferences are ordinary memory with a namespaced key — and
+ * `style/global/*` is the ONE class corroboration may never confirm (§3.3).
+ */
+async function checkStylePreferences(store: Store, label: string): Promise<void> {
+  seedM13Session(store, 'sess-m13e', [STYLE_QUOTE, 'that applies to everything you write too']);
+
+  const out = await runReflectionSweep(
+    store,
+    m13Judge(
+      [],
+      [],
+      [
+        {
+          target: 'review',
+          key: 'conclusion-first',
+          value: 'Wants the conclusion before the reasoning when reviewing.',
+          evidenceQuote: STYLE_QUOTE,
+        },
+        {
+          target: 'global',
+          key: 'conclusion-first',
+          value: 'Wants the conclusion first, always.',
+          evidenceQuote: STYLE_QUOTE,
+        },
+      ],
+    ),
+    { now: LATER(), cap: 10 },
+  );
+
+  const rows = userMemory(store);
+  const scoped = rows.find((m) => m.key === 'style/review/conclusion-first');
+  const global = rows.find((m) => m.key === 'style/global/conclusion-first');
+  record(
+    `(jj) [${label}] style preferences land as ordinary proposed procedural/user memory under style/<target>/<slug>`,
+    out.proposedStyles === 2 &&
+      scoped?.type === 'procedural' &&
+      scoped?.scope === 'user' &&
+      scoped?.status === 'proposed' &&
+      global?.status === 'proposed' &&
+      isStyleMemoryKey(scoped!.key) &&
+      isGlobalStyleMemoryKey(global!.key) &&
+      !isGlobalStyleMemoryKey(scoped!.key),
+    `proposedStyles=${out.proposedStyles} scoped=${scoped?.key}(${scoped?.type}/${scoped?.scope}) global=${global?.key}`,
+  );
+
+  // Now corroborate BOTH to the threshold and turn the opt-in on. The scoped one
+  // is promoted; the global one is not, and no setting can change that.
+  store.setSetting(MEMORY_AUTO_CONFIRM_KEY, 'true');
+  for (let i = 0; i < CORROBORATION_THRESHOLD; i += 1) {
+    store.corroborateMemory(scoped!.id, `sess-style-${i}`);
+    store.corroborateMemory(global!.id, `sess-style-${i}`);
+  }
+  const promoted = await runReflectionSweep(store, m13Judge([]), { now: LATER(), cap: 10 });
+  const scopedAfter = store.getMemoryById(scoped!.id);
+  const globalAfter = store.getMemoryById(global!.id);
+
+  record(
+    `(ff) [${label}] style/<taskType> is auto-confirmed at the threshold; style/global NEVER is, whatever the setting says (§3.3, HAX cautious adaptation)`,
+    scopedAfter?.status === 'confirmed' &&
+      globalAfter?.status === 'proposed' &&
+      promoted.autoConfirmed === 1 &&
+      // …and the pure predicate says the same thing on its own.
+      shouldAutoConfirmMemory(globalAfter!, 99, { enabled: true }) === false &&
+      shouldAutoConfirmMemory(
+        { status: 'proposed', key: 'style/review/x', provenance: { source: 'artifact' } },
+        CORROBORATION_THRESHOLD,
+        { enabled: true },
+      ) === true,
+    `scoped=${scopedAfter?.status} global=${globalAfter?.status} autoConfirmed=${promoted.autoConfirmed}`,
+  );
+  store.setSetting(MEMORY_AUTO_CONFIRM_KEY, 'false');
+}
+
+/**
+ * (kk) THE STYLE FINGERPRINT — deterministic, gated, and injected only once
+ * there is enough of it (§3.3, second half).
+ */
+async function checkStyleFingerprint(store: Store, label: string): Promise<void> {
+  // The pure counting, first: no model, no store.
+  const korean = ['오늘은 로그를 확인한다.', '이 부분은 왜 이렇게 했나요?', '- 첫째\n- 둘째'];
+  const counted = computeStyleFingerprint(korean, 1_000);
+  record(
+    `(kk) [${label}] the fingerprint is COUNTED, not inferred: endings, questions and list use come straight out of the text`,
+    counted.sampleCount === 3 &&
+      counted.endings.formal > 0 &&
+      counted.endings.polite > 0 &&
+      counted.questionRatio > 0 &&
+      counted.listRatio > 0 &&
+      counted.avgSentenceChars > 0,
+    `samples=${counted.sampleCount} sentences=${counted.sentenceCount} formal=${counted.endings.formal} ` +
+      `polite=${counted.endings.polite} questions=${counted.questionRatio} lists=${counted.listRatio}`,
+  );
+
+  // The injection gate: below the sample floor there is no line at all, so a
+  // fresh install's turn is byte-for-byte what it was.
+  const thin = { ...counted, sampleCount: STYLE_FINGERPRINT_MIN_SAMPLES - 1 };
+  const thick = { ...counted, sampleCount: STYLE_FINGERPRINT_MIN_SAMPLES };
+  record(
+    `(kk2) [${label}] no line is injected below ${STYLE_FINGERPRINT_MIN_SAMPLES} samples, and one English line above it`,
+    renderStyleFingerprintLine(thin) === undefined &&
+      renderStyleFingerprintLine(undefined) === undefined &&
+      (renderStyleFingerprintLine(thick)?.startsWith('Observed writing style') ?? false) &&
+      !renderStyleFingerprintLine(thick)!.includes('\n'),
+    `below=${String(renderStyleFingerprintLine(thin))} above="${renderStyleFingerprintLine(thick)}"`,
+  );
+
+  // Through the REAL sweep: the settings key is written, and it round-trips.
+  seedM13Session(store, 'sess-m13f', [STYLE_QUOTE, '그리고 로그는 짧게 남긴다.']);
+  const swept = await runReflectionSweep(store, m13Judge([]), { now: LATER(), cap: 10 });
+  const stored = parseStyleFingerprint(store.getSetting(STYLE_FINGERPRINT_KEY));
+  record(
+    `(kk3) [${label}] the sweep computes and stores the fingerprint under one settings key`,
+    swept.fingerprintSamples === 2 && stored !== undefined && stored.sampleCount === 2,
+    `fingerprintSamples=${swept.fingerprintSamples} stored=${JSON.stringify(stored)}`,
+  );
+
+  // THE GATE (§3.3, and §4's "no new switch"): with learning off, nothing is
+  // recomputed — the same predicate that silences the LLM half.
+  writeLearningEnabled(store, false);
+  seedM13Session(store, 'sess-m13g', ['완전히 다른 문체로 아주 길게 씁니다', '정말로요']);
+  const gated = await runReflectionSweep(store, m13Judge([]), { now: LATER(), cap: 10 });
+  const afterGate = parseStyleFingerprint(store.getSetting(STYLE_FINGERPRINT_KEY));
+  record(
+    `(kk4) [${label}] with learning OFF the fingerprint is not updated — no style-specific switch was needed (§4)`,
+    gated.fingerprintSamples === 0 &&
+      afterGate?.computedAt === stored?.computedAt &&
+      afterGate?.sampleCount === 2,
+    `fingerprintSamples=${gated.fingerprintSamples} sampleCount still ${String(afterGate?.sampleCount)}`,
+  );
+  writeLearningEnabled(store, true);
+
+  // And the merge is an incremental mean with a cap, so a long history cannot
+  // freeze the profile against a person who changes how they write.
+  const merged = mergeStyleFingerprint(
+    { ...counted, sampleCount: STYLE_SAMPLE_CAP * 5, avgSentenceChars: 10 },
+    { ...counted, sampleCount: STYLE_SAMPLE_CAP, avgSentenceChars: 110 },
+  );
+  record(
+    `(kk5) [${label}] merging CAPS the accumulated weight, so recent messages always move the profile`,
+    merged.sampleCount === STYLE_SAMPLE_CAP && merged.avgSentenceChars === 60,
+    `sampleCount=${merged.sampleCount} (cap ${STYLE_SAMPLE_CAP}) avgSentenceChars 10+110 -> ${merged.avgSentenceChars}`,
+  );
+}
+
 async function runDriverChecks(makeBase: () => Store, label: string): Promise<void> {
   const make = withAgent(makeBase);
   // A fresh store per check so seeded sessions never bleed across assertions.
@@ -1542,6 +2156,26 @@ async function runDriverChecks(makeBase: () => Store, label: string): Promise<vo
   s = make();
   await checkBelowThreshold(s, label);
   s.close();
+  // P3-M13a (§3.1) — the four-op update and the supersession lifecycle.
+  s = make();
+  await checkSupersessionLifecycle(s, label);
+  s.close();
+  s = make();
+  checkTransientNeverSupersedes(s, label);
+  s.close();
+  s = make();
+  await checkNoopAndUpdate(s, label);
+  s.close();
+  s = make();
+  await checkRelationEvidence(s, label);
+  s.close();
+  // P3-M13c (§3.3) — style preferences and the counted fingerprint.
+  s = make();
+  await checkStylePreferences(s, label);
+  s.close();
+  s = make();
+  await checkStyleFingerprint(s, label);
+  s.close();
 }
 
 async function main(tmpDir: string): Promise<boolean> {
@@ -1549,6 +2183,9 @@ async function main(tmpDir: string): Promise<boolean> {
   await runDriverChecks(() => new SqliteStore({ path: ':memory:' }), 'SqliteStore');
   checkValidatorDirectly();
   checkHeadlessJudgeIsolation();
+  // P3-M13a §3.1 step 3: the decision table itself, driven directly — it is pure,
+  // and it is what decides every operation above.
+  checkFourOps();
   checkMigration(join(tmpDir, 'v7.db'));
   checkMemoryMigration(join(tmpDir, 'v8.db'));
 

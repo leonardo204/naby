@@ -62,6 +62,81 @@ export const MEMORY_STALE_MS = 30 * 24 * 60 * 60 * 1000;
 export const MEMORY_DECAY_REVIEW_MS = 90 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
+// Strength + retrievability (P3-M13b —
+// specs/phase-3-conversational-learning-hardening.md §3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ceiling on `MemoryItem.strength` (§3.2).
+ *
+ * WHY THERE IS ONE AT ALL. Strength rises every time a memory is injected, and
+ * an unbounded S makes `R = exp(-t / (S × 30d))` flat: a fact that was useful
+ * every day for a year would take decades to go stale, so a preference the user
+ * has silently outgrown would outlive them noticing. Twelve caps the effective
+ * window at a YEAR of disuse (12 × 30 days) before staleness, which is long
+ * enough that a genuinely core fact is never demoted for a summer's absence and
+ * short enough that nothing is immortal.
+ *
+ * It is a TUNABLE, like the two windows above, and being wrong about it is cheap
+ * for the same reason: strength only ever moves tie-break order and the review
+ * queue, never whether a matching memory is injected.
+ */
+export const STRENGTH_CAP = 12;
+
+/**
+ * The strength of a row, floored at 1 and capped at `STRENGTH_CAP`.
+ *
+ * THE `?? 1` IS THE MIGRATION, exactly as `memoryLastAccessAt`'s fallback is.
+ * A row written before v12 carries no strength, and 1 is the value at which the
+ * whole continuous model reduces to the 30/90-day cliffs those rows were living
+ * under — so nothing about them changes on the day the column appears. The clamp
+ * covers a hand-edited or imported row that claims a thousand.
+ */
+export function memoryStrength(item: Pick<MemoryItem, 'strength'>): number {
+  const raw = typeof item.strength === 'number' && Number.isFinite(item.strength) ? item.strength : 1;
+  return Math.min(STRENGTH_CAP, Math.max(1, raw));
+}
+
+/** The retrievability at which a memory counts as STALE — `e^(-1)`, i.e. one
+ *  full strength-scaled window of disuse. At S = 1 that is exactly 30 days. */
+export const STALE_RETRIEVABILITY = Math.exp(-1);
+
+/** The retrievability at which a CONFIRMED memory is offered for review —
+ *  `e^(-3)`, three windows. At S = 1 that is exactly 90 days, which is what the
+ *  fixed `MEMORY_DECAY_REVIEW_MS` cliff always was. */
+export const REVIEW_RETRIEVABILITY = Math.exp(-3);
+
+/**
+ * HOW RETRIEVABLE this memory still is, in [0, 1] (§3.2):
+ *
+ *     R = exp(-t / (S × unitMs)),  t = now - last access
+ *
+ * The MemoryBank curve (arXiv:2305.10250, AAAI'24), which is the standard shape
+ * for exactly naby's situation: an item that keeps being recalled decays more
+ * slowly, and forgetting is a DEMOTION rather than a deletion. naby's "selection
+ * is access" (P3-M10 §2.1) is the same signal that paper strengthens on, so the
+ * two models line up without inventing a new one.
+ *
+ * WHAT IT IS ALLOWED TO DO, stated here because it is the binding constraint of
+ * §3.2 and §4: R lives in the TIE-BREAK layer of the injection ranking and
+ * nowhere else. It is never multiplied into relevance. An accumulated year of
+ * age can therefore never out-argue a relevance difference — the same reason
+ * P3-M10 rejected a decay curve, kept rather than quietly reversed.
+ *
+ * `unitMs` is the window one unit of strength buys; it defaults to
+ * `MEMORY_STALE_MS` so `R < e^-1` and "stale" are the same statement.
+ */
+export function retrievability(
+  item: Pick<MemoryItem, 'updatedAt' | 'lastInjectedAt' | 'strength'>,
+  now: number,
+  unitMs: number = MEMORY_STALE_MS,
+): number {
+  const elapsed = Math.max(0, now - memoryLastAccessAt(item));
+  const window = Math.max(1, unitMs) * memoryStrength(item);
+  return Math.exp(-elapsed / window);
+}
+
+// ---------------------------------------------------------------------------
 // Staleness (§2.1 / §2.2)
 // ---------------------------------------------------------------------------
 
@@ -81,36 +156,70 @@ export function memoryLastAccessAt(item: Pick<MemoryItem, 'updatedAt' | 'lastInj
 }
 
 /**
- * Is this row STALE as of `now` — i.e. unused for longer than `staleMs`?
+ * Is this row STALE as of `now` — i.e. has its retrievability fallen below
+ * `e^(-1)`?
+ *
+ * P3-M13b GENERALIZED THE CLIFF WITHOUT MOVING IT. The old rule was
+ * `lastAccess < now - staleMs`, i.e. "unused for longer than one fixed window".
+ * The new rule is `R < e^(-1)`, which expands to `elapsed > S × staleMs` — the
+ * SAME inequality at S = 1, and every pre-v12 row is S = 1. So no existing
+ * install's stale set moves on upgrade; what changes is that a memory the turns
+ * keep using earns a longer window, up to `STRENGTH_CAP` of them.
+ *
+ * THE SIGNATURE IS UNCHANGED, deliberately: `staleMs` is still "one window", it
+ * is simply scaled by strength now. Every existing caller keeps working and
+ * keeps meaning what it meant.
  *
  * STATUS IS NOT PART OF IT. This is the RANKING predicate, and ranking only ever
  * sees confirmed rows (contract §5 filters first), so adding a status test here
  * would be dead weight in the hot path and a second place for the rule to live.
- * The REVIEW queue's "stale" is the narrower question — confirmed AND unused for
- * 90 days — and it is asked by `isStaleForReview`.
+ * The REVIEW queue's "stale" is the narrower question — confirmed AND far enough
+ * gone to be worth asking about — and it is asked by `isStaleForReview`.
  */
 export function isMemoryStale(
-  item: Pick<MemoryItem, 'updatedAt' | 'lastInjectedAt'>,
+  item: Pick<MemoryItem, 'updatedAt' | 'lastInjectedAt' | 'strength'>,
   now: number,
   staleMs: number = MEMORY_STALE_MS,
 ): boolean {
-  return memoryLastAccessAt(item) < now - staleMs;
+  return retrievability(item, now, staleMs) < STALE_RETRIEVABILITY;
 }
 
 /**
- * Should this row be OFFERED FOR REVIEW as of `now` (§2.2)? Confirmed, and unused
- * for longer than `reviewMs`.
+ * Is this row FAR ENOUGH GONE to be worth asking a person about — `R < e^(-3)`,
+ * three strength-scaled windows of disuse (§3.2)?
+ *
+ * At S = 1 this is exactly `elapsed > reviewMs`, i.e. the fixed 90-day cliff
+ * P3-M10 shipped. The `reviewMs / 3` unit is not a fudge: `reviewMs` is defined
+ * as THREE staleness windows, so dividing recovers the one-strength-unit window
+ * the curve is expressed in, and the two constants stay tied to each other
+ * instead of drifting.
+ *
+ * WHAT CHANGES FOR A REAL USER. The queue stops being "everything old" and
+ * becomes "everything that has lost its hold": a memory injected into most weeks
+ * never enters it, however many months ago it was first written.
+ */
+export function isDueForReview(
+  item: Pick<MemoryItem, 'updatedAt' | 'lastInjectedAt' | 'strength'>,
+  now: number,
+  reviewMs: number = MEMORY_DECAY_REVIEW_MS,
+): boolean {
+  return retrievability(item, now, Math.max(1, reviewMs) / 3) < REVIEW_RETRIEVABILITY;
+}
+
+/**
+ * Should this row be OFFERED FOR REVIEW as of `now` (§2.2)? Confirmed, and past
+ * the review threshold.
  *
  * The confirmed half is the point: a `proposed` row is not stale, it is
  * unanswered, and it already has its own queue. Mixing them would bury the
  * decisions that need a person under the ones that merely could use one.
  */
 export function isStaleForReview(
-  item: Pick<MemoryItem, 'status' | 'updatedAt' | 'lastInjectedAt'>,
+  item: Pick<MemoryItem, 'status' | 'updatedAt' | 'lastInjectedAt' | 'strength'>,
   now: number,
   reviewMs: number = MEMORY_DECAY_REVIEW_MS,
 ): boolean {
-  return item.status === 'confirmed' && isMemoryStale(item, now, reviewMs);
+  return item.status === 'confirmed' && isDueForReview(item, now, reviewMs);
 }
 
 /** The epoch-ms cutoff a `staleBefore` store query takes, for a given `now`.

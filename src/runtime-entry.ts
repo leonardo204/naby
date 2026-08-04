@@ -142,6 +142,7 @@ export type {
   MemoryScope,
   MemoryStatus,
   MemoryType,
+  MemoryVolatility,
   MemoryWriteDecision,
   MemoryWriteRequest,
   TrustTier,
@@ -207,8 +208,14 @@ export { asciiFold, memoryMatchesSearch } from './runtime/store/store.js';
 // its stale-review queue from the SAME cutoff the API's filter uses.
 export {
   canCaptureMemory,
+  isDueForReview,
   isMemoryStale,
   isStaleForReview,
+  memoryStrength,
+  retrievability,
+  REVIEW_RETRIEVABILITY,
+  STALE_RETRIEVABILITY,
+  STRENGTH_CAP,
   MEMORY_DECAY_REVIEW_MS,
   MEMORY_LEARNING_ENABLED_KEY,
   MEMORY_STALE_MS,
@@ -249,6 +256,9 @@ export {
   DEFAULT_USER_ID,
   estimateTokens,
   gatherCandidates,
+  deferNearDuplicates,
+  memorySimilarity,
+  MMR_SIM_THRESHOLD,
   relevanceScore,
   renderInjectedMemory,
   renderMemoryLine,
@@ -499,6 +509,9 @@ export {
   GROWTH_WINDOW,
   IMPLICIT_WEIGHT,
   IMPLICIT_WINDOW,
+  DRILL_WEIGHT,
+  DRILL_WINDOW,
+  DRILL_DAILY_CAP,
   PUPA_THRESHOLD,
   BUTTERFLY_THRESHOLD,
   type GrowthStage,
@@ -509,6 +522,20 @@ export {
   type CheckinRecord,
   type LedgerKind,
 } from './runtime/growth.js';
+
+// -- the stage capability contract (Phase 3, P3-M12a) ------------------------
+// What an agent may DO at the stage it has earned. The butterfly line stopped
+// being a MENTION gate (an agent nobody may call never gets the conversations it
+// would grow from) and became an ACTION-RANGE gate: keyed on the mechanical
+// consequence classification the ledger already uses, never on the model's own
+// estimate of whether a request is "at its level".
+export {
+  stageContract,
+  stageRefusalReason,
+  stageProgressSummary,
+  type StageContract,
+  type StageProgress,
+} from './runtime/stage-contract.js';
 
 // -- cold start (Phase 1.5, P15-07) ------------------------------------------
 // The onboarding interview: four durable questions whose answers become CONFIRMED
@@ -626,6 +653,14 @@ export {
   REFLECTION_MEMORY_CAP,
   REFLECTION_MEMORY_SCOPES,
   REFLECTION_MIN_USER_MESSAGES,
+  REFLECTION_STYLE_CAP,
+  REFLECTION_EXISTING_CAP,
+  STYLE_KEY_PREFIX,
+  STYLE_GLOBAL_TARGET,
+  styleMemoryKey,
+  isStyleMemoryKey,
+  isGlobalStyleMemoryKey,
+  readVolatility,
   CORROBORATION_THRESHOLD,
   isSessionDueForReflection,
   buildReflectionCases,
@@ -634,6 +669,9 @@ export {
   shouldExtractMemoryOnly,
   validateReflectionVerdicts,
   validateMemoryCandidates,
+  validateStyleCandidates,
+  validatePairRelations,
+  pairKey,
   shouldAutoConfirmMemory,
   normalizeReflectionAnswer,
   buildReflectionPrompt,
@@ -651,7 +689,47 @@ export {
   type ReflectionMemoryCandidate,
   type ReflectionSessionContext,
   type ReflectionUserMessage,
+  type ReflectionStyleCandidate,
+  type ReflectionPairRelation,
+  type PairRelationLookup,
   type ValidatedMemoryCandidate,
   type MemoryCandidateValidation,
   type AutoConfirmCandidate,
 } from './runtime/reflection.js';
+
+// -- memory consolidation (Phase 3, P3-M13a) ---------------------------------
+// The four-operation update and its supersession reservation
+// (specs/phase-3-conversational-learning-hardening.md §3.1). Matching is code,
+// the model only LABELS the pair, and the winner of a contradiction is decided
+// by timestamp here — the separation the research measures at 24-40 points.
+export {
+  applyConsolidation,
+  matchCandidates,
+  maySupersede,
+  memoryHandle,
+  readPairVerdict,
+  MATCH_CANDIDATE_CAP,
+  MATCH_MIN_SCORE,
+  PAIR_VERDICTS,
+  type ConsolidationCandidate,
+  type ConsolidationOp,
+  type MemoryMatch,
+  type PairVerdict,
+} from './runtime/memory-consolidation.js';
+
+// -- style fingerprint (Phase 3, P3-M13c) ------------------------------------
+// The DETERMINISTIC half of §3.3: counts over the user's own messages, one
+// settings key, one injected English line. No model anywhere in it, and the
+// caller applies the same `canCaptureMemory` gate the LLM half obeys.
+export {
+  computeStyleFingerprint,
+  mergeStyleFingerprint,
+  parseStyleFingerprint,
+  renderStyleFingerprintLine,
+  serializeStyleFingerprint,
+  splitSentences,
+  STYLE_FINGERPRINT_KEY,
+  STYLE_FINGERPRINT_MIN_SAMPLES,
+  STYLE_SAMPLE_CAP,
+  type StyleFingerprint,
+} from './runtime/style-fingerprint.js';

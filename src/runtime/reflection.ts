@@ -37,7 +37,17 @@
 // of the agent only by pointing at something the user actually typed.
 
 import type { RuntimeMessage } from './engine.js';
-import type { MemoryItem, MemoryScope, MemoryType, TrustTier } from './store/store.js';
+import type {
+  MemoryItem,
+  MemoryScope,
+  MemoryType,
+  MemoryVolatility,
+  TrustTier,
+} from './store/store.js';
+// P3-M13a: the pair-verdict vocabulary is the consolidation module's, not a
+// second copy of it. This file decides which verdicts are ADMISSIBLE; that one
+// decides what an admissible verdict DOES.
+import { memoryHandle, readPairVerdict, type PairVerdict } from './memory-consolidation.js';
 // The write guards are NOT re-implemented here. `naby_remember` already decides
 // what a well-formed memory write looks like (slug normalization, the value cap,
 // the secret refusal, the type whitelist), and a second copy of those rules is a
@@ -132,6 +142,72 @@ export const REFLECTION_MIN_USER_MESSAGES = 2;
  */
 export const CORROBORATION_THRESHOLD = 3;
 
+/**
+ * How many STYLE preferences one judge call may produce (P3-M13c §3.3).
+ *
+ * Three, and lower than the memory cap on purpose. A style statement is a claim
+ * about how someone wants to be spoken to, which is both the easiest thing for a
+ * model to invent from one polite sentence and the most annoying thing to have
+ * wrong — so the ceiling is set at "the few that were obvious" rather than at
+ * what a review queue can absorb.
+ */
+export const REFLECTION_STYLE_CAP = 3;
+
+/** How many existing memories the pair-relation task is shown (P3-M13a §3.1).
+ *  Every one of them is a line of prompt on every reflection call, and the
+ *  candidate a proposal is really about is almost always among the most recently
+ *  touched — so the window is bounded and the sweep passes the newest rows. */
+export const REFLECTION_EXISTING_CAP = 20;
+
+// ---------------------------------------------------------------------------
+// The style key namespace (P3-M13c §3.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The prefix that makes a memory a STYLE preference.
+ *
+ * WHY A KEY NAMESPACE AND NOT A NEW COLUMN OR A NEW TABLE. A style preference IS
+ * an ordinary memory — `procedural`, `user`-scope, born `proposed`, reviewable,
+ * editable, deletable, injected by the same budget. Giving it its own storage
+ * would mean re-implementing the review UI, the provenance display, the decay and
+ * the sovereignty controls for it, and every one of those copies would be a place
+ * the two kinds of memory could start behaving differently. A prefix buys the one
+ * thing that genuinely differs — the auto-confirm rule below — for the cost of a
+ * string comparison.
+ *
+ * THE SEPARATOR IS A SLASH, and it is deliberately NOT run through
+ * `normalizeMemoryKey` (which folds `/` to `-`). Each SEGMENT is normalized; the
+ * structure between them is preserved, so `style/global/…` is a prefix that can
+ * be tested exactly rather than a hyphenated string a user's own key could
+ * collide with by accident.
+ */
+export const STYLE_KEY_PREFIX = 'style/';
+
+/** The target of a style preference that applies to EVERYTHING. The one target
+ *  corroboration may never confirm on its own — see `shouldAutoConfirmMemory`. */
+export const STYLE_GLOBAL_TARGET = 'global';
+
+/** Build `style/<target>/<slug>`, or undefined when either segment normalizes to
+ *  nothing (which is what a model answering with punctuation produces). */
+export function styleMemoryKey(target: string, slug: string): string | undefined {
+  const normalizedTarget = normalizeMemoryKey(target || STYLE_GLOBAL_TARGET);
+  const normalizedSlug = normalizeMemoryKey(slug);
+  if (!normalizedTarget || !normalizedSlug) return undefined;
+  return `${STYLE_KEY_PREFIX}${normalizedTarget}/${normalizedSlug}`;
+}
+
+/** Is this memory a style preference at all? */
+export function isStyleMemoryKey(key: string): boolean {
+  return typeof key === 'string' && key.startsWith(STYLE_KEY_PREFIX);
+}
+
+/** Is this a style preference that would change the agent's GLOBAL tone —
+ *  the one class of memory corroboration may never confirm (§3.3, HAX
+ *  "cautious adaptation")? */
+export function isGlobalStyleMemoryKey(key: string): boolean {
+  return typeof key === 'string' && key.startsWith(`${STYLE_KEY_PREFIX}${STYLE_GLOBAL_TARGET}/`);
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -182,6 +258,67 @@ export type ReflectionMemoryCandidate = {
   /** The user's own words the fact was read out of. REQUIRED — a candidate with
    *  no grounded quote is dropped (see `validateMemoryCandidates`). */
   evidenceQuote: string;
+  /**
+   * How durable the judge thinks this fact is (P3-M13a §3.1). Free-form from the
+   * model; the validator accepts only `stable` / `transient` and DEFAULTS TO
+   * `stable` for anything else, including absence.
+   *
+   * The default is the safe direction and it is the whole reason the field
+   * exists: a fact wrongly tagged stable merely fails to be replaced
+   * automatically, while a fact wrongly tagged transient can never retire
+   * anything at all. Neither mistake can erase something.
+   */
+  volatility?: string;
+};
+
+/**
+ * ONE STYLE PREFERENCE the judge read out of the conversation (P3-M13c §3.3).
+ *
+ * A separate SHAPE from a memory candidate, but not a separate KIND of thing:
+ * the validator turns it into an ordinary `procedural`/`user` memory candidate
+ * with a namespaced key, and from that point it travels the identical path —
+ * `proposed`, reviewable, corroboratable, injectable. The separate shape exists
+ * only so the prompt can ask the narrower question ("how do they want work of
+ * THIS type done?") and so the `target` cannot be lost in a free-form key.
+ */
+export type ReflectionStyleCandidate = {
+  /** A task type (e.g. `review`, `writing`) or `global` for "always". The judge
+   *  writes it free-form; `styleMemoryKey` normalizes it. */
+  target: string;
+  /** Short slug for the preference itself. */
+  key: string;
+  /** The preference as one sentence, in the user's own terms. */
+  value: string;
+  /** The user's words it was read out of — the same verbatim discipline. */
+  evidenceQuote: string;
+};
+
+/**
+ * The judge's label for ONE (proposed memory, existing memory) pair
+ * (P3-M13a §3.1, step 2).
+ *
+ * WHAT THE MODEL IS AND IS NOT DOING HERE. It names a RELATION and nothing else
+ * — not which fact is true, not which is current, not what should happen. The
+ * winner of a contradiction is decided by timestamp in `applyConsolidation`,
+ * because that separation is worth 24–40 points of accuracy (arXiv:2606.01435)
+ * and because a model asked to retire a memory will find a reason to.
+ *
+ * `existing` is the HANDLE of the row (`<scope>:<key>`), not its id: ids are
+ * opaque and a model copying one has a real chance of mangling it, while a
+ * handle is legible in the prompt and re-derivable in code. And a relation
+ * naming a pair the CODE's matcher never produced is discarded regardless —
+ * matching stays step 1, and the model cannot add pairs to it.
+ */
+export type ReflectionPairRelation = {
+  /** The proposed memory's key, as the judge wrote it in the `memories` array. */
+  key: string;
+  /** `<scope>:<key>` of the existing memory it is being related to. */
+  existing: string;
+  /** One of `PairVerdict`; anything else reads as `unrelated`. */
+  verdict: string;
+  /** Required for every verdict except `unrelated` — see
+   *  `validatePairRelations`. */
+  evidenceQuote?: string;
 };
 
 /** A user message in the reflected window, with the coordinate that makes it
@@ -203,12 +340,30 @@ export type ReflectionSessionContext = {
   /** The user's own messages in the window, oldest first. The evidence space for
    *  BOTH the quote check and `createdFrom`. */
   userMessages: readonly ReflectionUserMessage[];
+  /**
+   * Memories naby ALREADY holds in the scopes this session can propose into
+   * (P3-M13a §3.1) — what the pair-relation task is asked about.
+   *
+   * Supplied by the sweep (the only layer with a store) and capped by it. When
+   * it is empty the relation task is dropped from the prompt entirely: there is
+   * nothing to relate a proposal to, so every candidate is an ADD by
+   * construction and asking would spend tokens to be told so.
+   */
+  existingMemories?: readonly MemoryItem[];
 };
 
-/** Both halves of one judge call (spec §5.2: one call, two tasks). */
+/** Every task of one judge call (spec §5.2 "one call, two tasks"; P3-M13 adds
+ *  two more that ride the same call rather than buying another). */
 export type ReflectionAnswer = {
   corrections: ReflectionVerdict[];
   memories: ReflectionMemoryCandidate[];
+  /** P3-M13c: per-task-type style preferences. Optional so every existing mock
+   *  judge and every M8-era answer shape still typechecks and still means what
+   *  it meant. */
+  styles?: ReflectionStyleCandidate[];
+  /** P3-M13a: how each proposal relates to an existing memory. Optional for the
+   *  same reason. */
+  relations?: ReflectionPairRelation[];
 };
 
 /**
@@ -232,11 +387,15 @@ export type ReflectionJudge = (
 export function normalizeReflectionAnswer(
   answer: ReflectionVerdict[] | ReflectionAnswer | null | undefined,
 ): ReflectionAnswer {
-  if (Array.isArray(answer)) return { corrections: answer, memories: [] };
-  if (!answer || typeof answer !== 'object') return { corrections: [], memories: [] };
+  if (Array.isArray(answer)) return { corrections: answer, memories: [], styles: [], relations: [] };
+  if (!answer || typeof answer !== 'object') {
+    return { corrections: [], memories: [], styles: [], relations: [] };
+  }
   return {
     corrections: Array.isArray(answer.corrections) ? answer.corrections : [],
     memories: Array.isArray(answer.memories) ? answer.memories : [],
+    styles: Array.isArray(answer.styles) ? answer.styles : [],
+    relations: Array.isArray(answer.relations) ? answer.relations : [],
   };
 }
 
@@ -580,6 +739,9 @@ export type ValidatedMemoryCandidate = ReflectionMemoryCandidate & {
   key: string;
   /** Transcript seq of the user message whose words are quoted. */
   evidenceSeq: number;
+  /** Narrowed from the judge's free-form string to the two values the store
+   *  understands; always present after validation, defaulting to `stable`. */
+  volatility: MemoryVolatility;
 };
 
 export type MemoryCandidateValidation = {
@@ -679,10 +841,189 @@ export function validateMemoryCandidates(
       value,
       evidenceQuote: candidate.evidenceQuote,
       evidenceSeq: source.seq,
+      volatility: readVolatility(candidate.volatility),
     });
   }
 
   return { kept, dropped };
+}
+
+/** Narrow the judge's free-form volatility to what the store understands.
+ *  Anything unrecognized — including absence — is `stable`, which is the tag
+ *  that can only ever prevent a supersession, never cause one (§3.1). */
+export function readVolatility(raw: unknown): MemoryVolatility {
+  return raw === 'transient' ? 'transient' : 'stable';
+}
+
+// ---------------------------------------------------------------------------
+// Style preferences (M13c, spec §3.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Keep only the style preferences that are ADMISSIBLE, and turn each survivor
+ * into an ORDINARY memory candidate.
+ *
+ * IT IS THE SAME VALIDATOR, REUSED, not a parallel one. The evidence rule, the
+ * value cap, the secret refusal and the type whitelist are exactly
+ * `validateMemoryCandidates`'s — a style statement gets no more latitude than
+ * any other thing a background pass claims about a person. The only things this
+ * adds are the two facts that make a style candidate a style candidate:
+ *
+ *   * the KEY is namespaced `style/<target>/<slug>`, which is what
+ *     `isGlobalStyleMemoryKey` (and therefore the auto-confirm guard) reads;
+ *   * the scope and type are FIXED — `user`/`procedural`. A style preference is
+ *     about how this person wants work done, which is the definition of
+ *     `procedural`, and it holds wherever they are, which is `user`.
+ *
+ * The namespaced key is built BEFORE the shared validator runs and is not
+ * re-normalized by it, so the `/` separators survive; see `STYLE_KEY_PREFIX`.
+ */
+export function validateStyleCandidates(
+  candidates: readonly ReflectionStyleCandidate[],
+  userMessages: readonly ReflectionUserMessage[],
+  opts?: { cap?: number },
+): MemoryCandidateValidation {
+  const cap = Math.max(0, opts?.cap ?? REFLECTION_STYLE_CAP);
+  const kept: ValidatedMemoryCandidate[] = [];
+  const seen = new Set<string>();
+  let dropped = 0;
+
+  for (const candidate of candidates ?? []) {
+    if (!candidate || typeof candidate !== 'object') {
+      dropped += 1;
+      continue;
+    }
+    if (kept.length >= cap) {
+      dropped += 1;
+      continue;
+    }
+    const key = styleMemoryKey(String(candidate.target ?? ''), String(candidate.key ?? ''));
+    const value = String(candidate.value ?? '').trim();
+    if (!key || seen.has(key)) {
+      dropped += 1;
+      continue;
+    }
+    // The `naby_remember` guards, minus the key check (the namespaced key is
+    // constructed here and is well-formed by construction — running it back
+    // through `normalizeMemoryKey` is what would break it).
+    const problems = validateRememberInput({
+      key: 'style',
+      value,
+      type: 'procedural',
+      scope: 'user',
+    });
+    if (problems.length > 0) {
+      dropped += 1;
+      continue;
+    }
+    const quote = normalizeQuote(
+      typeof candidate.evidenceQuote === 'string' ? candidate.evidenceQuote : '',
+    );
+    if (quote.length < MIN_EVIDENCE_CHARS) {
+      dropped += 1;
+      continue;
+    }
+    const source = userMessages.find((m) => normalizeQuote(m.text).includes(quote));
+    if (!source) {
+      dropped += 1;
+      continue;
+    }
+
+    seen.add(key);
+    kept.push({
+      scope: 'user',
+      type: 'procedural',
+      key,
+      value,
+      evidenceQuote: candidate.evidenceQuote,
+      evidenceSeq: source.seq,
+      // A stated preference is a standing one. Nothing in the style task asks
+      // for "this week only", and tagging these transient would make them unable
+      // to replace the preference they contradict — which is the one thing a
+      // changed preference must be able to do.
+      volatility: 'stable',
+    });
+  }
+
+  return { kept, dropped };
+}
+
+// ---------------------------------------------------------------------------
+// Pair relations (M13a, spec §3.1 step 2)
+// ---------------------------------------------------------------------------
+
+/** A pair label that survived validation, keyed for lookup by the caller that
+ *  did the matching. */
+export type PairRelationLookup = {
+  /** `(candidate key, existing handle)` → verdict. Only NON-`unrelated` verdicts
+   *  are present; a missing entry IS `unrelated`, which is the operation that
+   *  changes the least. */
+  verdicts: Map<string, PairVerdict>;
+  dropped: number;
+};
+
+/** The lookup key for one pair. NUL-joined so no key or handle containing the
+ *  separator can forge a different pair's entry. */
+export function pairKey(candidateKey: string, existingHandle: string): string {
+  return `${candidateKey} ${existingHandle}`;
+}
+
+/**
+ * Keep only the pair labels the judge can BACK UP.
+ *
+ * The same discipline as `validateReflectionVerdicts`, applied to the one new
+ * thing a model can now assert: that a proposal relates to something already in
+ * memory. Every verdict except `unrelated` CHANGES what happens — it merges a
+ * fact, rewrites one, or reserves a supersession — so every one of them must
+ * quote the user's own words verbatim. `unrelated` needs no evidence because it
+ * is the default: it is what an absent, unreadable or ungrounded relation
+ * already means.
+ *
+ * A relation is dropped, not downgraded silently, so the sweep can report "the
+ * model claimed a contradiction it could not evidence" separately from "the
+ * model saw no relation".
+ */
+export function validatePairRelations(
+  relations: readonly ReflectionPairRelation[] | undefined,
+  userMessages: readonly ReflectionUserMessage[],
+): PairRelationLookup {
+  const verdicts = new Map<string, PairVerdict>();
+  let dropped = 0;
+
+  for (const relation of relations ?? []) {
+    if (!relation || typeof relation !== 'object') {
+      dropped += 1;
+      continue;
+    }
+    const key = typeof relation.key === 'string' ? relation.key.trim() : '';
+    const existing = typeof relation.existing === 'string' ? relation.existing.trim() : '';
+    if (!key || !existing) {
+      dropped += 1;
+      continue;
+    }
+    const verdict = readPairVerdict(relation.verdict);
+    // `unrelated` is the default; recording it would only make the map bigger
+    // and would let a duplicate relation overwrite a real verdict with a no-op.
+    if (verdict === 'unrelated') continue;
+
+    const quote = normalizeQuote(
+      typeof relation.evidenceQuote === 'string' ? relation.evidenceQuote : '',
+    );
+    if (quote.length < MIN_EVIDENCE_CHARS) {
+      dropped += 1;
+      continue;
+    }
+    if (!userMessages.some((m) => normalizeQuote(m.text).includes(quote))) {
+      dropped += 1;
+      continue;
+    }
+    const id = pairKey(key, existing);
+    // FIRST WINS, like the correction validator: a model answering twice about
+    // one pair does not get to pick which answer counts by ordering.
+    if (!verdicts.has(id)) verdicts.set(id, verdict);
+  }
+
+  return { verdicts, dropped };
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +1032,7 @@ export function validateMemoryCandidates(
 
 /** The fields the auto-confirm decision reads. Structural so the shell can pass a
  *  whole `MemoryItem` and a test can pass three fields. */
-export type AutoConfirmCandidate = Pick<MemoryItem, 'status'> & {
+export type AutoConfirmCandidate = Pick<MemoryItem, 'status' | 'key'> & {
   provenance: { source: TrustTier };
 };
 
@@ -701,6 +1042,21 @@ export type AutoConfirmCandidate = Pick<MemoryItem, 'status'> & {
  * FOUR CONDITIONS, ALL REQUIRED, and the order they are written in is the order
  * of how much trouble getting one wrong would cause:
  *
+ *   0. A GLOBAL STYLE preference (`style/global/*`) is never auto-confirmed
+ *      either, whatever the setting and however many sessions agree (P3-M13c
+ *      §3.3, following Microsoft HAX "adapt cautiously"). It is checked in the
+ *      same breath as the `external` rule because it is the same KIND of rule: a
+ *      thing corroboration is not allowed to decide.
+ *
+ *      WHY THIS ONE AND NOT EVERY STYLE ROW. A preference scoped to a task type
+ *      ("when I ask for a review, lead with the conclusion") changes the answer
+ *      to a question the user just asked, and if it is wrong they will see it
+ *      immediately in a context where they were already thinking about it. A
+ *      GLOBAL tone change alters every reply the agent ever gives, including the
+ *      ones the user is not paying attention to — it is precisely the adaptation
+ *      someone would not notice happening and could not easily attribute
+ *      afterwards. So the machine may infer it, propose it, and show it; only a
+ *      person may switch it on.
  *   1. `external` is NEVER auto-confirmed — checked first and independently of
  *      the setting, because memory-contracts §4 invariant 1 says a user action is
  *      the ONLY path external-origin memory becomes confirmed. A user who turns
@@ -722,6 +1078,7 @@ export function shouldAutoConfirmMemory(
   opts: { enabled: boolean; threshold?: number },
 ): boolean {
   if (item.provenance.source === 'external') return false;
+  if (isGlobalStyleMemoryKey(item.key)) return false;
   if (!opts.enabled) return false;
   if (item.status !== 'proposed') return false;
   const threshold = opts.threshold ?? CORROBORATION_THRESHOLD;
@@ -760,6 +1117,15 @@ export function buildReflectionPrompt(
   context?: ReflectionSessionContext,
 ): ReflectionPrompt {
   const wantsMemory = context !== undefined && context.userMessages.length > 0;
+  // P3-M13a: the relation task rides the memory task and is dropped when there
+  // is nothing to relate TO. An empty existing-memory list means every proposal
+  // is an ADD by construction, so asking would spend tokens to be told what the
+  // code already knows.
+  const existing = (context?.existingMemories ?? []).slice(0, REFLECTION_EXISTING_CAP);
+  const wantsRelations = wantsMemory && existing.length > 0;
+  // P3-M13c: the style task, which needs exactly the same input as the memory
+  // task (the user's own words) and therefore costs nothing extra to ask.
+  const wantsStyle = wantsMemory;
   // MEMORY-ONLY (M8c, spec §6.4). A purely conversational session has nothing
   // that was done without asking, so the correction task has no case to put and
   // its instructions are dropped rather than sent with "0 case(s)" under them:
@@ -767,12 +1133,25 @@ export function buildReflectionPrompt(
   // line it costs is a line of a call that exists only to read memory.
   const wantsCorrections = cases.length > 0;
 
+  // Tasks are numbered in the order they are INCLUDED, so a memory-only call
+  // says "TASK 1 — memory" rather than "TASK 2" with no task 1 above it. A model
+  // shown a gap in the numbering starts looking for the missing instruction.
+  let taskNumber = 0;
+  const nextTask = (): number => {
+    taskNumber += 1;
+    return taskNumber;
+  };
+  const correctionsTask = wantsCorrections ? nextTask() : 0;
+  const memoryTask = wantsMemory ? nextTask() : 0;
+  const relationsTask = wantsRelations ? nextTask() : 0;
+  const styleTask = wantsStyle ? nextTask() : 0;
+
   const system = [
     'You review a finished conversation between a user and an assistant.',
     ...(wantsCorrections
       ? [
           '',
-          'TASK 1 — corrections. For each case you are given the tool the assistant ran WITHOUT asking, and',
+          `TASK ${correctionsTask} — corrections. For each case you are given the tool the assistant ran WITHOUT asking, and`,
           'the user messages that came after it. Decide ONLY this: did the user correct that action — undo',
           'it, redo it differently, or say it was wrong?',
           '',
@@ -785,7 +1164,7 @@ export function buildReflectionPrompt(
     ...(wantsMemory
       ? [
           '',
-          `TASK ${wantsCorrections ? '2' : '1'} — memory. From the user messages, propose up to ${REFLECTION_MEMORY_CAP} durable facts about THIS`,
+          `TASK ${memoryTask} — memory. From the user messages, propose up to ${REFLECTION_MEMORY_CAP} durable facts about THIS`,
           'person that would still be true and useful next week: how they want work done, a standing',
           'rule, a term their team uses, a stable preference.',
           '',
@@ -800,6 +1179,38 @@ export function buildReflectionPrompt(
           '  with no conversation around it.',
           '- evidenceQuote MUST be copied character for character from one of the user messages below.',
           '  A proposal whose quote does not appear there is discarded.',
+          '- volatility: "stable" for something expected to stay true, "transient" for something true',
+          '  only for now (a trip, a temporary setup). When unsure say "stable".',
+        ]
+      : []),
+    ...(wantsRelations
+      ? [
+          '',
+          `TASK ${relationsTask} — relations. You are also shown what is ALREADY remembered. For each memory you`,
+          'proposed above, say how it relates to at most ONE of those existing entries.',
+          '',
+          '- equivalent: the same claim in different words. refines: the same subject, said more precisely.',
+          '- contradicts: both cannot be true of this person at once. unrelated: different subjects.',
+          '- Default to unrelated. Say nothing at all rather than guess.',
+          '- Do NOT say which one is correct or which is newer — that is decided elsewhere.',
+          '- key is the key of YOUR proposal; existing is the handle shown in brackets.',
+          '- Any verdict other than unrelated MUST carry an evidenceQuote copied character for character',
+          '  from the user messages below.',
+        ]
+      : []),
+    ...(wantsStyle
+      ? [
+          '',
+          `TASK ${styleTask} — style. From the user's own wording, corrections and re-requests, propose up to`,
+          `${REFLECTION_STYLE_CAP} preferences about HOW they want work done — not what they want done.`,
+          '',
+          '- Examples: wanting the conclusion first, wanting plain declarative prose, wanting code before',
+          '  explanation, wanting short answers.',
+          '- target: the kind of task it applies to (e.g. "review", "writing", "code"), or "global" when it',
+          '  applies to everything. Prefer a specific target; "global" changes every answer forever.',
+          '- key: a short slug. value: one sentence stating the preference.',
+          '- evidenceQuote MUST be copied character for character from the user messages below.',
+          '- An empty list is a good answer. Do not infer a preference from one polite sentence.',
         ]
       : []),
     '',
@@ -810,7 +1221,14 @@ export function buildReflectionPrompt(
     // dropped by the validator anyway (it can only address ids it was given).
     wantsMemory
       ? '{"corrections":[{"caseId":"<id>","corrected":true|false,"evidenceQuote":"<exact user words, only when corrected>"}],' +
-        '"memories":[{"scope":"user|project","type":"semantic|procedural|episodic|working","key":"<slug>","value":"<one sentence>","evidenceQuote":"<exact user words>"}]}'
+        '"memories":[{"scope":"user|project","type":"semantic|procedural|episodic|working","key":"<slug>","value":"<one sentence>","volatility":"stable|transient","evidenceQuote":"<exact user words>"}]' +
+        (wantsRelations
+          ? ',"relations":[{"key":"<your proposal key>","existing":"<handle>","verdict":"equivalent|refines|contradicts|unrelated","evidenceQuote":"<exact user words>"}]'
+          : '') +
+        (wantsStyle
+          ? ',"styles":[{"target":"<task type or global>","key":"<slug>","value":"<one sentence>","evidenceQuote":"<exact user words>"}]'
+          : '') +
+        '}'
       : '{"corrections":[{"caseId":"<id>","corrected":true|false,"evidenceQuote":"<exact user words, only when corrected>"}]}',
   ].join('\n');
 
@@ -827,8 +1245,19 @@ export function buildReflectionPrompt(
   if (wantsMemory) {
     parts.push(
       '',
-      `The user messages in this conversation, for TASK ${wantsCorrections ? '2' : '1'}:`,
+      `The user messages in this conversation, for TASK ${memoryTask}` +
+        (wantsStyle ? ` and TASK ${styleTask}` : '') +
+        ':',
       ...context.userMessages.map((m) => `  user: ${m.text}`),
+    );
+  }
+  if (wantsRelations) {
+    parts.push(
+      '',
+      `Already remembered, for TASK ${relationsTask}:`,
+      // The HANDLE is what a relation names — legible, and re-derivable in code
+      // from the same two fields, so a model copying it cannot invent a row.
+      ...existing.map((m) => `  [${memoryHandle(m)}] ${m.value}`),
     );
   }
   return { system, user: parts.join('\n') };
@@ -911,7 +1340,47 @@ function readCandidates(value: unknown): ReflectionMemoryCandidate[] {
       key: String(row.key ?? ''),
       value: String(row.value ?? ''),
       evidenceQuote: String(row.evidenceQuote ?? ''),
+      // Carried through as the model wrote it; `readVolatility` narrows it in
+      // the validator, which is where every other "is this admissible" question
+      // is answered too.
+      volatility: String(row.volatility ?? ''),
     });
+  }
+  return out;
+}
+
+/** Style preferences as the model wrote them (P3-M13c). Same discipline as
+ *  `readCandidates`: coerce, judge nothing. */
+function readStyles(value: unknown): ReflectionStyleCandidate[] {
+  if (!Array.isArray(value)) return [];
+  const out: ReflectionStyleCandidate[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    out.push({
+      target: String(row.target ?? ''),
+      key: String(row.key ?? ''),
+      value: String(row.value ?? ''),
+      evidenceQuote: String(row.evidenceQuote ?? ''),
+    });
+  }
+  return out;
+}
+
+/** Pair relations as the model wrote them (P3-M13a). */
+function readRelations(value: unknown): ReflectionPairRelation[] {
+  if (!Array.isArray(value)) return [];
+  const out: ReflectionPairRelation[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const relation: ReflectionPairRelation = {
+      key: String(row.key ?? ''),
+      existing: String(row.existing ?? ''),
+      verdict: String(row.verdict ?? ''),
+    };
+    if (typeof row.evidenceQuote === 'string') relation.evidenceQuote = row.evidenceQuote;
+    out.push(relation);
   }
   return out;
 }
@@ -934,14 +1403,26 @@ function readCandidates(value: unknown): ReflectionMemoryCandidate[] {
  * the record, or a fabricated preference into durable memory.
  */
 export function parseReflectionAnswer(raw: string): ReflectionAnswer {
-  const empty: ReflectionAnswer = { corrections: [], memories: [] };
+  const empty: ReflectionAnswer = { corrections: [], memories: [], styles: [], relations: [] };
   if (typeof raw !== 'string' || raw.trim().length === 0) return empty;
 
   const parsed = extractJson(raw);
-  if (Array.isArray(parsed)) return { corrections: readVerdicts(parsed), memories: [] };
+  if (Array.isArray(parsed)) {
+    return { corrections: readVerdicts(parsed), memories: [], styles: [], relations: [] };
+  }
   if (parsed && typeof parsed === 'object') {
-    const row = parsed as { corrections?: unknown; memories?: unknown };
-    return { corrections: readVerdicts(row.corrections), memories: readCandidates(row.memories) };
+    const row = parsed as {
+      corrections?: unknown;
+      memories?: unknown;
+      styles?: unknown;
+      relations?: unknown;
+    };
+    return {
+      corrections: readVerdicts(row.corrections),
+      memories: readCandidates(row.memories),
+      styles: readStyles(row.styles),
+      relations: readRelations(row.relations),
+    };
   }
   return empty;
 }

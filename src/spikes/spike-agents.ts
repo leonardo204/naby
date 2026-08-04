@@ -175,7 +175,7 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
   // P3-M9 (G3): the heal is the PROTOCOL DELIVERY CHANNEL. An install that ran an
   // older build carries the pre-M9 prompt, and since the row is read-only the
   // user cannot add these rules themselves — so what matters is not merely that
-  // the prompt was restored but that the restored text actually carries the four
+  // the prompt was restored but that the restored text actually carries the
   // operating protocols. Asserted on the HEALED row (what the engine will read),
   // not on the seed constant, because a heal that dropped them would still make
   // the equality check above pass on a stale seed.
@@ -184,6 +184,11 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
     'CLARIFY EARLY',
     'VERIFY BEFORE DONE',
     'REPORT in four parts',
+    // 2026-08-04: the register rule. The persona answered a Korean user with a
+    // crude idiom, and the row is read-only — so the fix ships as a protocol
+    // line and reaches installed users through this same heal, which is the
+    // only channel that text has.
+    'LANGUAGE',
   ]) {
     check(`healed prompt carries the "${marker}" protocol`, healed.systemPrompt.includes(marker));
   }
@@ -218,6 +223,39 @@ async function exerciseStore(label: string, store: Store): Promise<void> {
     const again = seedBuiltinPersona(store);
     return again.updatedAt === healed.updatedAt && store.listAgents().length === 2;
   })());
+
+  // THE UPGRADE THIS RELEASE ACTUALLY SHIPS (2026-08-04). Everything above drives
+  // a row the USER drifted; this drives the case that happens on every install
+  // instead — a row that is the PREVIOUS RELEASE'S SEED, byte for byte, and
+  // differs from the current one in the prompt alone.
+  //
+  // It is the property the protocol channel rests on: `builtinPersonaMatchesSeed`
+  // compares `systemPrompt` by value, so adding a protocol line here is itself the
+  // drift, and the ordinary boot heal delivers it. If the comparison ever narrowed
+  // to identity fields (name/kind), every installed persona would silently keep the
+  // prompt it was created with and this check is what would fail.
+  //
+  // The old text is DERIVED from the new one (everything before the LANGUAGE
+  // entry) rather than pasted, so it cannot rot into a copy of a seed nobody ships.
+  const previousReleasePrompt = BUILTIN_PERSONA_SEED.systemPrompt.split('\n- LANGUAGE.')[0] ?? '';
+  check(
+    'the previous release\'s prompt is a real predecessor',
+    previousReleasePrompt.length > 0
+      && !previousReleasePrompt.includes('LANGUAGE')
+      && previousReleasePrompt !== BUILTIN_PERSONA_SEED.systemPrompt
+      && previousReleasePrompt.includes('REPORT in four parts'),
+  );
+  store.restoreBuiltinPersona({ ...BUILTIN_PERSONA_SEED, systemPrompt: previousReleasePrompt });
+  const stale = store.getAgent(BUILTIN_PERSONA_ID)!;
+  check(
+    'a prompt-only difference counts as drift',
+    !builtinPersonaMatchesSeed(stale, BUILTIN_PERSONA_SEED),
+  );
+  const upgraded = seedBuiltinPersona(store);
+  check('boot heals an old install\'s prompt', upgraded.systemPrompt === BUILTIN_PERSONA_SEED.systemPrompt);
+  check('the healed prompt carries the new LANGUAGE protocol', upgraded.systemPrompt.includes('LANGUAGE'));
+  check('the prompt upgrade kept the row', upgraded.id === BUILTIN_PERSONA_ID && store.listAgents().length === 2);
+  check('the prompt upgrade kept createdAt', upgraded.createdAt === beforeDrift.createdAt);
 
   // THE CONCESSION (2026-08-03). The rename above is a heal, and a heal must not
   // damage data the user made. Drive the one case where it would: an install whose

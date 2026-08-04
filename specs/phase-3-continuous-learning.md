@@ -5,8 +5,8 @@ type: design
 version: 0.9.0
 status: active
 scope: 모든 세션의 대화록을 학습 증거로 바꾸는 연속 학습 루프. 세션 회고 패스, 암묵 교정(correctedAfter) 기록, 기억 통합, 원장 확장, 학습 깊이 표시를 M8a~M8d로 나눈다. 신뢰 판정 알고리즘 자체는 butterfly-trust-meter가, 원장 계약은 checkin-contracts가 계속 소유한다.
-related: [phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-checkin-contracts, personalization-strategy, phase-1_5-memory-contracts]
-updated: 2026-07-30
+related: [phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-conversational-learning-hardening, personalization-strategy, phase-1_5-memory-contracts]
+updated: 2026-08-04
 ---
 
 # Phase 3 P3-M8 — 연속 학습 (세션 회고와 암묵 라벨)

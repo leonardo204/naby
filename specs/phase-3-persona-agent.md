@@ -2,11 +2,11 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.12.0
+version: 0.12.1
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
-related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
-updated: 2026-08-03
+related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-3-fast-evolution, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
+updated: 2026-08-04
 ---
 
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
@@ -147,6 +147,11 @@ Agent {
   - 이름은 **마이그레이션 없이** 부팅 시드가 옮긴다. `name`은 시드가 소유하는 필드라 기존 설치의 `persona` 행은 드리프트로 잡히고, 다음 부팅의 heal이 id와 createdAt을 유지한 채 `@naby`로 고쳐 쓴다.
   - 셸: Settings 섹션 이름을 '나비'/'Naby'로 바꾸고(아이콘 🦋 유지), 에이전트 추가 버튼과 빈 폼을 지웠다. 편집기는 남는다 — **가져온 커스텀 에이전트는 계속 목록에 뜨고 편집·삭제된다**. 추가 버튼 자리에는 "특정 역할은 하네스 서브에이전트" 한 줄을 둔다.
   - 검증: `spike:agents`가 이름 heal과 **충돌 양보**(사용자가 `@naby`를 이미 쥔 설치)를 두 드라이버에서 확인한다. `spike:autonomy`는 핸들을 상수에서 읽도록 고쳤다(이름이 안 맞으면 라우팅이 조용히 빠져 검사 대상이 달라진다). 셸 1275/1275, 타입체크 clean(양 트리), `build:app` exit 0.
+- **P3-M12** ✅ **a/b/c 완료(2026-08-04)** — 빠른 진화 모드. 설계와 근거는 [`phase-3-fast-evolution`](phase-3-fast-evolution.md)에 있고, 여기에는 이 문서가 쥐고 있던 규칙이 바뀐 부분만 적는다.
+  - **멘션 게이트가 사라졌다.** M5가 세운 "나비만 `@`로 부를 수 있다"는 더 이상 제품의 규칙이 아니다. `@`는 어느 단계에서든 되고, 단계는 **행동 범위**를 정한다(알·애벌레는 읽기와 제안, 번데기는 가역 실행, 나비는 자율 위임). `canBeAddressed`의 판정은 그대로이고 소비처의 의미만 바뀌었다 — 이제 그것이 막는 것은 지목이 아니라 **자율 다단계 위임**이다.
+  - 그래서 위 M5의 **데드락 해소 항목이 더 좁아졌다.** `growthSubject`와 `routedAgent`의 분리는 여전히 유효하지만, 그 분리가 풀어야 했던 데드락("지목되지 않으면 체크인도 못 한다")은 게이트가 옮겨가면서 근본에서 사라졌다.
+  - 새로 생긴 것: 단계 계약(`src/runtime/stage-contract.ts`)과 도구 게이트, 스키마 v11 `sessions.fast_growth`, drill 원장 규칙. **단계 계약에 막힌 호출은 원장에 남지 않는다** — 트립와이어로 적으면 계약을 지킨 에이전트가 스스로 나비를 막게 된다.
+  - 검증: `spike:growth` 32/32, `spike:autonomy` 25/25, `spike:02` 5/5, 셸 1311/1311, 타입체크 clean(양 트리).
 
 ## 8. 결정 사항 (2026-07-25 확정)
 

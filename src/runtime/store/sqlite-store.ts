@@ -40,6 +40,10 @@ import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 // The "is this the same claim" rule (P3-M8b §5.3) lives with the type so both
 // drivers reset corroboration on exactly the same edits.
 import { sameMemoryValue } from './store.js';
+// The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model in
+// memory-hygiene, so the SQL that raises strength and the predicate that reads it
+// can never disagree about the cap.
+import { STRENGTH_CAP } from '../memory-hygiene.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
@@ -66,6 +70,7 @@ import type {
   MemoryScope,
   MemoryStatus,
   MemoryType,
+  MemoryVolatility,
   MemoryWriteRequest,
   McpEntry,
   PolicyRule,
@@ -228,7 +233,38 @@ function openSilently(path: string): DatabaseSyncType {
 // we never recorded (NULL means "never used", and `memoryLastAccessAt` falls back
 // to updated_at so nothing is treated as stale for lack of data), and no existing
 // session was a non-learning one.
-export const SCHEMA_VERSION = 10;
+//
+// v11 (Phase 3 P3-M12b) adds ONE COLUMN and no tables: `sessions.fast_growth`
+// (0/1, DEFAULT 0), the flag that marks a session the user opened to help naby
+// learn faster (specs/phase-3-fast-evolution.md §3.3). Added the same way v10's
+// two were — an `ALTER TABLE ... ADD COLUMN` gated on the COLUMN being absent
+// rather than on the version number, so a database that skipped versions or was
+// stamped before a crash still self-heals and never throws "duplicate column
+// name". NO BACKFILL, and again that is the honest reading rather than laziness:
+// every session that existed before this flag was ordinary work, and marking any
+// of them as practice would retroactively discount a record the user earned.
+//
+// v12 (Phase 3 P3-M13) adds FIVE COLUMNS to `memory_items` and no tables
+// (specs/phase-3-conversational-learning-hardening.md §3.1/§3.2):
+// `superseded_at` (epoch ms, NULL = still current), `superseded_by` (the id of
+// the memory that replaced it), `prov_supersedes` (the RESERVATION: which row
+// this one will replace once it is confirmed), `volatility` (stable | transient;
+// NULL = stable) and `strength` (REAL NOT NULL DEFAULT 1 — the S of the
+// retrievability curve). Added exactly the way v10's and v11's were: an
+// `ALTER TABLE ... ADD COLUMN` gated on the COLUMN being absent rather than on
+// the version number, so a database that skipped versions or was stamped before
+// a crash self-heals and never throws "duplicate column name".
+//
+// NO BACKFILL, and every default is the honest reading rather than a convenient
+// one. NULL `superseded_at` says "nothing has replaced this", which is true of
+// every row that existed before supersession did. NULL `volatility` reads as
+// `stable`, which is the reading that cannot cause harm — an untagged fact can
+// therefore never be erased by a passing detail that claims to contradict it.
+// And `strength` DEFAULT 1 is not a placeholder: S = 1 makes the continuous
+// decay curve reproduce the old 30-day/90-day cliffs EXACTLY, so an existing
+// install's stale set is byte-for-byte what it was the day before the upgrade,
+// and every row earns its slower ageing from its own use afterwards.
+export const SCHEMA_VERSION = 12;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -241,7 +277,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   pinned       INTEGER NOT NULL DEFAULT 0,    -- 0/1
   pinned_at    INTEGER,                       -- WHEN it was pinned; NULL = not pinned
   status       TEXT,                          -- e.g. 'active' | 'ended'; NULL = unknown
-  no_learn     INTEGER NOT NULL DEFAULT 0     -- v10: 1 = temporary session, nothing is learned from it
+  no_learn     INTEGER NOT NULL DEFAULT 0,    -- v10: 1 = temporary session, nothing is learned from it
+  fast_growth  INTEGER NOT NULL DEFAULT 0     -- v11: 1 = fast-growth session; its check-ins are drills
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -277,6 +314,11 @@ CREATE TABLE IF NOT EXISTS memory_items (
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
   last_injected_at  INTEGER,         -- v10: last USE (injected/confirmed/edited); NULL = never
+  superseded_at     INTEGER,         -- v12: WHEN a newer memory replaced this; NULL = current
+  superseded_by     TEXT,            -- v12: the memory_items.id that replaced it
+  prov_supersedes   TEXT,            -- v12: RESERVATION — the row this one replaces once confirmed
+  volatility        TEXT,            -- v12: stable | transient; NULL reads as stable
+  strength          REAL NOT NULL DEFAULT 1,  -- v12: S of R = exp(-t / (S x 30d)); 1..STRENGTH_CAP
   UNIQUE (scope, scope_key, key)
 );
 
@@ -520,6 +562,9 @@ type SessionRow = {
   // the type for the same reason as the v3 columns: a partial SELECT, or a row
   // read from a database mid-migration, may not carry it.
   no_learn?: number | null;
+  // v11 (P3-M12b). 1 = a fast-growth session, whose check-ins are drills.
+  // Optional on the type for the same reason as every column above it.
+  fast_growth?: number | null;
 };
 
 function toSessionRef(row: SessionRow): SessionRef {
@@ -540,6 +585,12 @@ function toSessionRef(row: SessionRow): SessionRef {
   // snapshot of one — byte-for-byte what it was.
   if (row.no_learn !== null && row.no_learn !== undefined && Number(row.no_learn) !== 0) {
     ref.noLearn = true;
+  }
+  // v11. Surfaced only when it is on, for the same reason `noLearn` is: absent
+  // and false must mean the same thing to every reader, and a field that appears
+  // on every SessionRef would change what a stored snapshot of one looks like.
+  if (row.fast_growth !== null && row.fast_growth !== undefined && Number(row.fast_growth) !== 0) {
+    ref.fastGrowth = true;
   }
   if (row.status !== null && row.status !== undefined) ref.status = row.status;
   return ref;
@@ -583,6 +634,12 @@ type MemoryRow = {
   // v10 (P3-M10). Epoch ms of the last USE; NULL = never used. Optional on the
   // type because a partial SELECT (or a pre-migration read) may not carry it.
   last_injected_at?: number | null;
+  // v12 (P3-M13). All optional on the type for the same reason.
+  superseded_at?: number | null;
+  superseded_by?: string | null;
+  prov_supersedes?: string | null;
+  volatility?: string | null;
+  strength?: number | null;
 };
 
 function toMemoryItem(row: MemoryRow): MemoryItem {
@@ -593,6 +650,8 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     provenance.basis = row.prov_basis;
   if (row.prov_created_from !== null && row.prov_created_from !== undefined)
     provenance.createdFrom = row.prov_created_from;
+  if (row.prov_supersedes !== null && row.prov_supersedes !== undefined)
+    provenance.supersedes = row.prov_supersedes;
   return {
     id: row.id,
     scope: row.scope as MemoryScope,
@@ -611,6 +670,22 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     ...(row.last_injected_at !== null && row.last_injected_at !== undefined
       ? { lastInjectedAt: Number(row.last_injected_at) }
       : {}),
+    // v12 (P3-M13). Absent rather than null for the same reason as above: a
+    // literal null satisfies `!== undefined` while being useless arithmetic, and
+    // "this row was never superseded" is an ABSENCE, not a value.
+    ...(row.superseded_at !== null && row.superseded_at !== undefined
+      ? { supersededAt: Number(row.superseded_at) }
+      : {}),
+    ...(row.superseded_by !== null && row.superseded_by !== undefined
+      ? { supersededBy: row.superseded_by }
+      : {}),
+    ...(row.volatility === 'stable' || row.volatility === 'transient'
+      ? { volatility: row.volatility }
+      : {}),
+    // Strength is NOT NULL in the table, so a read always has it — the fallback
+    // covers only a partial SELECT and a row read mid-migration, where 1 (the
+    // column's own DEFAULT) is the right answer.
+    strength: row.strength === null || row.strength === undefined ? 1 : Number(row.strength),
   };
 }
 
@@ -633,6 +708,28 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
  * ASCII-only, which is exactly what `memoryMatchesSearch` implements on the
  * in-memory side — see that function for why both sides fold only A–Z.
  */
+/**
+ * The staleness comparison, as one SQL fragment taking `(staleBefore, windowMs)`
+ * in that order — used by the scoped filter and by `listStaleConfirmedMemory`, so
+ * the browser's "unused" chip and the sweep's review queue cannot describe
+ * different sets.
+ *
+ * `COALESCE(last_injected_at, updated_at)` is the `lastInjectedAt ?? updatedAt`
+ * fallback: a pre-v10 row is judged on when it was last WRITTEN rather than
+ * treated as infinitely old.
+ *
+ * THE STRENGTH TERM (P3-M13b §3.2). `access < before - (strength - 1) × window`
+ * is `elapsed > strength × window` rearranged, which is exactly `R < e^-3` for
+ * the review window. It is written as a SHIFT OF THE CUTOFF rather than as an
+ * exponential because SQLite has no `exp()` — and because a shift is index-
+ * friendly arithmetic on the same column the cutoff already compares. With
+ * `windowMs = 0` (every pre-M13 caller) the term vanishes and the fragment is
+ * byte-for-byte the P3-M10 comparison.
+ */
+function staleSql(): string {
+  return 'COALESCE(last_injected_at, updated_at) < ? - (COALESCE(strength, 1) - 1) * ?';
+}
+
 function scopedMemoryFilter(
   scope: MemoryScope,
   scopeKey: string,
@@ -659,13 +756,31 @@ function scopedMemoryFilter(
     clauses.push("(key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\')");
     params.push(escaped, escaped);
   }
+  const prefix = opts?.keyPrefix?.trim();
+  if (prefix) {
+    // KEY NAMESPACE, not a search: anchored at the start and on the key only
+    // (see `ScopedMemoryQuery.keyPrefix`). `%` and `_` are escaped for the same
+    // reason the search term is — `style_` would otherwise match `styleX`.
+    // GLOB, not LIKE, because LIKE is case-insensitive over A–Z and the
+    // in-memory twin compares with `startsWith`; two answers to "does this key
+    // begin with style/" is exactly the divergence spike:f105 exists to catch.
+    clauses.push("key GLOB ?");
+    params.push(`${prefix.replace(/[[\]*?]/g, (c) => `[${c}]`)}*`);
+  }
   if (typeof opts?.staleBefore === 'number') {
     // The `isStaleForReview` predicate, in SQL: confirmed AND last access before
     // the cutoff. COALESCE is the `lastInjectedAt ?? updatedAt` fallback, so a
     // pre-v10 row (last_injected_at NULL) is judged on when it was last written
     // rather than being treated as infinitely old.
-    clauses.push("status = 'confirmed'", 'COALESCE(last_injected_at, updated_at) < ?');
-    params.push(Math.trunc(opts.staleBefore));
+    // The `isStaleForReview` predicate, in SQL — see `staleSql` for the strength
+    // term and why it is expressed as a shift of the cutoff.
+    clauses.push("status = 'confirmed'", staleSql());
+    params.push(Math.trunc(opts.staleBefore), Math.max(0, Math.trunc(opts.staleWindowMs ?? 0)));
+  }
+  if (typeof opts?.superseded === 'boolean') {
+    // NULL-vs-NOT-NULL, not a boolean column: supersession is a TIMESTAMP, so
+    // "was it replaced" and "when" are the same fact and cannot drift apart.
+    clauses.push(opts.superseded ? 'superseded_at IS NOT NULL' : 'superseded_at IS NULL');
   }
   return { sql: clauses.join(' AND '), params };
 }
@@ -963,11 +1078,41 @@ export class SqliteStore implements Store {
     if (sessionCols.length > 0 && !sessionCols.some((c) => c.name === 'no_learn')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN no_learn INTEGER NOT NULL DEFAULT 0');
     }
+
+    // v?->v11 (P3-M12b): the fast-growth flag. Column-gated for the same reason,
+    // additive, and backfill-free — DEFAULT 0 says "this was ordinary work", which
+    // is true of every session that existed before the fast-growth session did.
+    if (sessionCols.length > 0 && !sessionCols.some((c) => c.name === 'fast_growth')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN fast_growth INTEGER NOT NULL DEFAULT 0');
+    }
     const memoryCols = this.db.prepare('PRAGMA table_info(memory_items)').all() as {
       name: string;
     }[];
     if (memoryCols.length > 0 && !memoryCols.some((c) => c.name === 'last_injected_at')) {
       this.db.exec('ALTER TABLE memory_items ADD COLUMN last_injected_at INTEGER');
+    }
+
+    // v?->v12 (P3-M13): supersession, volatility and strength. Column-gated for
+    // the same reason as every ALTER above, and driven off a LIST so five
+    // near-identical guards do not become five places to forget one.
+    //
+    // ORDER MATTERS ONLY IN ONE WAY: `strength` is the sole NOT NULL addition, and
+    // SQLite accepts that only because it carries a DEFAULT — which is also what
+    // makes the migration backfill-free, since DEFAULT 1 is the value that
+    // reproduces the pre-M13 decay behaviour exactly (see SCHEMA_VERSION).
+    if (memoryCols.length > 0) {
+      const additions: [string, string][] = [
+        ['superseded_at', 'INTEGER'],
+        ['superseded_by', 'TEXT'],
+        ['prov_supersedes', 'TEXT'],
+        ['volatility', 'TEXT'],
+        ['strength', 'REAL NOT NULL DEFAULT 1'],
+      ];
+      for (const [name, decl] of additions) {
+        if (!memoryCols.some((c) => c.name === name)) {
+          this.db.exec(`ALTER TABLE memory_items ADD COLUMN ${name} ${decl}`);
+        }
+      }
     }
     // The stale-review index, created HERE rather than in the DDL because it names
     // the column added just above — see the note where the other memory_items
@@ -1218,6 +1363,7 @@ export class SqliteStore implements Store {
     provenance: MemoryProvenance;
     confidence: number;
     status: MemoryStatus;
+    volatility?: MemoryVolatility;
   }): MemoryItem {
     const now = Date.now();
     const existing = this.db
@@ -1235,7 +1381,8 @@ export class SqliteStore implements Store {
         .prepare(
           `UPDATE memory_items SET
              type = ?, value = ?, prov_source = ?, prov_session_id = ?,
-             prov_basis = ?, prov_created_from = ?, confidence = ?, status = ?,
+             prov_basis = ?, prov_created_from = ?, prov_supersedes = ?,
+             volatility = ?, confidence = ?, status = ?,
              updated_at = ?
            WHERE id = ?`,
         )
@@ -1246,6 +1393,8 @@ export class SqliteStore implements Store {
           prov.sessionId ?? null,
           prov.basis ?? null,
           prov.createdFrom ?? null,
+          prov.supersedes ?? null,
+          fields.volatility ?? null,
           fields.confidence,
           fields.status,
           now,
@@ -1257,8 +1406,9 @@ export class SqliteStore implements Store {
           `INSERT INTO memory_items
              (id, scope, scope_key, type, key, value,
               prov_source, prov_session_id, prov_basis, prov_created_from,
+              prov_supersedes, volatility,
               confidence, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -1271,6 +1421,8 @@ export class SqliteStore implements Store {
           prov.sessionId ?? null,
           prov.basis ?? null,
           prov.createdFrom ?? null,
+          prov.supersedes ?? null,
+          fields.volatility ?? null,
           fields.confidence,
           fields.status,
           createdAt,
@@ -1278,10 +1430,20 @@ export class SqliteStore implements Store {
         );
     }
 
+    // Re-read rather than reconstruct. The row now carries columns this method
+    // never writes (`last_injected_at`, `superseded_at`, `strength`), and a
+    // hand-built return value is exactly how the in-memory twin once dropped the
+    // access stamp on an upsert — one field forgotten, two drivers disagreeing.
+    const saved = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(id) as MemoryRow | undefined;
+    if (saved) return toMemoryItem(saved);
+
     const provenance: MemoryProvenance = { source: prov.source };
     if (prov.sessionId !== undefined) provenance.sessionId = prov.sessionId;
     if (prov.basis !== undefined) provenance.basis = prov.basis;
     if (prov.createdFrom !== undefined) provenance.createdFrom = prov.createdFrom;
+    if (prov.supersedes !== undefined) provenance.supersedes = prov.supersedes;
     return {
       id,
       scope: fields.scope,
@@ -1294,6 +1456,8 @@ export class SqliteStore implements Store {
       status: fields.status,
       createdAt,
       updatedAt: now,
+      ...(fields.volatility ? { volatility: fields.volatility } : {}),
+      strength: 1,
     };
   }
 
@@ -1314,6 +1478,7 @@ export class SqliteStore implements Store {
       // loud.
       throw new Error(`memory write denied: ${decision.reason}`);
     }
+    const valueChanged = existingRow ? !sameMemoryValue(existingRow.value, req.value) : false;
     // 'allow' carries the (possibly downgraded) status; 'hold' pins 'proposed'.
     const saved = this.writeMemoryRow({
       scope: req.scope,
@@ -1324,21 +1489,89 @@ export class SqliteStore implements Store {
       provenance: req.provenance,
       confidence: req.confidence,
       status: decision.status,
+      ...(req.volatility ? { volatility: req.volatility } : {}),
     });
+
+    // A SUPERSEDED ROW THAT IS RE-CLAIMED COMES BACK (P3-M13a §3.1). Only when
+    // the value MATERIALLY changed, and the asymmetry is the point: what was
+    // retired is a CLAIM, not a key. Re-stating the retired sentence verbatim
+    // must leave it retired (otherwise a stray re-extraction would undo the
+    // user's history), while writing a genuinely different sentence at that key
+    // is a new claim — and a new claim that could never inject, because a stamp
+    // about its predecessor still sat on the row, would be an invisible memory
+    // nobody could explain. The rule is the same `sameMemoryValue` test
+    // corroboration already turns on, so the two cannot drift apart.
+    if (existingRow && valueChanged && existingRow.superseded_at != null) {
+      this.db
+        .prepare(
+          'UPDATE memory_items SET superseded_at = NULL, superseded_by = NULL WHERE id = ?',
+        )
+        .run(saved.id);
+      delete saved.supersededAt;
+      delete saved.supersededBy;
+    }
 
     // CORROBORATION (P3-M8b, §5.3). Recorded HERE rather than by the caller so a
     // write through the reflection pass and a write through `naby_remember` land
     // in the same pool, and neither can forget to. Both an 'allow' and a 'hold'
     // count: a held row still IS this session asserting the fact.
-    if (req.provenance.sessionId) {
+    //
+    // P3-M13a: NOT for a row that is still superseded. Corroboration exists to
+    // decide whether a proposal is worth confirming, and confirming a memory
+    // that has already been replaced would promote the agent's OLD belief on the
+    // strength of evidence for a sentence nobody is injecting.
+    if (req.provenance.sessionId && saved.supersededAt === undefined) {
       this.recordMemoryObservation(
         saved.id,
         req.provenance.sessionId,
-        existingRow ? !sameMemoryValue(existingRow.value, saved.value) : false,
+        valueChanged,
         req.provenance.createdFrom,
       );
     }
     return saved;
+  }
+
+  supersedeMemory(oldId: string, newId: string, at: number = Date.now()): boolean {
+    this.assertOpen();
+    if (!oldId || !newId || oldId === newId) return false;
+    const older = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(oldId) as MemoryRow | undefined;
+    if (!older || older.superseded_at != null) return false;
+    const newer = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(newId) as MemoryRow | undefined;
+    if (!newer) return false;
+    // THE VOLATILITY GUARD (§3.1). A `transient` fact never retires a `stable`
+    // (or untagged) one — "in Berlin this week" must not erase "lives in
+    // Lisbon". Asked here rather than at the call site because it has to hold
+    // however the reservation was made.
+    if (newer.volatility === 'transient' && older.volatility !== 'transient') return false;
+    this.db
+      .prepare('UPDATE memory_items SET superseded_at = ?, superseded_by = ? WHERE id = ?')
+      .run(Math.trunc(at), newId, oldId);
+    return true;
+  }
+
+  revertSupersession(id: string, at: number = Date.now()): boolean {
+    this.assertOpen();
+    const now = Math.trunc(at);
+    const row = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(id) as MemoryRow | undefined;
+    if (!row || row.superseded_at == null) return false;
+    // ACCESS IS STAMPED TOO, for the reason `confirmMemory` stamps it: a person
+    // just read this row and said it is the one they want. Without it a memory
+    // rescued from supersession would immediately look like something nothing
+    // had touched in months.
+    this.db
+      .prepare(
+        `UPDATE memory_items
+            SET superseded_at = NULL, superseded_by = NULL, last_injected_at = ?
+          WHERE id = ?`,
+      )
+      .run(now, id);
+    return true;
   }
 
   /**
@@ -1357,6 +1590,7 @@ export class SqliteStore implements Store {
     sessionId: string,
     valueChanged: boolean,
     createdFrom?: string,
+    at?: number,
   ): void {
     if (valueChanged) {
       this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(memoryId);
@@ -1369,7 +1603,32 @@ export class SqliteStore implements Store {
            observed_at = excluded.observed_at,
            created_from = excluded.created_from`,
       )
-      .run(memoryId, sessionId, Date.now(), createdFrom ?? null);
+      .run(memoryId, sessionId, Math.trunc(at ?? Date.now()), createdFrom ?? null);
+  }
+
+  getMemoryById(id: string): MemoryItem | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare('SELECT * FROM memory_items WHERE id = ?')
+      .get(id) as MemoryRow | undefined;
+    return row ? toMemoryItem(row) : undefined;
+  }
+
+  corroborateMemory(
+    id: string,
+    sessionId: string,
+    opts?: { createdFrom?: string; at?: number },
+  ): boolean {
+    this.assertOpen();
+    if (!id || !sessionId) return false;
+    const row = this.db
+      .prepare('SELECT id, superseded_at FROM memory_items WHERE id = ?')
+      .get(id) as { id: string; superseded_at?: number | null } | undefined;
+    if (!row || row.superseded_at != null) return false;
+    // `valueChanged: false` — the whole point of this method is that nothing
+    // changed, so the existing evidence is kept and this session is added to it.
+    this.recordMemoryObservation(id, sessionId, false, opts?.createdFrom, opts?.at);
+    return true;
   }
 
   getMemoryCorroboration(memoryIds: readonly string[]): Record<string, number> {
@@ -1399,7 +1658,7 @@ export class SqliteStore implements Store {
         `SELECT m.*, COUNT(DISTINCT o.session_id) AS n
            FROM memory_items m
            JOIN memory_observations o ON o.memory_id = m.id
-          WHERE m.status = 'proposed'
+          WHERE m.status = 'proposed' AND m.superseded_at IS NULL
           GROUP BY m.id
          HAVING n >= ?
           ORDER BY n DESC, m.updated_at DESC`,
@@ -1444,7 +1703,10 @@ export class SqliteStore implements Store {
     return Number(row?.n ?? 0);
   }
 
-  listStaleConfirmedMemory(before: number, opts?: { limit?: number }): MemoryItem[] {
+  listStaleConfirmedMemory(
+    before: number,
+    opts?: { limit?: number; windowMs?: number },
+  ): MemoryItem[] {
     this.assertOpen();
     // OLDEST ACCESS FIRST: the review queue should open on the memory that has
     // been ignored longest, which is the one most likely to be genuinely dead.
@@ -1453,10 +1715,10 @@ export class SqliteStore implements Store {
     const rows = this.db
       .prepare(
         `SELECT * FROM memory_items
-          WHERE status = 'confirmed' AND COALESCE(last_injected_at, updated_at) < ?
+          WHERE status = 'confirmed' AND ${staleSql()}
           ORDER BY COALESCE(last_injected_at, updated_at) ASC${limit}`,
       )
-      .all(Math.trunc(before)) as MemoryRow[];
+      .all(Math.trunc(before), Math.max(0, Math.trunc(opts?.windowMs ?? 0))) as MemoryRow[];
     return rows.map(toMemoryItem);
   }
 
@@ -1514,9 +1776,19 @@ export class SqliteStore implements Store {
     // untouched (contract §5's no-op invariant, extended to writes).
     if (ids.length === 0) return;
     const placeholders = ids.map(() => '?').join(', ');
+    // P3-M13b (§3.2): SELECTION IS REHEARSAL. The same statement that records
+    // WHEN a memory was used also raises HOW STRONGLY it is held, capped at
+    // STRENGTH_CAP so nothing becomes immortal — the MemoryBank model, where a
+    // recalled item decays more slowly next time rather than being pinned.
+    //
+    // ONE UPDATE, not a read-modify-write: `MIN(strength + 1, cap)` in SQL keeps
+    // this a single statement on the hot injection path and makes the cap
+    // impossible to race past.
     this.db
       .prepare(
-        `UPDATE memory_items SET last_injected_at = ? WHERE id IN (${placeholders})`,
+        `UPDATE memory_items
+            SET last_injected_at = ?, strength = MIN(COALESCE(strength, 1) + 1, ${STRENGTH_CAP})
+          WHERE id IN (${placeholders})`,
       )
       .run(Math.trunc(at), ...ids);
   }
@@ -2537,6 +2809,16 @@ export class SqliteStore implements Store {
     this.db
       .prepare('UPDATE sessions SET no_learn = ? WHERE session_id = ?')
       .run(noLearn ? 1 : 0, sessionId);
+  }
+
+  // -- fast-growth (drill) sessions (P3-M12b §3.3) -------------------------
+
+  setSessionFastGrowth(sessionId: string, fastGrowth: boolean): void {
+    this.assertOpen();
+    // No-op on a missing session, exactly like the two setters above it.
+    this.db
+      .prepare('UPDATE sessions SET fast_growth = ? WHERE session_id = ?')
+      .run(fastGrowth ? 1 : 0, sessionId);
   }
 
   // -- lifecycle -----------------------------------------------------------

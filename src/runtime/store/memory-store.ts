@@ -20,6 +20,9 @@ import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 // The "is this the same claim" rule (P3-M8b §5.3) and the search-fold rule
 // (P3-M10 §4) live with the type so both drivers answer them identically.
 import { memoryMatchesSearch, sameMemoryValue } from './store.js';
+// The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model, so
+// the two drivers cannot cap rehearsal at different numbers.
+import { memoryStrength, STRENGTH_CAP } from '../memory-hygiene.js';
 import type { RuntimeMessage } from '../engine.js';
 import type {
   Agent,
@@ -43,6 +46,7 @@ import type {
   MemoryObservation,
   MemoryScope,
   MemoryStatus,
+  MemoryVolatility,
   MemoryWriteRequest,
   McpEntry,
   PolicyRule,
@@ -104,6 +108,25 @@ function mintEvalEventId(): string {
 
 function cloneMemory(item: MemoryItem): MemoryItem {
   return { ...item, provenance: { ...item.provenance } };
+}
+
+/**
+ * The in-memory twin of sqlite-store's `staleSql()`: last access before the
+ * STRENGTH-SHIFTED cutoff (P3-M13b §3.2).
+ *
+ * `access < before - (strength - 1) × window` is `elapsed > strength × window`
+ * rearranged. `windowMs` omitted (or 0) removes the term entirely, which is the
+ * pre-M13 comparison every existing caller gets — and is why an unfiltered read
+ * on either driver is unchanged.
+ */
+function isStaleAgainstCutoff(
+  item: MemoryItem,
+  before: number,
+  windowMs?: number,
+): boolean {
+  const window = Math.max(0, Math.trunc(windowMs ?? 0));
+  const cutoff = Math.trunc(before) - (memoryStrength(item) - 1) * window;
+  return (item.lastInjectedAt ?? item.updatedAt) < cutoff;
 }
 
 function cloneGolden(item: GoldenItem): GoldenItem {
@@ -324,6 +347,7 @@ export class MemoryStore implements Store {
     provenance: MemoryItem['provenance'];
     confidence: number;
     status: MemoryStatus;
+    volatility?: MemoryVolatility;
   }): MemoryItem {
     const now = Date.now();
     const existing = this.findMemoryRow(fields.scope, fields.scopeKey, fields.key);
@@ -348,6 +372,14 @@ export class MemoryStore implements Store {
       ...(existing?.lastInjectedAt !== undefined
         ? { lastInjectedAt: existing.lastInjectedAt }
         : {}),
+      // P3-M13: the same rule, for the three other columns the SQL UPDATE does
+      // not name. Strength is EARNED (by being injected) and supersession is
+      // STAMPED (by `supersedeMemory`), so neither may be reset by a caller
+      // merely re-asserting the fact.
+      ...(existing?.supersededAt !== undefined ? { supersededAt: existing.supersededAt } : {}),
+      ...(existing?.supersededBy !== undefined ? { supersededBy: existing.supersededBy } : {}),
+      ...(fields.volatility ? { volatility: fields.volatility } : {}),
+      strength: existing?.strength ?? 1,
     };
     this.memoryItems.set(item.id, item);
     return cloneMemory(item);
@@ -369,13 +401,31 @@ export class MemoryStore implements Store {
       provenance: req.provenance,
       confidence: req.confidence,
       status: decision.status,
+      ...(req.volatility ? { volatility: req.volatility } : {}),
     });
+
+    // A SUPERSEDED ROW THAT IS RE-CLAIMED COMES BACK (P3-M13a §3.1) — only when
+    // the value materially changed. See SqliteStore.putMemory for why the
+    // asymmetry, and note that the condition is the SAME `valueChanged` the
+    // corroboration reset uses, so the two cannot drift apart.
+    if (existing && valueChanged && saved.supersededAt !== undefined) {
+      const live = this.memoryItems.get(saved.id);
+      if (live) {
+        delete live.supersededAt;
+        delete live.supersededBy;
+      }
+      delete saved.supersededAt;
+      delete saved.supersededBy;
+    }
 
     // CORROBORATION (P3-M8b §5.3), recorded by the STORE so the reflection pass
     // and `naby_remember` fill one pool and neither can forget to. Both an
     // 'allow' and a 'hold' count — a held row still is this session asserting the
     // fact. Observationally identical to SqliteStore.
-    if (req.provenance.sessionId) {
+    //
+    // P3-M13a: NOT for a row that is still superseded — evidence must not
+    // accumulate for a belief the agent has already replaced.
+    if (req.provenance.sessionId && saved.supersededAt === undefined) {
       // A materially different value is a NEW claim, so the old sessions' votes
       // for the old claim are cleared: the count always means "distinct sessions
       // that agree with what this row says now".
@@ -402,6 +452,36 @@ export class MemoryStore implements Store {
 
   // -- cross-session corroboration (Phase 3 P3-M8b) -------------------------
 
+  getMemoryById(id: string): MemoryItem | undefined {
+    const item = this.memoryItems.get(id);
+    return item ? cloneMemory(item) : undefined;
+  }
+
+  corroborateMemory(
+    id: string,
+    sessionId: string,
+    opts?: { createdFrom?: string; at?: number },
+  ): boolean {
+    if (!id || !sessionId) return false;
+    const item = this.memoryItems.get(id);
+    // Refuses a superseded row, exactly as SqliteStore does: evidence must not
+    // accumulate behind a belief that has already been replaced.
+    if (!item || item.supersededAt !== undefined) return false;
+    let bySession = this.observations.get(id);
+    if (!bySession) {
+      bySession = new Map<string, MemoryObservation>();
+      this.observations.set(id, bySession);
+    }
+    const observation: MemoryObservation = {
+      memoryId: id,
+      sessionId,
+      observedAt: Math.trunc(opts?.at ?? Date.now()),
+    };
+    if (opts?.createdFrom !== undefined) observation.createdFrom = opts.createdFrom;
+    bySession.set(sessionId, observation);
+    return true;
+  }
+
   getMemoryCorroboration(memoryIds: readonly string[]): Record<string, number> {
     const out: Record<string, number> = {};
     for (const id of memoryIds) {
@@ -418,6 +498,9 @@ export class MemoryStore implements Store {
     const rows: { item: MemoryItem; n: number }[] = [];
     for (const item of this.memoryItems.values()) {
       if (item.status !== 'proposed') continue;
+      // P3-M13a: a replaced proposal is not a promotion candidate — the same
+      // `superseded_at IS NULL` clause the SQL driver applies.
+      if (item.supersededAt !== undefined) continue;
       const n = this.observations.get(item.id)?.size ?? 0;
       if (n >= min) rows.push({ item, n });
     }
@@ -454,11 +537,18 @@ export class MemoryStore implements Store {
     if (opts?.status && item.status !== opts.status) return false;
     if (opts?.type && item.type !== opts.type) return false;
     if (opts?.search && !memoryMatchesSearch(item, opts.search)) return false;
+    // The KEY NAMESPACE filter — a prefix on the key alone, deliberately not the
+    // key-or-value substring `search` applies (see `ScopedMemoryQuery.keyPrefix`).
+    if (opts?.keyPrefix && !item.key.startsWith(opts.keyPrefix)) return false;
     if (typeof opts?.staleBefore === 'number') {
       // The same two conditions the SQL WHERE applies: confirmed, and last access
-      // (lastInjectedAt, falling back to updatedAt) before the cutoff.
+      // (lastInjectedAt, falling back to updatedAt) before the strength-shifted
+      // cutoff.
       if (item.status !== 'confirmed') return false;
-      if ((item.lastInjectedAt ?? item.updatedAt) >= Math.trunc(opts.staleBefore)) return false;
+      if (!isStaleAgainstCutoff(item, opts.staleBefore, opts.staleWindowMs)) return false;
+    }
+    if (typeof opts?.superseded === 'boolean') {
+      if ((item.supersededAt !== undefined) !== opts.superseded) return false;
     }
     return true;
   }
@@ -495,12 +585,14 @@ export class MemoryStore implements Store {
     return n;
   }
 
-  listStaleConfirmedMemory(before: number, opts?: { limit?: number }): MemoryItem[] {
-    const cutoff = Math.trunc(before);
+  listStaleConfirmedMemory(
+    before: number,
+    opts?: { limit?: number; windowMs?: number },
+  ): MemoryItem[] {
     const rows: MemoryItem[] = [];
     for (const item of this.memoryItems.values()) {
       if (item.status !== 'confirmed') continue;
-      if ((item.lastInjectedAt ?? item.updatedAt) >= cutoff) continue;
+      if (!isStaleAgainstCutoff(item, before, opts?.windowMs)) continue;
       rows.push(cloneMemory(item));
     }
     // Oldest access first, as SqliteStore.
@@ -552,8 +644,37 @@ export class MemoryStore implements Store {
       const item = this.memoryItems.get(id);
       // Silently skips an id that no longer exists, exactly as the SQL UPDATE's
       // `WHERE id IN (...)` matches no row for one.
-      if (item) item.lastInjectedAt = now;
+      if (!item) continue;
+      item.lastInjectedAt = now;
+      // P3-M13b: selection is rehearsal — the twin of the SQL
+      // `MIN(strength + 1, cap)`.
+      item.strength = Math.min(STRENGTH_CAP, (item.strength ?? 1) + 1);
     }
+  }
+
+  supersedeMemory(oldId: string, newId: string, at: number = Date.now()): boolean {
+    if (!oldId || !newId || oldId === newId) return false;
+    const older = this.memoryItems.get(oldId);
+    if (!older || older.supersededAt !== undefined) return false;
+    const newer = this.memoryItems.get(newId);
+    if (!newer) return false;
+    // The volatility guard of §3.1, identical to SqliteStore's: a transient fact
+    // never retires a stable (or untagged) one.
+    if (newer.volatility === 'transient' && older.volatility !== 'transient') return false;
+    older.supersededAt = Math.trunc(at);
+    older.supersededBy = newId;
+    return true;
+  }
+
+  revertSupersession(id: string, at: number = Date.now()): boolean {
+    const item = this.memoryItems.get(id);
+    if (!item || item.supersededAt === undefined) return false;
+    delete item.supersededAt;
+    delete item.supersededBy;
+    // A person just chose this row — the same access stamp `confirmMemory` makes,
+    // and for the same reason.
+    item.lastInjectedAt = Math.trunc(at);
+    return true;
   }
 
   deleteMemory(sel: MemoryDeleteSelector): void {
@@ -1133,6 +1254,17 @@ export class MemoryStore implements Store {
     // the flag is on).
     if (noLearn) s.ref.noLearn = true;
     else delete s.ref.noLearn;
+  }
+
+  // -- fast-growth (drill) sessions (P3-M12b §3.3) -------------------------
+
+  setSessionFastGrowth(sessionId: string, fastGrowth: boolean): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return; // no-op on a missing session, as SqliteStore
+    // Deleted rather than set to false, for the same shape-parity reason as the
+    // setter above: the SQL driver only surfaces the field when the flag is on.
+    if (fastGrowth) s.ref.fastGrowth = true;
+    else delete s.ref.fastGrowth;
   }
 
   listPinnedSessions(): SessionRef[] {

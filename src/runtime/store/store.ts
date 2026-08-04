@@ -68,6 +68,23 @@ export type SessionRef = {
    * (§3): "do not learn from this" is not "forget what you know".
    */
   noLearn?: boolean;
+  /**
+   * THE FAST-GROWTH (DRILL) SESSION (Phase 3 P3-M12b, fast-evolution §3.3).
+   * True = a session the USER opened from the growth panel to help naby learn
+   * faster. In it naby interviews them and runs practice check-ins, and every
+   * check-in row it writes carries `drill: true`.
+   *
+   * THE FLAG IS SET BY A HUMAN ACTION AND ONLY BY ONE. No tool, no prompt and no
+   * API path lets a turn switch its own session into (or out of) this mode: the
+   * flag decides how the ledger WEIGHS what follows, and a model that could set
+   * it could file its real misses as practice — or its practice as real work
+   * (checkin-contracts §4, invariant 9).
+   *
+   * Absent reads as FALSE, which is the safe direction: a session that predates
+   * schema v11 was ordinary work, and counting old rows as practice would quietly
+   * discount a record the user actually earned.
+   */
+  fastGrowth?: boolean;
   /** Coarse lifecycle state, e.g. 'active' | 'ended'; absent = unknown. */
   status?: string;
 };
@@ -213,6 +230,23 @@ export type TrustTier = 'user' | 'artifact' | 'external';
  * Only `confirmed` memory is injected by default (contract §5). */
 export type MemoryStatus = 'proposed' | 'confirmed';
 
+/**
+ * How long a remembered fact is expected to hold (P3-M13a,
+ * conversational-learning-hardening §3.1).
+ *
+ * `stable` is the standing shape of a person ("lives in Lisbon", "wants
+ * conclusions first"). `transient` is true right now and expected to stop being
+ * true ("in Berlin this week"). The distinction exists for exactly ONE rule: a
+ * transient fact may never SUPERSEDE a stable one. Without it the documented
+ * failure of every supersession implementation happens — the trip erases the
+ * home address.
+ *
+ * ABSENT READS AS `stable`. Every row written before v12 has no tag, and the
+ * conservative reading of an untagged fact is the one that cannot be quietly
+ * deleted by a passing detail.
+ */
+export type MemoryVolatility = 'stable' | 'transient';
+
 /** Where a memory came from — the rollback/provenance handle (contract §3). */
 export type MemoryProvenance = {
   /** WHICH trust tier this came from — drives the write gate (§4). */
@@ -223,6 +257,23 @@ export type MemoryProvenance = {
   basis?: string;
   /** eval_event id or message id it was extracted from, if any. */
   createdFrom?: string;
+  /**
+   * THE SUPERSESSION RESERVATION (P3-M13a §3.1): the id of the memory this row
+   * will replace IF AND WHEN it becomes `confirmed`.
+   *
+   * IT IS A RESERVATION, NOT AN EFFECT. A `proposed` row supersedes nothing —
+   * the old fact keeps living, keeps injecting and keeps being the agent's
+   * belief until a person (or the opt-in corroboration path) agrees to the new
+   * one. `supersedeMemory` is what turns the reservation into the two stamps,
+   * and it is called from exactly the two places a row becomes confirmed.
+   *
+   * IT LIVES IN PROVENANCE, AND EXPLICITLY, because that is what it is: a fact
+   * about where this row came from and what it was written to answer. Encoding
+   * it as a marker inside `value` would put it in the text the model reads and
+   * the user edits — one accidental rewrite and the reservation silently means
+   * something else.
+   */
+  supersedes?: string;
 };
 
 /** One scoped memory row (contract §3). `(scope, scopeKey, key)` is the upsert
@@ -261,14 +312,53 @@ export type MemoryItem = {
    * deleted because of it (§2.2: deletion is always a person's act).
    */
   lastInjectedAt?: number;
+  /**
+   * WHEN THIS ROW WAS REPLACED by a newer, contradicting memory (P3-M13a §3.1).
+   * Absent = still current, which is every row written before v12.
+   *
+   * SUPERSESSION IS NOT DELETION. The row stays, whole, with its provenance and
+   * its evidence; it is only excluded from INJECTION (see memory-inject's
+   * `selectMemoryForInjection`) and from accruing further corroboration. The
+   * memory browser shows the chain and a person can undo it — a machine that
+   * decides on its own which of a user's beliefs to erase is not one they can
+   * trust with the rest (memory-hygiene §2.2, same posture as decay).
+   */
+  supersededAt?: number;
+  /** The id of the memory that replaced this one (P3-M13a §3.1) — the other half
+   *  of the chain the browser renders and the revert action clears. */
+  supersededBy?: string;
+  /** How durable this fact is expected to be (P3-M13a §3.1). Absent = `stable`;
+   *  see `MemoryVolatility` for why that is the safe reading. */
+  volatility?: MemoryVolatility;
+  /**
+   * MEMORY STRENGTH (P3-M13b §3.2) — how many times this row has been USED,
+   * floored at 1 and capped at `STRENGTH_CAP`.
+   *
+   * It is the S in MemoryBank's retrievability curve `R = exp(-t / (S × 30d))`
+   * (arXiv:2305.10250): every injection raises it, so a memory the turns keep
+   * reaching for ages slowly, and one nothing has needed ages at the old fixed
+   * rate. The 30-day/90-day cliffs of P3-M10 are exactly this model at S = 1 —
+   * which is why an existing install's behaviour does not change and why there
+   * is no backfill.
+   *
+   * Optional on the TYPE and `NOT NULL DEFAULT 1` in the table: a writer never
+   * supplies it (it is earned, not declared), while every store READ carries it.
+   * `memoryStrength` is the one place the `?? 1` fallback is spelled.
+   */
+  strength?: number;
 };
 
 /** A write request to the gate (contract §4). Everything a MemoryItem carries
  * except the store-assigned id/createdAt/updatedAt and the gate-decided status;
- * `requestedStatus` is what the caller ASKED for and the gate may downgrade. */
+ * `requestedStatus` is what the caller ASKED for and the gate may downgrade.
+ *
+ * The P3-M13 fields are omitted for the same reason: `supersededAt`/
+ * `supersededBy` are stamped by `supersedeMemory` when a REPLACEMENT is
+ * confirmed, and `strength` is earned by being injected. A writer that could set
+ * either could retire a memory, or make one immortal, by asserting it. */
 export type MemoryWriteRequest = Omit<
   MemoryItem,
-  'id' | 'createdAt' | 'updatedAt' | 'status'
+  'id' | 'createdAt' | 'updatedAt' | 'status' | 'supersededAt' | 'supersededBy' | 'strength'
 > & {
   requestedStatus: MemoryStatus;
 };
@@ -324,6 +414,22 @@ export type ScopedMemoryQuery = {
    *  answer it identically — see that function). Blank = no filter. */
   search?: string;
   /**
+   * KEY NAMESPACE (settings-ia-reorg §3.4): keep only rows whose `key` STARTS
+   * WITH this string. Blank/absent = no filter.
+   *
+   * WHY IT IS NOT `search`. Style preferences are a key namespace
+   * (`style/<target>/<slug>`, P3-M13c §3.3), and `search` matches key OR value as
+   * a substring — so searching "style/" would also return every memory whose
+   * TEXT happens to mention it, and a memory that says "I hate the style/global
+   * setting" is not a style preference. A prefix on the key is the exact
+   * question, and it is the one a deep link into the browser has to ask.
+   *
+   * MATCHED CASE-SENSITIVELY, unlike `search`: the namespace is minted by
+   * `styleMemoryKey`, which normalizes to lowercase, so there is no case here to
+   * fold and folding one side only is how the two drivers start disagreeing.
+   */
+  keyPrefix?: string;
+  /**
    * STALE ONLY: keep just the rows that are `confirmed` AND whose last access
    * (`lastInjectedAt`, falling back to `updatedAt`) is strictly before this epoch
    * ms. The confirmed half is part of the filter, not an extra condition the
@@ -331,6 +437,30 @@ export type ScopedMemoryQuery = {
    * the two would put the review queue inside the decay queue (§2.2).
    */
   staleBefore?: number;
+  /**
+   * THE WINDOW `staleBefore` WAS DERIVED FROM, which is what lets the filter
+   * respect STRENGTH (P3-M13b §3.2).
+   *
+   * `staleBefore` alone is `now - window`, and from one number the query cannot
+   * recover the two halves — so a strong memory would be judged on the S = 1
+   * cliff while `isStaleForReview` judged it on `S × window`, and the browser's
+   * "unused" list would disagree with the runtime about which rows are unused.
+   * Supplying the window closes that: both drivers apply
+   * `access < staleBefore - (strength - 1) × window`, which is exactly
+   * `elapsed > strength × window`.
+   *
+   * OMITTED IS THE PRE-M13 FILTER (strength ignored, i.e. S = 1 for everyone), so
+   * every existing caller keeps the behaviour it had.
+   */
+  staleWindowMs?: number;
+  /**
+   * SUPERSESSION (P3-M13a §3.1). `true` keeps ONLY replaced rows (the browser's
+   * "replaced" filter), `false` keeps only current ones. OMITTED IS NO FILTER,
+   * which is what every pre-M13 caller gets — including the injection path,
+   * whose exclusion is applied in `selectMemoryForInjection` beside the
+   * confirmed-only filter so both live in one readable place.
+   */
+  superseded?: boolean;
   /** Page size. Omit for "all rows" — which is what every pre-M10 caller gets. */
   limit?: number;
   /** Rows to skip before the page. Ignored without a `limit`. */
@@ -825,6 +955,14 @@ export type EvalEvent = {
   confidence?: number;
   /** Free-text correction when `chosen` is -1 — the edit-diff analogue. */
   correction?: string;
+  /** True iff this check-in happened inside a FAST-GROWTH (drill) session
+   *  (P3-M12c, checkin-contracts 0.6.0 §4 invariant 9). Stamped by the sink from
+   *  `SessionRef.fastGrowth` — a `drill` field arriving in TOOL INPUT is ignored,
+   *  because a model that could label its own rows could file a real miss as
+   *  practice. Drill rows blend at `DRILL_WEIGHT` and can never fill
+   *  `GROWTH_MIN_SAMPLE`. Lives in the payload JSON, so it needed no schema
+   *  migration. */
+  drill?: boolean;
 
   // -- kind: 'autonomous' — it acted without asking -------------------------
   /** Whether the action could be undone. */
@@ -1027,6 +1165,34 @@ export interface Store {
     opts?: Omit<ScopedMemoryQuery, 'limit' | 'offset'>,
   ): number;
 
+  /** One memory row by id, or undefined. The addressable read every by-id action
+   *  needs — confirming, reverting a supersession, activating a reservation —
+   *  and the reason none of them has to scan a scope to find one row. */
+  getMemoryById(id: string): MemoryItem | undefined;
+
+  /**
+   * RECORD THAT A SESSION AGREED with a memory's current value, changing nothing
+   * else (P3-M13a §3.1, the `equivalent` → NOOP operation).
+   *
+   * WHY THIS EXISTS WHEN P3-M8b DELIBERATELY REFUSED TO ADD IT. That refusal was
+   * about WRITES: an observation must never be something a writer could forget to
+   * record, so `putMemory` records it and there is no second way to write memory.
+   * A NOOP is not a write. Routing "the user said this again, identically"
+   * through `putMemory` would re-run the write gate (which can DENY an
+   * artifact-tier restatement of a user-tier fact) and re-apply the requested
+   * status (which would demote a confirmed row back to `proposed`) — two
+   * destructive side effects in service of recording that nothing changed.
+   *
+   * REFUSES A SUPERSEDED ROW, for the same reason `putMemory` does: evidence must
+   * not pile up behind a belief that has already been replaced. Returns whether
+   * the observation landed.
+   */
+  corroborateMemory(
+    id: string,
+    sessionId: string,
+    opts?: { createdFrom?: string; at?: number },
+  ): boolean;
+
   /** Every CONFIRMED item nobody has used since `before`, across ALL scopes —
    *  the consolidation step's stale-review read (P3-M10 §2.2). Oldest access
    *  first.
@@ -1037,7 +1203,15 @@ export interface Store {
    *  derivation cannot go out of date. Nothing here deletes anything — the user
    *  chooses, in the browser's "stale" filter, between deleting a row and keeping
    *  it alive (`markMemoriesInjected`). */
-  listStaleConfirmedMemory(before: number, opts?: { limit?: number }): MemoryItem[];
+  listStaleConfirmedMemory(
+    before: number,
+    opts?: {
+      limit?: number;
+      /** The window `before` was derived from — see `ScopedMemoryQuery.staleWindowMs`
+       *  for why one number is not enough once strength exists (P3-M13b). */
+      windowMs?: number;
+    },
+  ): MemoryItem[];
 
   /** Confirm a proposed item — the ONLY path external-origin memory becomes
    * confirmed (§4 invariant 1). No-op if already confirmed or absent.
@@ -1080,6 +1254,40 @@ export interface Store {
    * quietly fail for the store.
    */
   markMemoriesInjected(ids: readonly string[], at?: number): void;
+
+  // -- supersession (Phase 3 P3-M13a) --------------------------------------
+
+  /**
+   * Record that `newId` REPLACED `oldId` as of `at` (P3-M13a §3.1). Stamps
+   * `superseded_at`/`superseded_by` on the OLD row and nothing else.
+   *
+   * THREE RULES, ENFORCED HERE SO NEITHER DRIVER CAN DISAGREE:
+   *   1. The old row must exist and must not already be superseded. Re-stamping
+   *      would rewrite history to name the newest claimant rather than the one
+   *      that actually replaced it.
+   *   2. A row never supersedes itself, which is what an UPDATE-in-place looks
+   *      like from the caller's side.
+   *   3. A `transient` replacement never supersedes a `stable` (or untagged)
+   *      row. This is the trip-erases-the-home-address guard of §3.1, and it
+   *      belongs in the store because it must hold however the reservation was
+   *      created.
+   *
+   * Returns whether the stamp landed, so a caller can count real supersessions
+   * rather than attempts. NEVER deletes: see `MemoryItem.supersededAt`.
+   */
+  supersedeMemory(oldId: string, newId: string, at?: number): boolean;
+
+  /**
+   * UNDO a supersession — clear `superseded_at`/`superseded_by` so the row is a
+   * live memory again (P3-M13a §3.1, "대체는 삭제가 아니다").
+   *
+   * The sovereignty half of the feature, and the reason supersession is allowed
+   * to be automatic at all: the machine's guess about which of two beliefs is
+   * current is reversible by the person whose beliefs they are. Returns whether
+   * anything changed; also stamps access, because a person just looked at the
+   * row and said "no, keep this one".
+   */
+  revertSupersession(id: string, at?: number): boolean;
 
   /** Delete one item by id, or every item matching a provenance source
    * (poisoning rollback / delete-by-source). Exactly one selector. Takes the
@@ -1418,6 +1626,14 @@ export interface Store {
    *  is read back through `SessionRef.noLearn` — there is no second reader, so a
    *  caller cannot ask the question two ways and get two answers. */
   setSessionNoLearn(sessionId: string, noLearn: boolean): void;
+
+  // -- fast-growth (drill) sessions (P3-M12b, fast-evolution §3.3) ----------
+
+  /** Mark this session as a fast-growth one, or clear the mark. No-op when the
+   *  session does not exist, exactly like `setSessionNoLearn`. Read back through
+   *  `SessionRef.fastGrowth`, which the check-in sink stamps its rows from — so
+   *  "is this practice" has exactly one answer, and it is the user's. */
+  setSessionFastGrowth(sessionId: string, fastGrowth: boolean): void;
 
   // -- lifecycle -----------------------------------------------------------
 

@@ -2,11 +2,11 @@
 id: phase-3-memory-hygiene
 title: Phase 3 P3-M10 — 기억 위생과 주권
 type: design
-version: 0.2.0
+version: 0.3.0
 status: active
-scope: 기억의 감쇠(접근 기반 주입 강등·검토 큐 승격), 사용자 주권 컨트롤(항목 편집·학습 끄기·임시 세션), 그리고 기억 브라우저(전용 모달·검색·필터·페이지네이션)를 다룬다. 기억 계약(phase-1_5-memory-contracts)의 저장·게이트·주입 불변식은 유지하며 가산 개정만 한다.
-related: [phase-3-continuous-learning, phase-1_5-memory-contracts, phase-3-persona-agent]
-updated: 2026-08-03
+scope: 기억의 감쇠(접근 기반 주입 강등·검토 큐 승격), 사용자 주권 컨트롤(항목 편집·학습 끄기·임시 세션), 그리고 기억 브라우저(전용 모달·검색·필터·페이지네이션)를 다룬다. 기억 계약(phase-1_5-memory-contracts)의 저장·게이트·주입 불변식은 유지하며 가산 개정만 한다. ⚠️ 0.3.0: 고정 30/90일 절벽은 P3-M13b의 연속 강도 모델(R = e^(−t/(S×30일)), S=1이면 이 문서의 값과 동일)로 일반화됐다 — [phase-3-conversational-learning-hardening](phase-3-conversational-learning-hardening.md) §3.2가 소유한다.
+related: [phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-1_5-memory-contracts, phase-3-persona-agent]
+updated: 2026-08-04
 implemented: 0.2.0
 ---
 
