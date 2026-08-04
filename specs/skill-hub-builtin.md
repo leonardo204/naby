@@ -2,7 +2,7 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian)
 type: design
-version: 0.5.0
+version: 0.5.1
 status: active
 scope: 사내 표준 MCP(skill-hub, mcp-atlassian)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone]
@@ -68,6 +68,7 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 - **적용 범위는 신규 행뿐이다**(게이트 불변식 7). 이미 있는 행의 상태는 스캔이 절대 바꾸지 않는다(불변식 5). 사용자가 꺼 둔 naby 홈 스킬은 몇 번을 다시 스캔해도 꺼진 채다. 묘비('removed')는 여전히 임포트가 요청할 수 없다(불변식 6).
 - **끌 수 있다**: 설정 `harness.autoEnableNabyHome`(기본 켜짐). 끄면 0.4.0 동작으로 돌아간다 — 보이되 꺼진 채 도착한다. 이 설정은 **앞으로 도착할 항목**에만 적용된다. 이미 켜진 스킬을 조용히 끄지 않는다(그 편이 이 변경이 없애려는 놀람보다 더 나쁜 놀람이다).
 - **문구**: 하네스 패널의 자동 스캔 안내가 두 절반을 모두 말한다 — naby 홈 스킬은 나타나고 바로 켜진다, 다른 제품 폴더에서 가져온 항목은 켜기 전까지 꺼져 있다(en/ko). 스위치는 같은 자리에 체크박스 한 줄로 둔다.
+- **스캔 트리거는 두 읽기 경로다**(0.5.1). 설정의 하네스 목록과 **"/" 팔레트 읽기**(`api/commands.ts`) 양쪽이 같은 스로틀 스캔을 먼저 돈다. 팔레트가 스캔 없이 읽던 동안에는 채팅 중 설치한 스킬이 설정을 열기 전까지 "/"에 보이지 않았다. 설치 지침의 도착 상태 문장도 하드코딩이 아니라 킬 스위치 설정값을 읽어 고른다(`harnessHomeInstruction`의 `autoEnable` 인자).
 
 ### 2.6 바꾸지 않는 것
 
