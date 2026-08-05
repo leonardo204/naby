@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -58,6 +58,7 @@
     "spike:policy": "npm run build:runtime && tsx src/spikes/spike-policy.ts",
     "spike:agents": "npm run build:runtime && tsx src/spikes/spike-agents.ts",
     "spike:autonomy": "npm run build:runtime && tsx src/spikes/spike-autonomy.ts",
+    "spike:subagent": "tsx src/spikes/spike-subagent.ts",
     "spike:learn": "npm run build:runtime && tsx src/spikes/spike-learn.ts",
     "spike:growth": "tsx src/spikes/spike-growth.ts",
     "spike:checkin": "tsx src/spikes/spike-checkin.ts",
