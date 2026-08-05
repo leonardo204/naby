@@ -64,12 +64,21 @@ import type {
   Engine,
   EngineEvent,
   EngineRunInput,
+  HarnessTask,
   JsonSchema,
   RuntimeImage,
   RuntimeMessage,
+  SubagentAttribution,
   ToolCall,
   Usage,
 } from '../runtime/engine.js';
+
+// What may be echoed out of a harness message. Both are the "rule 1" guard in
+// regex form: a LABEL is a short type name we are willing to render, an ID is an
+// opaque handle we are willing to key state on. Anything that does not match is
+// dropped rather than sanitized — a mangled id is worse than none.
+const SAFE_LABEL = /^[\w-]{1,40}$/;
+const SAFE_ID = /^[\w-]{1,64}$/;
 
 // ---------------------------------------------------------------------------
 // THE LAZY BOUNDARY — why this is not a plain `import` (design §3.3).
@@ -930,14 +939,17 @@ export function buildAgentPrompt(
 
 export function describeHarnessMessage(
   msg: unknown,
-): { subtype: string; detail?: string } | null {
+): { subtype: string; detail?: string; task?: HarnessTask } | null {
   if (!msg || typeof msg !== 'object') return null;
   const m = msg as {
     type?: unknown;
     subtype?: unknown;
     status?: unknown;
+    task_id?: unknown;
+    tool_use_id?: unknown;
     task_type?: unknown;
     subagent_type?: unknown;
+    patch?: { status?: unknown };
     compact_metadata?: { trigger?: unknown; pre_tokens?: unknown; post_tokens?: unknown };
     message?: { content?: unknown };
   };
@@ -984,23 +996,101 @@ export function describeHarnessMessage(
     return parts.length ? { subtype: label, detail: parts.join(' ') } : { subtype: label };
   }
 
-  if (subtype === 'task_started' || subtype === 'task_notification') {
-    // `description` / `summary` are model-authored free text — omitted by rule 1.
-    const status =
-      m.status === 'completed' || m.status === 'failed' || m.status === 'stopped'
-        ? `status=${m.status}`
-        : null;
-    const kind =
-      typeof m.subagent_type === 'string' && /^[\w-]{1,40}$/.test(m.subagent_type)
-        ? `agent=${m.subagent_type}`
-        : typeof m.task_type === 'string' && /^[\w-]{1,40}$/.test(m.task_type)
-          ? `task=${m.task_type}`
+  // Subagent / background-task LIFECYCLE. Four subtypes, one shape: they are
+  // the edges (and the middle) of a task the backend is running for us.
+  //
+  // The identity fields travel STRUCTURALLY on `task` — see the HarnessTask doc
+  // for why an id has to survive the trip. `detail` keeps saying exactly what it
+  // said before (a status enum, an agent type), so a consumer that never learned
+  // about `task` renders these pills unchanged.
+  const taskPhase: HarnessTask['phase'] | null =
+    subtype === 'task_started'
+      ? 'started'
+      : subtype === 'task_progress'
+        ? 'progress'
+        : subtype === 'task_notification' || subtype === 'task_updated'
+          ? 'ended'
           : null;
-    const parts = [status, kind].filter((p): p is string => p !== null);
-    return parts.length ? { subtype: label, detail: parts.join(' ') } : { subtype: label };
+  if (taskPhase !== null) {
+    // `description` / `summary` are model-authored free text — omitted by rule 1.
+    // A `task_updated` reports its status inside `patch`; the others carry it flat.
+    const rawStatus = subtype === 'task_updated' ? m.patch?.status : m.status;
+    const status =
+      rawStatus === 'completed' || rawStatus === 'failed' || rawStatus === 'stopped'
+        ? rawStatus
+        : null;
+    const agentType =
+      typeof m.subagent_type === 'string' && SAFE_LABEL.test(m.subagent_type)
+        ? m.subagent_type
+        : null;
+    const taskType =
+      typeof m.task_type === 'string' && SAFE_LABEL.test(m.task_type) ? m.task_type : null;
+    const detailParts = [
+      status ? `status=${status}` : null,
+      agentType ? `agent=${agentType}` : taskType ? `task=${taskType}` : null,
+    ].filter((p): p is string => p !== null);
+
+    // A `task_updated` that reports no terminal status is a mid-flight patch
+    // (description edited, backgrounded) — it is the 'progress' kind of noise,
+    // not an end. Say so rather than closing a block that is still running.
+    const phase: HarnessTask['phase'] =
+      subtype === 'task_updated' && status === null ? 'progress' : taskPhase;
+
+    const taskId = typeof m.task_id === 'string' && SAFE_ID.test(m.task_id) ? m.task_id : null;
+    const toolCallId =
+      typeof m.tool_use_id === 'string' && SAFE_ID.test(m.tool_use_id) ? m.tool_use_id : null;
+    const task: HarnessTask | null = taskId
+      ? {
+          id: taskId,
+          phase,
+          ...(agentType ? { agentType } : {}),
+          ...(toolCallId ? { toolCallId } : {}),
+          ...(status ? { status } : {}),
+        }
+      : null;
+    return {
+      subtype: label,
+      ...(detailParts.length ? { detail: detailParts.join(' ') } : {}),
+      ...(task ? { task } : {}),
+    };
   }
 
   return { subtype: label };
+}
+
+/**
+ * WHO issued the call a pre-execution hook is reporting.
+ *
+ * The Claude Agent SDK puts the answer on every hook input: `agent_id` is set
+ * "only when the hook fires from within a subagent (e.g. a tool called by an
+ * AgentTool worker) — absent for the main thread, even in --agent sessions", and
+ * `agent_type` names the kind (`general-purpose`, a custom agent). That is real
+ * ATTRIBUTION FROM THE BACKEND, which is the whole reason a subagent can be
+ * given its own block instead of the UI guessing parentage from timing.
+ *
+ * Returns null for a main-thread call — the common case — so the caller can omit
+ * the field entirely rather than store an "is top level" flag on every call.
+ *
+ * Exported so the rule is assertable without a live model call.
+ */
+export function subagentAttribution(
+  hookInput: unknown,
+  spawningCallByAgentId?: ReadonlyMap<string, string>,
+): SubagentAttribution | null {
+  if (!hookInput || typeof hookInput !== 'object') return null;
+  const h = hookInput as { agent_id?: unknown; agent_type?: unknown };
+  // No agent id ⇒ the main thread. `agent_type` alone is NOT enough: a session
+  // started with `--agent` sets it on the main thread too, and treating that as
+  // a subagent would file the whole turn under a block that never existed.
+  if (typeof h.agent_id !== 'string' || !SAFE_ID.test(h.agent_id)) return null;
+  const agentType =
+    typeof h.agent_type === 'string' && SAFE_LABEL.test(h.agent_type) ? h.agent_type : null;
+  const parentToolCallId = spawningCallByAgentId?.get(h.agent_id);
+  return {
+    agentId: h.agent_id,
+    ...(agentType ? { agentType } : {}),
+    ...(parentToolCallId && SAFE_ID.test(parentToolCallId) ? { parentToolCallId } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1212,25 @@ export class ClaudeAgentSdkEngine implements Engine {
     const toolNameById = new Map<string, string>();
     const ownToolResultIds = new Set<string>();
 
+    // WHICH `Task` CALL SPAWNED WHICH SUBAGENT.
+    //
+    // The hook that reports a subagent's tool calls knows the AGENT id
+    // (`agent_id`) and nothing about the call that started it; the
+    // `system/task_started` message knows both (`task_id` — the same id the
+    // agent runs under — and `tool_use_id`, the `Task` call). Joining them here
+    // is the only place both are in scope, and it is what lets a consumer fold a
+    // subagent's children under the call that launched it AFTER A RELOAD, when
+    // the lifecycle events are long gone (they are observational and never
+    // persisted) but the tool calls are still on disk.
+    //
+    // BEST EFFORT BY CONSTRUCTION. The map is filled from the message stream and
+    // read from a hook callback; if a subagent's first tool call is gated before
+    // the driver has drained `task_started`, the parent id is simply missing on
+    // that call. That is why grouping keys on `agentId` and treats
+    // `parentToolCallId` as an enrichment — a missing parent costs a nicety, a
+    // WRONG parent would put one agent's work under another's block.
+    const spawningCallByAgentId = new Map<string, string>();
+
     // Build our tools as an in-process MCP server. Each handler runs the
     // runtime executor on the GATE-APPROVED input, and refuses to run if no
     // gate decision is queued (which would mean the gate was bypassed).
@@ -1200,16 +1309,24 @@ export class ClaudeAgentSdkEngine implements Engine {
       // (which arrives on a later `user` message carrying only the id) can be
       // surfaced with its tool name.
       toolNameById.set(h.tool_use_id, name);
+      // WHO made this call. `agent_id` is present ONLY when the hook fires from
+      // inside a subagent (the SDK is explicit that this — not `agent_type`, which
+      // a top-level `--agent` session also sets — is the field that distinguishes
+      // the two), so its absence is a sound "this was the main thread" rather than
+      // a shrug. Nothing below branches on it; it rides along for display.
+      const subagent = subagentAttribution(h, spawningCallByAgentId);
       const call: ToolCall = {
         toolCallId: h.tool_use_id,
         toolName: name,
         input: h.tool_input,
+        ...(subagent ? { subagent } : {}),
       };
       channel.push({
         kind: 'tool_request',
         toolCallId: call.toolCallId,
         toolName: name,
         input: h.tool_input,
+        ...(subagent ? { subagent } : {}),
       });
 
       const decision = await input.gate(call);
@@ -1365,6 +1482,7 @@ export class ClaudeAgentSdkEngine implements Engine {
                 kind: 'harness',
                 subtype: described.subtype,
                 ...(described.detail ? { detail: described.detail } : {}),
+                ...(described.task ? { task: described.task } : {}),
               });
             }
           } else {
@@ -1374,10 +1492,16 @@ export class ClaudeAgentSdkEngine implements Engine {
             // the transcript and cannot influence the loop or the gate.
             const described = describeHarnessMessage(msg);
             if (described) {
+              // Remember which `Task` call started this agent, while both ids
+              // are in the same message — see `spawningCallByAgentId`.
+              if (described.task?.toolCallId && described.task.phase === 'started') {
+                spawningCallByAgentId.set(described.task.id, described.task.toolCallId);
+              }
               channel.push({
                 kind: 'harness',
                 subtype: described.subtype,
                 ...(described.detail ? { detail: described.detail } : {}),
+                ...(described.task ? { task: described.task } : {}),
               });
             }
           }

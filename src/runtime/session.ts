@@ -356,7 +356,19 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
         role: 'assistant',
         content: '',
         toolCalls: [
-          { toolCallId: ev.toolCallId, toolName: ev.toolName, input: ev.input },
+          {
+            toolCallId: ev.toolCallId,
+            toolName: ev.toolName,
+            input: ev.input,
+            // WHO made the call, when the backend attributed it to a subagent.
+            // Persisted with the call and not derived later, because the events
+            // that describe a subagent's LIFE (`harness`) are observational and
+            // never stored — so after a reload the call itself is the only thing
+            // left that can say which delegated run it belonged to. Providers
+            // map tool calls field by field, so an extra descriptive field never
+            // reaches a provider payload.
+            ...(ev.subagent ? { subagent: ev.subagent } : {}),
+          },
         ],
       });
     } else if (ev.kind === 'gate_result' && ev.decision === 'deny') {

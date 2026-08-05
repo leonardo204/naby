@@ -283,19 +283,23 @@ const updates = {
 };
 
 /**
- * The three file operations the web shell cannot do for itself, for the chat
- * file browser's rows and right-click menu.
+ * The file operations the web shell cannot do for itself: three for the chat
+ * file browser's rows and right-click menu, plus the folder chooser that
+ * "add/open a project" starts from.
  *
- * PROJECT-RELATIVE ON PURPOSE. All of them take `{cwd, rel}` and never an
- * absolute path: main joins them and checks containment before it calls
- * `shell`, so this bridge cannot be used to reveal, open or trash anything
- * outside the project the user has open. There is no `read`, no `write` and no
- * `move` here — only the operations the browser genuinely lacks.
+ * PROJECT-RELATIVE ON PURPOSE. The three browser operations take `{cwd, rel}`
+ * and never an absolute path: main joins them and checks containment before it
+ * calls `shell`, so this bridge cannot be used to reveal, open or trash
+ * anything outside the project the user has open. There is no `read`, no
+ * `write` and no `move` here — only the operations the browser genuinely lacks.
+ * `pickFolder` is the one exception to the `{cwd, rel}` shape, because it is
+ * how a project is chosen before there is a `cwd` at all; it returns only what
+ * the user picked by hand.
  *
  * The renderer FEATURE-DETECTS this (`window.naby?.fsOps`): in a plain browser
  * it is absent, "Open" and "Reveal in Finder" are not rendered at all,
- * double-click does nothing, and delete falls back to the server's permanent
- * `/api/fs-op` delete.
+ * double-click does nothing, delete falls back to the server's permanent
+ * `/api/fs-op` delete, and the folder chooser falls back to `/api/pick-folder`.
  */
 const fsOps = {
   /** Open the OS file manager with the item selected. */
@@ -310,6 +314,29 @@ const fsOps = {
   /** Move the item to the OS trash — recoverable, unlike the server's `rm`. */
   trash: (target: { cwd: string; rel: string }): Promise<Result<void>> =>
     ipcRenderer.invoke('fs:trash', target),
+
+  /**
+   * The OS folder chooser behind "add/open a project" — resolves to the chosen
+   * POSIX path, or `null` when the user cancels.
+   *
+   * NOT PROJECT-RELATIVE, unlike its three siblings: it is how a project gets
+   * chosen in the first place, so there is no `cwd` yet to be relative to. It
+   * still cannot see anything on its own — the value is whatever the user
+   * selected in person, in a panel drawn by the OS.
+   *
+   * NOT A `Result` EITHER, and deliberately: the caller has exactly one branch
+   * ("a folder" or "nothing"), the same `{folder: string | null}` contract the
+   * web fallback route answers with. Cancelling is the normal outcome, and a
+   * refused call is equally "no folder was chosen" as far as the picker's
+   * caller can act on it — so the envelope is unwrapped here rather than
+   * pushed onto every call site as a second, undistinguishable branch.
+   *
+   * `message` is the prompt shown above the panel (macOS only, per Electron).
+   */
+  pickFolder: async (message?: string): Promise<string | null> => {
+    const res: Result<string | null> = await ipcRenderer.invoke('fs:pickFolder', { message });
+    return res.ok ? res.value : null;
+  },
 };
 
 contextBridge.exposeInMainWorld('naby', {

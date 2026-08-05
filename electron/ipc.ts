@@ -27,8 +27,17 @@
 // second boot in the same process (the spike does this) does not hit
 // "Attempted to register a second handler".
 
-import { ipcMain, shell, webContents, type IpcMainInvokeEvent } from 'electron';
+import {
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  shell,
+  webContents,
+  type IpcMainInvokeEvent,
+  type OpenDialogOptions,
+} from 'electron';
 import { isAbsolute, join, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
 import type { CredentialVault } from './credentials.js';
 import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
@@ -175,6 +184,19 @@ export const CHANNELS = [
   'fs:reveal',
   'fs:open',
   'fs:trash',
+  // fs:pickFolder — the OS folder chooser behind "add/open a project".
+  //
+  // The odd one out of this group: it takes no `{cwd, rel}`, because there is
+  // no project yet — choosing one is the point. It cannot read, list or return
+  // anything the user did not select in person, so there is nothing to contain.
+  //
+  // It exists because the web shell's fallback (/api/pick-folder) shells out to
+  // `osascript`/`powershell`/`zenity`, and a panel owned by a MENULESS helper
+  // process has no Edit menu — so on macOS cmd+C and cmd+V do nothing in the
+  // panel's "New Folder" name field. `dialog.showOpenDialog(win, …)` runs the
+  // same native panel owned by THIS app, attached to the window, which is what
+  // gives it our menu bar and therefore working clipboard shortcuts.
+  'fs:pickFolder',
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
@@ -519,6 +541,44 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     // browser then leaves the row alone rather than pretending it was deleted.
     await shell.trashItem(abs);
     return ok(undefined as void);
+  });
+
+  // -- folder chooser ------------------------------------------------------
+  //
+  // PARENTED TO THE CALLING WINDOW, AND THAT IS THE WHOLE POINT. Passing the
+  // BrowserWindow makes this a window-modal sheet owned by naby, so the app's
+  // menu bar stays in force while it is up — which is what makes cmd+C/cmd+V
+  // work in the panel's "New Folder" field. The web fallback launches the same
+  // panel out of `osascript`, a process with no menus, where those shortcuts
+  // dispatch to nothing and silently do nothing.
+  //
+  // `event.sender` is the top-level webContents even when the call comes from
+  // the project iframe (same-origin frames share it), so the sheet lands on the
+  // window the user is actually looking at. The focused-window fallback covers
+  // a sender whose window has already gone; with neither, the parentless form
+  // still opens a usable app-owned panel rather than failing the call.
+  handle('fs:pickFolder', async (payload, event) => {
+    const { message } = asObject(payload);
+    if (message !== undefined && typeof message !== 'string') {
+      return fail('INTERNAL', 'message must be a string when present');
+    }
+    const options: OpenDialogOptions = {
+      // `createDirectory` is what puts the "New Folder" button in the panel —
+      // the button whose text field this fix is about.
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: homedir(),
+      ...(message ? { message } : {}),
+    };
+    const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow();
+    const result = win
+      ? await dialog.showOpenDialog(win, options)
+      : await dialog.showOpenDialog(options);
+    // Cancelling is a NORMAL outcome, not a failure: `null` is the answer the
+    // renderer already handles (the web route returns `{folder: null}` for it),
+    // so a dismissed panel must not become an error toast.
+    if (result.canceled) return ok(null);
+    const picked = result.filePaths[0];
+    return ok(picked ? picked : null);
   });
 
   // The M→R half of contract §1.3. Broadcast to every live webContents rather

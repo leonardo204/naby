@@ -12,11 +12,47 @@
 // Tool + message shapes (contract §2, §6)
 // ---------------------------------------------------------------------------
 
+/**
+ * WHO issued a tool call, when the backend ran it inside a SUBAGENT rather than
+ * on the main thread.
+ *
+ * This is ATTRIBUTION the backend reports about itself — never a guess. The
+ * Claude Agent SDK gives it on the pre-execution hook (`agent_id` / `agent_type`
+ * on every hook input; both are absent on the main thread, which is exactly what
+ * makes "absent = top level" sound). An engine with no notion of subagents (the
+ * AI-SDK one) simply never sets it.
+ *
+ * It exists so a consumer can show a delegated run as its OWN block instead of
+ * folding a subagent's twenty calls into the turn's generic tool-call batch. It
+ * is DESCRIPTIVE ONLY: nothing may branch on it to decide whether a call is
+ * allowed — the gate's inputs are the tool name and its input, and adding "but
+ * it was a subagent" to that decision would make authorization depend on
+ * backend-internal bookkeeping the other engine cannot report.
+ */
+export type SubagentAttribution = {
+  /** The backend's id for the running subagent. Opaque, closed-form (an id, not
+   *  free text) — safe to key UI state on and to persist. */
+  agentId: string;
+  /** The subagent's TYPE, e.g. `general-purpose`. Free-form in principle, so
+   *  engines pass it through only when it looks like a label (see the engine's
+   *  sanitizer) — it is rendered. */
+  agentType?: string;
+  /** The tool call that SPAWNED this subagent (the `Task` call on the main
+   *  thread), when the engine can correlate the two. Lets a consumer fold the
+   *  parent call and its children into one block; absent is not an error, and a
+   *  consumer must still group by `agentId` alone. */
+  parentToolCallId?: string;
+};
+
 /** A single tool invocation the engine surfaces to the runtime. */
 export type ToolCall = {
   toolCallId: string;
   toolName: string; // BARE name (mcp__server__tool already normalized off)
   input: unknown;
+  /** Set only when the BACKEND says this call ran inside a subagent. Carried on
+   *  the call (not looked up later) so it survives persistence and replay, and
+   *  so a consumer never has to infer parentage from timing. */
+  subagent?: SubagentAttribution;
 };
 
 /** What an executor returns. Provider-independent. */
@@ -167,6 +203,34 @@ export type Usage = {
   cachedInputTokens?: number;
 };
 
+/**
+ * The IDENTITY half of a harness event about a subagent / background task.
+ *
+ * Every field is closed-form (an id, an enum, a label-shaped type name) — the
+ * free text a task carries (`description`, `summary`, a model-authored prompt)
+ * is deliberately NOT here, for the same reason `detail` never echoes a raw
+ * body: it is arbitrary content from whatever project is open and it is
+ * rendered.
+ *
+ * `id` is the backend's task id. For a `Task`-tool subagent it is ALSO the
+ * subagent's agent id — the Claude Agent SDK registers the task under the
+ * agent's own id — which is what lets a consumer join this lifecycle to the
+ * tool calls attributed to that agent (`SubagentAttribution.agentId`). A
+ * consumer must treat a non-matching id as "no lifecycle known" rather than
+ * guessing.
+ */
+export type HarnessTask = {
+  id: string;
+  /** e.g. `general-purpose`. Absent for non-subagent tasks (a shell task). */
+  agentType?: string;
+  /** The tool call that spawned it, when the backend reports one. */
+  toolCallId?: string;
+  /** Which edge of the lifecycle this event is. */
+  phase: 'started' | 'progress' | 'ended';
+  /** Terminal status, on `phase:'ended'`. */
+  status?: 'completed' | 'failed' | 'stopped';
+};
+
 export type EngineEvent =
   | { kind: 'init'; providerId: string; model: string }
   | {
@@ -185,7 +249,15 @@ export type EngineEvent =
    * a collapsed block, and the transcript copy never includes it.
    */
   | { kind: 'thinking'; text: string; partial?: boolean }
-  | { kind: 'tool_request'; toolCallId: string; toolName: string; input: unknown }
+  | {
+      kind: 'tool_request';
+      toolCallId: string;
+      toolName: string;
+      input: unknown;
+      /** Present only when the backend attributes this call to a subagent it is
+       *  running (see SubagentAttribution). Absent = the main thread. */
+      subagent?: SubagentAttribution;
+    }
   | {
       kind: 'gate_result';
       toolCallId: string;
@@ -232,8 +304,15 @@ export type EngineEvent =
    * raw message body: hook output can contain arbitrary content from whatever
    * project is open, and this string is rendered in the UI. `detail` is
    * likewise a curated summary, not a dump.
+   *
+   * `task` is the same rule applied to IDENTITY rather than prose: when the
+   * event is a subagent/background-task LIFECYCLE edge, the closed-form fields
+   * that say WHICH task it is travel structurally instead of being flattened
+   * into `detail`. Without it a consumer cannot tell four parallel subagents
+   * apart — every one of them reports `agent=general-purpose` — so four blocks
+   * collapse into one. Still observational: it changes nothing about the loop.
    */
-  | { kind: 'harness'; subtype: string; detail?: string };
+  | { kind: 'harness'; subtype: string; detail?: string; task?: HarnessTask };
 
 // ---------------------------------------------------------------------------
 // The Engine interface (contract §2). The rest of the app depends only on this.
