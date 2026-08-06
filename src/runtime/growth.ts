@@ -773,10 +773,12 @@ export type GrowthChange = {
 export function diagnoseChange(records: readonly CheckinRecord[]): GrowthChange {
   // Drills are excluded here too (P3-M12c): this sentence explains a movement of
   // the REAL record to the user, and "your patterns changed" must not be inferred
-  // from questions naby invented for practice.
-  const all = withoutImported(records)
-    .filter((r) => !r.drill)
-    .sort((a, b) => a.at - b.at);
+  // from questions naby invented for practice. And ONLY scored check-ins count:
+  // an autonomous row has no `hit`, so without the kind filter a busy day of
+  // uncorrected work reads as a wall of misses — the panel would say "155 of the
+  // last 155 went differently" beside a butterfly gauge, which is exactly the
+  // two-numbers-disagreeing failure trust-meter §9.2 rule 2 forbids.
+  const all = scorable(withoutImported(records)).sort((a, b) => a.at - b.at);
   if (all.length < GROWTH_MIN_SAMPLE) {
     return { direction: 'flat', code: 'not-measured', boundDeltaPoints: 0 };
   }
