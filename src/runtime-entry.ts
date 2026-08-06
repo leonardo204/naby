@@ -29,6 +29,8 @@ export type {
   GateDecision,
   JsonSchema,
   ModelSelection,
+  RollingSummary,
+  RollingSummaryPort,
   RuntimeMessage,
   SubagentSpec,
   ToolCall,
@@ -36,6 +38,30 @@ export type {
   ToolSchema,
   Usage,
 } from './runtime/engine.js';
+
+// WHICH WINDOW THIS TURN IS FILLING (session-context-management §2.1). The shell
+// reads it to label the status-bar gauge; the AI-SDK engine reads it to size its
+// own payload. ONE table, so the number the user sees and the number compaction
+// folds against can never disagree.
+export {
+  contextWindowFor,
+  CLAUDE_CONTEXT_WINDOW,
+  FALLBACK_CONTEXT_WINDOW,
+  type ContextWindowEngine,
+} from './runtime/context-window.js';
+
+// The rolling-compaction primitives. Exported for the shell's tests and for a
+// caller that wants to size a payload the same way the engine does.
+export {
+  // Renamed on the way out: `estimateTokens` is already the memory-injection
+  // budgeter's export, and two functions with one name across the barrel is how a
+  // caller ends up budgeting a payload with the memory heuristic.
+  estimateTokens as estimatePayloadTokens,
+  planFold,
+  FOLD_THRESHOLD,
+  SUMMARY_MAX_CHARS,
+  type FoldPlan,
+} from './runtime/compaction.js';
 
 export {
   makeGate,
@@ -228,6 +254,45 @@ export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
 export { runTurn, type RunTurnOptions } from './runtime/session.js';
+
+// -- the activity log (naby-activity-log) ------------------------------------
+//
+// The runtime hooks itself (session.ts, sqlite-store.ts) — these exports are for
+// the SHELL, which owns the three things the runtime cannot see: what dispatched
+// a turn (chat / Telegram / scheduler), the outside channels, and the check-in
+// prompt as the user experienced it. `nabyDbPath` is exported for the same
+// reason the log home is resolved centrally: so the shell's store and the log
+// directory can never disagree about where this install lives.
+export {
+  ACTIVITY_LOG_DIR_NAME,
+  ACTIVITY_LOG_ENABLED_KEY,
+  ACTIVITY_LOG_MAX_FIELD_CHARS,
+  ACTIVITY_LOG_MAX_LINE_CHARS,
+  LOG_RETENTION_DAYS,
+  activityLogDir,
+  activityLogFile,
+  activityLogFileName,
+  applyActivityLogSettings,
+  initActivityLog,
+  isActivityLogEnabled,
+  logActivity,
+  maskSecrets,
+  pruneActivityLogs,
+  readActivityLogEnabled,
+  registerActivityLogStore,
+  resetActivityLogCaches,
+  sanitizeActivityPayload,
+  setActivityLogEnabled,
+  unregisterActivityLogStore,
+  type ActivityKind,
+  type ActivityRecord,
+} from './runtime/activity-log.js';
+export {
+  configuredNabyHome,
+  nabyDbPath,
+  nabyHomeDir,
+  NABY_HOME_DIR_NAME,
+} from './runtime/naby-home.js';
 
 // Phase 3 P3-M1 — the naby agent layer's built-in PERSONA seed + helpers. The
 // shell seeds the persona at its composition root (idempotent) so a fresh install

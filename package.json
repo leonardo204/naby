@@ -71,7 +71,9 @@
     "spike:reflection": "npm run build:runtime && tsx src/spikes/spike-reflection.ts",
     "spike:rank": "tsx src/spikes/spike-rank.ts",
     "spike:boot-services": "npm run build:electron && tsx src/spikes/spike-boot-services.ts",
-    "spike:hygiene": "tsx src/spikes/spike-hygiene.ts"
+    "spike:hygiene": "tsx src/spikes/spike-hygiene.ts",
+    "spike:activity": "tsx src/spikes/spike-activity-log.ts",
+    "spike:compaction": "tsx src/spikes/spike-compaction.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",

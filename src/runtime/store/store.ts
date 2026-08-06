@@ -20,7 +20,7 @@
 // explicitly "the LAST provider used — a hint, not a constraint": it records
 // what answered last, and switching it mid-session changes nothing else.
 
-import type { RuntimeMessage } from '../engine.js';
+import type { RollingSummary, RuntimeMessage } from '../engine.js';
 
 // ---------------------------------------------------------------------------
 // Session index (contract §6)
@@ -85,6 +85,23 @@ export type SessionRef = {
    * discount a record the user actually earned.
    */
   fastGrowth?: boolean;
+  /**
+   * THE HANDOFF THIS SESSION WAS OPENED WITH (session-context-management §2.2).
+   *
+   * When a conversation got long and the user chose "continue in a new tab", the
+   * old session was compressed into a short summary — agreed decisions, work in
+   * progress, open questions — and it lives here, on the NEW session. Every turn
+   * of this session injects it as one labelled block of the system prompt.
+   *
+   * IT IS NOT A TRANSCRIPT AND MUST NOT BECOME ONE. Memory injection is automatic
+   * and covers what naby knows about the user in general; this covers only what
+   * was true INSIDE the conversation it continues — which is precisely the thing
+   * a new session would otherwise lose.
+   *
+   * Absent = this session was not continued from another, which is true of every
+   * session that predates schema v13.
+   */
+  handoff?: string;
   /** Coarse lifecycle state, e.g. 'active' | 'ended'; absent = unknown. */
   status?: string;
 };
@@ -1634,6 +1651,37 @@ export interface Store {
    *  `SessionRef.fastGrowth`, which the check-in sink stamps its rows from — so
    *  "is this practice" has exactly one answer, and it is the user's. */
   setSessionFastGrowth(sessionId: string, fastGrowth: boolean): void;
+
+  // -- continuing in a new tab (session-context-management §2.2) -----------
+
+  /**
+   * Store (or clear) the HANDOFF this session was opened with: a compact summary
+   * of the conversation it continues from. Read back through `SessionRef.handoff`
+   * and injected into every turn of this session as one labelled block.
+   *
+   * No-op when the session does not exist, exactly like the setters above it.
+   * Passing `undefined` clears it, so a mistaken handoff is removable without a
+   * second method.
+   */
+  setSessionHandoff(sessionId: string, handoff: string | undefined): void;
+
+  // -- rolling compaction (session-context-management §2.3) ----------------
+
+  /**
+   * The rolling summary the AI-SDK engine folded this session's older turns into,
+   * with the range it covers — or undefined when nothing has ever been folded (or
+   * when a stored summary carries no range, which is not reusable and therefore
+   * not a summary).
+   *
+   * ITS OWN ACCESSOR RATHER THAN A FIELD ON `SessionRef`: it is read at exactly
+   * one moment by exactly one caller (payload assembly), and it is large enough
+   * that carrying it on every row of every session list would be paid for on every
+   * screen that draws one.
+   */
+  getSessionRollingSummary(sessionId: string): RollingSummary | undefined;
+
+  /** Persist (or clear) the rolling summary. No-op on a missing session. */
+  setSessionRollingSummary(sessionId: string, summary: RollingSummary | undefined): void;
 
   // -- lifecycle -----------------------------------------------------------
 

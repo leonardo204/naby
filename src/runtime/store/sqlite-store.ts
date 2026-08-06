@@ -34,6 +34,7 @@ import { createRequire } from 'node:module';
 // a static ESM import is hoisted above any code that could suppress it. The
 // actual load happens lazily inside openSilently() below.
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
+import { logActivity, registerActivityLogStore } from '../activity-log.js';
 import { decideMemoryWrite } from '../memory-gate.js';
 import { decideHarnessImport } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
@@ -44,7 +45,7 @@ import { sameMemoryValue } from './store.js';
 // memory-hygiene, so the SQL that raises strength and the predicate that reads it
 // can never disagree about the cap.
 import { STRENGTH_CAP } from '../memory-hygiene.js';
-import type { RuntimeMessage } from '../engine.js';
+import type { RollingSummary, RuntimeMessage } from '../engine.js';
 import type {
   Agent,
   AgentInput,
@@ -264,7 +265,28 @@ function openSilently(path: string): DatabaseSyncType {
 // decay curve reproduce the old 30-day/90-day cliffs EXACTLY, so an existing
 // install's stale set is byte-for-byte what it was the day before the upgrade,
 // and every row earns its slower ageing from its own use afterwards.
-export const SCHEMA_VERSION = 12;
+// v13 (session-context-management §2.2/§2.3) adds THREE COLUMNS to `sessions` and
+// no tables: `handoff` (the previous session's summary, injected into every turn of
+// this one — NULL = this session was not continued from another), `rolling_summary`
+// (what the AI-SDK engine folded the older turns of THIS session into) and
+// `rolling_summary_upto` (how many leading messages that summary covers, which is
+// what makes reusing it safe rather than hopeful).
+//
+// COLUMNS AND NOT SETTINGS, deliberately. Both are read on the HOT PATH — the
+// handoff on every turn of the session while the system prompt is assembled, the
+// rolling summary on every AI-SDK payload build — which is precisely the shape
+// `sessions.fast_growth` has, and it is read the same way: one row the engine
+// already loads (`getSession`), no second lookup. `session.customTitle.*` is the
+// counter-example and rightly so — a title is read when a LIST is drawn, not when
+// a turn runs.
+//
+// Added the same way v10-v12's were: an `ALTER TABLE ... ADD COLUMN` gated on the
+// COLUMN being absent rather than on the version number, so a database that
+// skipped versions or was stamped before a crash self-heals and never throws
+// "duplicate column name". NO BACKFILL, and NULL is the honest reading in all
+// three cases: no session that predates this was continued from another one, and
+// none of them ever folded a payload.
+export const SCHEMA_VERSION = 13;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -278,7 +300,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   pinned_at    INTEGER,                       -- WHEN it was pinned; NULL = not pinned
   status       TEXT,                          -- e.g. 'active' | 'ended'; NULL = unknown
   no_learn     INTEGER NOT NULL DEFAULT 0,    -- v10: 1 = temporary session, nothing is learned from it
-  fast_growth  INTEGER NOT NULL DEFAULT 0     -- v11: 1 = fast-growth session; its check-ins are drills
+  fast_growth  INTEGER NOT NULL DEFAULT 0,    -- v11: 1 = fast-growth session; its check-ins are drills
+  handoff      TEXT,                          -- v13: previous session's handoff summary; NULL = not continued from one
+  rolling_summary      TEXT,                  -- v13: what the older turns of THIS session were folded into
+  rolling_summary_upto INTEGER                -- v13: how many leading messages that summary covers
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -565,6 +590,9 @@ type SessionRow = {
   // v11 (P3-M12b). 1 = a fast-growth session, whose check-ins are drills.
   // Optional on the type for the same reason as every column above it.
   fast_growth?: number | null;
+  // v13 (session-context-management §2.2). The previous session's handoff summary.
+  // NULL = this session was not continued from another one.
+  handoff?: string | null;
 };
 
 function toSessionRef(row: SessionRow): SessionRef {
@@ -591,6 +619,17 @@ function toSessionRef(row: SessionRow): SessionRef {
   // on every SessionRef would change what a stored snapshot of one looks like.
   if (row.fast_growth !== null && row.fast_growth !== undefined && Number(row.fast_growth) !== 0) {
     ref.fastGrowth = true;
+  }
+  // v13. Surfaced only when there is one, for the same reason the two flags above
+  // are: absent must read as "no handoff" everywhere, and a field present on every
+  // SessionRef would change what a stored snapshot of one looks like.
+  //
+  // The ROLLING SUMMARY is deliberately NOT here. It is read by exactly one caller
+  // at exactly one moment (the AI-SDK engine, while sizing a payload), and it can
+  // be thousands of characters — carrying it on every row of every session LIST
+  // would spend that on every screen that draws one. It has its own accessor.
+  if (row.handoff !== null && row.handoff !== undefined && row.handoff !== '') {
+    ref.handoff = row.handoff;
   }
   if (row.status !== null && row.status !== undefined) ref.status = row.status;
   return ref;
@@ -1028,6 +1067,13 @@ export class SqliteStore implements Store {
   constructor(options: SqliteStoreOptions | string) {
     const path = typeof options === 'string' ? options : options.path;
     this.db = openSilently(path);
+    // THE ACTIVITY LOG LIVES BESIDE THE DATABASE (naby-activity-log §2). Said
+    // here rather than resolved independently by the logger, because this is the
+    // only place that knows which file was actually opened: a spike that points a
+    // store at a temp directory gets its logs there, and the user's real
+    // `~/.naby` is not touched by a test that never named it. An environment-
+    // configured home still wins — see activity-log.ts `activityLogDir`.
+    if (path !== ':memory:') registerActivityLogStore(path);
     // Durability + concurrency posture for a desktop app: WAL survives a hard
     // kill of the renderer, and FK enforcement is off by design (we cascade
     // deletes explicitly, so a partially-written session is never referenced).
@@ -1084,6 +1130,23 @@ export class SqliteStore implements Store {
     // is true of every session that existed before the fast-growth session did.
     if (sessionCols.length > 0 && !sessionCols.some((c) => c.name === 'fast_growth')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN fast_growth INTEGER NOT NULL DEFAULT 0');
+    }
+
+    // v?->v13 (session-context-management): the handoff and the rolling summary.
+    // Column-gated like every ALTER above, additive, and backfill-free — NULL says
+    // "this session was not continued from another" and "nothing has been folded",
+    // both of which are true of every session that existed before this landed.
+    // Driven off a list for the same reason v12's five were.
+    if (sessionCols.length > 0) {
+      for (const [name, decl] of [
+        ['handoff', 'TEXT'],
+        ['rolling_summary', 'TEXT'],
+        ['rolling_summary_upto', 'INTEGER'],
+      ] as [string, string][]) {
+        if (!sessionCols.some((c) => c.name === name)) {
+          this.db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${decl}`);
+        }
+      }
     }
     const memoryCols = this.db.prepare('PRAGMA table_info(memory_items)').all() as {
       name: string;
@@ -1476,6 +1539,19 @@ export class SqliteStore implements Store {
       // A deny THROWS (contract §6): the caller must not treat a refused write
       // as a silent no-op — memory poisoning is exactly the thing that must be
       // loud.
+      //
+      // It is also the single most interesting thing this method does, from a
+      // debugging seat: the agent tried to learn something and the memory gate
+      // refused. Logged before the throw so the record exists even though the
+      // caller is about to unwind.
+      logActivity('memory_write', {
+        scope: req.scope,
+        scopeKey: req.scopeKey,
+        key: req.key,
+        decision: 'deny',
+        reason: decision.reason,
+        ...(req.provenance.sessionId ? { sessionId: req.provenance.sessionId } : {}),
+      });
       throw new Error(`memory write denied: ${decision.reason}`);
     }
     const valueChanged = existingRow ? !sameMemoryValue(existingRow.value, req.value) : false;
@@ -1528,6 +1604,22 @@ export class SqliteStore implements Store {
         req.provenance.createdFrom,
       );
     }
+    // WHAT THE AGENT LEARNED, AND ON WHOSE SAY-SO. `status` distinguishes a
+    // proposal from a confirmed write, `valueChanged` says whether this replaced
+    // a claim or merely restated one.
+    logActivity('memory_write', {
+      id: saved.id,
+      scope: req.scope,
+      scopeKey: req.scopeKey,
+      type: req.type,
+      key: req.key,
+      value: req.value,
+      status: saved.status,
+      decision: decision.behavior,
+      valueChanged,
+      createdFrom: req.provenance.createdFrom,
+      ...(req.provenance.sessionId ? { sessionId: req.provenance.sessionId } : {}),
+    });
     return saved;
   }
 
@@ -1550,6 +1642,7 @@ export class SqliteStore implements Store {
     this.db
       .prepare('UPDATE memory_items SET superseded_at = ?, superseded_by = ? WHERE id = ?')
       .run(Math.trunc(at), newId, oldId);
+    logActivity('memory_superseded', { oldId, newId, key: older.key, scope: older.scope });
     return true;
   }
 
@@ -1737,6 +1830,10 @@ export class SqliteStore implements Store {
           WHERE id = ? AND status = 'proposed'`,
       )
       .run(now, now, id);
+    // The one act that turns a proposal into something that will shape future
+    // turns. Logged unconditionally — a confirm of an already-confirmed row is a
+    // no-op in SQL, and knowing it was attempted is worth a line.
+    logActivity('memory_confirmed', { id });
   }
 
   updateMemoryValue(id: string, value: string, at: number = Date.now()): MemoryItem | undefined {
@@ -1763,6 +1860,15 @@ export class SqliteStore implements Store {
     if (changed) {
       this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(id);
     }
+    // BOTH VALUES. An edit is the one memory event whose "before" is otherwise
+    // unrecoverable — the row now holds only the "after".
+    logActivity('memory_updated', {
+      id,
+      key: existing.key,
+      previousValue: existing.value,
+      value,
+      changed,
+    });
     const row = this.db
       .prepare('SELECT * FROM memory_items WHERE id = ?')
       .get(id) as MemoryRow | undefined;
@@ -1795,6 +1901,10 @@ export class SqliteStore implements Store {
 
   deleteMemory(sel: MemoryDeleteSelector): void {
     this.assertOpen();
+    // A DELETION IS THE ONE EVENT THE DATABASE CANNOT TESTIFY ABOUT AFTERWARDS.
+    // The selector is logged (not the rows): a source-wide rollback can be tens of
+    // thousands of rows, and the selector is what actually explains the event.
+    logActivity('memory_deleted', { ...sel });
     // The observations go with the items (P3-M8b §5.3). Deleted through the same
     // WHERE clause rather than by collecting ids first, so a rollback of ten
     // thousand poisoned rows stays two statements.
@@ -2011,8 +2121,32 @@ export class SqliteStore implements Store {
     if (decision.behavior === 'deny') {
       // A deny THROWS: an import that violates the trust ordering must be loud,
       // never a silent no-op (the harness twin of memory-poisoning defense).
+      logActivity('harness_change', {
+        action: 'import',
+        decision: 'deny',
+        reason: decision.reason,
+        kind: req.item.kind,
+        name: req.item.name,
+        scope: req.item.scope,
+        scopeKey: req.item.scopeKey,
+      });
       throw new Error(`harness import denied: ${decision.reason}`);
     }
+    // WHAT ARRIVED IN THE HARNESS AND IN WHAT STATE. A skill the agent installed
+    // during a turn is a capability change, and "when did this thing appear" is
+    // the first question about behaviour that changed without a release.
+    logActivity('harness_change', {
+      action: 'import',
+      decision: decision.behavior,
+      status: decision.status,
+      kind: req.item.kind,
+      name: req.item.name,
+      scope: req.item.scope,
+      scopeKey: req.item.scopeKey,
+      origin: req.item.provenance.origin,
+      source: req.item.provenance.source,
+      replacing: existing?.id,
+    });
     // 'allow' carries the (possibly downgraded) status; 'hold' pins 'disabled'.
     return this.writeHarnessRow({
       scope: req.item.scope,
@@ -2068,6 +2202,11 @@ export class SqliteStore implements Store {
     this.db
       .prepare('UPDATE harness_items SET status = ?, updated_at = ? WHERE id = ?')
       .run(enabled ? 'enabled' : 'disabled', Date.now(), id);
+    logActivity('harness_change', {
+      action: enabled ? 'enable' : 'disable',
+      id,
+      name: this.getHarnessItem(id)?.name,
+    });
   }
 
   setHarnessStatus(id: string, status: HarnessStatus): void {
@@ -2078,10 +2217,12 @@ export class SqliteStore implements Store {
     this.db
       .prepare('UPDATE harness_items SET status = ?, updated_at = ? WHERE id = ?')
       .run(status, Date.now(), id);
+    logActivity('harness_change', { action: 'status', id, status });
   }
 
   removeHarness(sel: HarnessRemoveSelector): void {
     this.assertOpen();
+    logActivity('harness_change', { action: 'remove', ...sel });
     if ('id' in sel) {
       this.db.prepare('DELETE FROM harness_items WHERE id = ?').run(sel.id);
       return;
@@ -2194,6 +2335,19 @@ export class SqliteStore implements Store {
 
   setSetting(key: string, value: string): void {
     this.assertOpen();
+    // A settings row is a CONFIGURATION CHANGE — the answer to "it worked
+    // yesterday" often enough to be worth a line each.
+    //
+    // THE VALUE IS PASSED THROUGH THE MASKER BY KEY NAME (`value` under a key
+    // like `telegram.botToken`). The masker keys on the FIELD name, and the field
+    // here is always literally `value`, so the setting's own key is what has to be
+    // consulted: this is the one call site that has to do the masking itself.
+    logActivity('setting_change', {
+      key,
+      value: /token|secret|password|apikey|api_key|credential/i.test(key)
+        ? '[redacted]'
+        : value,
+    });
     this.db
       .prepare(
         `INSERT INTO settings (key, value) VALUES (?, ?)
@@ -2408,6 +2562,23 @@ export class SqliteStore implements Store {
         JSON.stringify(rest),
         excludedFromScoring ? 1 : 0,
       );
+    // THE GROWTH LEDGER, IN THE LOG. Every kind lands here — a scored check-in
+    // (question, options, recommended, chosen, hit, drill), an `autonomous` row
+    // for a consequential call the agent made without asking, a `tripwire` for one
+    // the gate refused — so this single hook covers all three rather than three
+    // hooks in the shell that could each be forgotten. Logged AFTER the insert, so
+    // a line in the file means a row in the database.
+    logActivity('ledger_event', {
+      id: row.id,
+      at: row.at,
+      ledgerKind: kind,
+      agentId,
+      sessionId,
+      ...(taskType !== undefined ? { taskType } : {}),
+      ...(domain !== undefined ? { domain } : {}),
+      ...(excludedFromScoring ? { excludedFromScoring: true } : {}),
+      ...rest,
+    });
     return row;
   }
 
@@ -2819,6 +2990,48 @@ export class SqliteStore implements Store {
     this.db
       .prepare('UPDATE sessions SET fast_growth = ? WHERE session_id = ?')
       .run(fastGrowth ? 1 : 0, sessionId);
+  }
+
+  // -- continuing in a new tab, and rolling compaction (session-context §2.2/2.3)
+
+  setSessionHandoff(sessionId: string, handoff: string | undefined): void {
+    this.assertOpen();
+    // No-op on a missing session, exactly like the setters above it.
+    this.db
+      .prepare('UPDATE sessions SET handoff = ? WHERE session_id = ?')
+      .run(handoff && handoff.length > 0 ? handoff : null, sessionId);
+  }
+
+  getSessionRollingSummary(sessionId: string): RollingSummary | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare(
+        'SELECT rolling_summary, rolling_summary_upto FROM sessions WHERE session_id = ?',
+      )
+      .get(sessionId) as
+      | { rolling_summary?: string | null; rolling_summary_upto?: number | null }
+      | undefined;
+    const text = row?.rolling_summary;
+    if (!row || text === null || text === undefined || text === '') return undefined;
+    // A summary with no range is not reusable — the range is what says WHICH
+    // messages it describes — so it reads as "nothing stored" rather than as a
+    // summary that could be applied to the wrong prefix.
+    const upto = row.rolling_summary_upto;
+    if (upto === null || upto === undefined) return undefined;
+    return { text, foldedCount: Number(upto) };
+  }
+
+  setSessionRollingSummary(sessionId: string, summary: RollingSummary | undefined): void {
+    this.assertOpen();
+    this.db
+      .prepare(
+        'UPDATE sessions SET rolling_summary = ?, rolling_summary_upto = ? WHERE session_id = ?',
+      )
+      .run(
+        summary && summary.text ? summary.text : null,
+        summary && summary.text ? summary.foldedCount : null,
+        sessionId,
+      );
   }
 
   // -- lifecycle -----------------------------------------------------------

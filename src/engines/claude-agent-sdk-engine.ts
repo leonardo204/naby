@@ -1212,6 +1212,11 @@ export class ClaudeAgentSdkEngine implements Engine {
     const toolNameById = new Map<string, string>();
     const ownToolResultIds = new Set<string>();
 
+    // The prompt size of the most recent MAIN-THREAD assistant step — the window
+    // occupancy this turn ends at. Filled in the `assistant` branch of the driver
+    // below (which explains why it is that message and not `result`).
+    let lastStepInputTokens: number | undefined;
+
     // WHICH `Task` CALL SPAWNED WHICH SUBAGENT.
     //
     // The hook that reports a subagent's tool calls knows the AGENT id
@@ -1422,6 +1427,30 @@ export class ClaudeAgentSdkEngine implements Engine {
             const thought = readThinkingDelta(msg);
             if (thought) channel.push({ kind: 'thinking', text: thought, partial: true });
           } else if (msg.type === 'assistant') {
+            // HOW FULL THE WINDOW IS (specs/session-context-management.md §2.1).
+            //
+            // The `result` message SUMS every step of the turn, so its
+            // `input_tokens` is a running total and not an occupancy — on a
+            // ten-step turn it reads several times the window and was exactly the
+            // "748k" the spec's problem statement is about. Each ASSISTANT message
+            // instead carries the usage of the ONE model call that produced it, so
+            // the last one is what the model last received: the occupancy the next
+            // turn starts from.
+            //
+            // MAIN THREAD ONLY. A subagent runs in its own window (`parent_tool_use_id`
+            // names the Task call that spawned it), so its prompt size says nothing
+            // about this conversation's window and would make the gauge jump to a
+            // stranger's number mid-turn.
+            if (msg.parent_tool_use_id == null) {
+              const stepUsage = (msg.message as { usage?: Parameters<typeof normalizeAgentSdkUsage>[0] })
+                .usage;
+              if (stepUsage) {
+                const total = normalizeAgentSdkUsage(stepUsage).inputTokens;
+                // 0 is not a measurement — a replayed or synthesized assistant
+                // message reports nothing, and taking it would blank a real reading.
+                if (typeof total === 'number' && total > 0) lastStepInputTokens = total;
+              }
+            }
             const text = extractText(msg.message.content);
             // Complete thinking blocks, for the case where nothing streamed (a
             // replayed message, or a provider that sends the block whole).
@@ -1453,6 +1482,12 @@ export class ClaudeAgentSdkEngine implements Engine {
               ok: !msg.is_error,
               usage,
               costUsd: msg.total_cost_usd,
+              // Absent when no assistant step reported usage (an aborted turn, a
+              // pure error). The consumer hides the gauge rather than dividing the
+              // summed figure above by a window — see the `contextTokens` contract.
+              ...(lastStepInputTokens !== undefined
+                ? { contextTokens: lastStepInputTokens }
+                : {}),
             });
           } else if (msg.type === 'user') {
             // A `user` message carries the SDK's built-in tool RESULTS (Task /

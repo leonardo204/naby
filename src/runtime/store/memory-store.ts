@@ -23,7 +23,7 @@ import { memoryMatchesSearch, sameMemoryValue } from './store.js';
 // The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model, so
 // the two drivers cannot cap rehearsal at different numbers.
 import { memoryStrength, STRENGTH_CAP } from '../memory-hygiene.js';
-import type { RuntimeMessage } from '../engine.js';
+import type { RollingSummary, RuntimeMessage } from '../engine.js';
 import type {
   Agent,
   AgentInput,
@@ -176,6 +176,11 @@ export class MemoryStore implements Store {
    *  session votes once per item, so re-stating a fact in the same conversation
    *  overwrites its own vote instead of adding another. */
   private readonly observations = new Map<string, Map<string, MemoryObservation>>();
+  /** The AI-SDK engine's folded-payload summary, per session (session-context §2.3).
+   *  A map of its own rather than a `SessionState` field for the same reason the
+   *  SQL driver keeps it off `SessionRef`: it is payload-assembly state, and every
+   *  reader of a session ref would otherwise carry it. */
+  private readonly rollingSummaries = new Map<string, RollingSummary>();
   // Golden set (Phase 1.5 P15-04), keyed by its own id — a STORE-LEVEL
   // collection, DELIBERATELY separate from memoryItems: no injection/extraction
   // path reads it, which is what makes the excluded-from-learning invariant
@@ -255,6 +260,9 @@ export class MemoryStore implements Store {
 
   deleteSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    // The rolling summary describes messages that just went, so it goes too — the
+    // SQL driver gets this for free (the columns live on the deleted row).
+    this.rollingSummaries.delete(sessionId);
     // The reflection cursor is a bookmark into the transcript that just went, so
     // it goes too (P3-M8a). The eval-event LEDGER survives — invariant 4.
     this.reflectionCursors.delete(sessionId);
@@ -1265,6 +1273,34 @@ export class MemoryStore implements Store {
     // setter above: the SQL driver only surfaces the field when the flag is on.
     if (fastGrowth) s.ref.fastGrowth = true;
     else delete s.ref.fastGrowth;
+  }
+
+  // -- handoff + rolling compaction (session-context-management §2.2/2.3) ---
+
+  setSessionHandoff(sessionId: string, handoff: string | undefined): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return; // no-op on a missing session, as SqliteStore
+    // Deleted when empty, for the same shape-parity reason as the flags above:
+    // the SQL driver surfaces the field only when there is a handoff.
+    if (handoff && handoff.length > 0) s.ref.handoff = handoff;
+    else delete s.ref.handoff;
+  }
+
+  getSessionRollingSummary(sessionId: string): RollingSummary | undefined {
+    const stored = this.rollingSummaries.get(sessionId);
+    // A copy: the caller holds the same object the engine will later hand to
+    // `save`, and an in-memory driver that returned its own record would let a
+    // mutation upstream rewrite history no SQL driver would have.
+    return stored ? { ...stored } : undefined;
+  }
+
+  setSessionRollingSummary(sessionId: string, summary: RollingSummary | undefined): void {
+    // Kept OFF `SessionRef` (in its own map) exactly as the SQL driver keeps it off
+    // the row projection: it is payload-assembly state, not something a session
+    // list should carry.
+    if (!this.sessions.has(sessionId)) return; // no-op on a missing session, as SqliteStore
+    if (summary && summary.text) this.rollingSummaries.set(sessionId, { ...summary });
+    else this.rollingSummaries.delete(sessionId);
   }
 
   listPinnedSessions(): SessionRef[] {

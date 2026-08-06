@@ -9,6 +9,7 @@
 // same runTurn drives an in-memory store in a spike and a SQLite file on disk
 // in the app, and neither the engines nor this file know which one they got.
 
+import { applyActivityLogSettings, logActivity } from './activity-log.js';
 import type {
   Engine,
   EngineEvent,
@@ -154,6 +155,36 @@ export type RunTurnOptions = {
    * Fires only when `skillInjection` is set; the skills array is empty on a no-op
    * turn and `excludedForTools` reports tool-bearing skills held for Phase 2.5. */
   onSkillInjection?: (injected: InjectedSkills) => void;
+
+  // -- activity log context (naby-activity-log) -----------------------------
+  //
+  // WHAT THE TURN RUNNER CANNOT KNOW. `runTurn` writes the activity log itself —
+  // it is the one place that sees every event on every engine, so hooking it here
+  // means the spikes, the app, a scheduled task and the Telegram bridge all log
+  // identically and none can forget. But three facts about a turn are decided
+  // ABOVE this seam and are invisible from inside it: which agent was routed to,
+  // whether the session is a fast-growth drill, and what kicked the turn off. The
+  // composition root that decided them passes them here rather than logging a
+  // second, parallel event that could disagree.
+  //
+  // PURELY DESCRIPTIVE. Nothing in this object reaches an engine, a provider or
+  // the store, and an omitted one changes only what the log says.
+
+  /** Descriptive context stamped on this turn's log records. */
+  activity?: {
+    /** The agent this turn is attributed to (routed agent, else the persona). */
+    agentId?: string;
+    /** The acting agent's display name, so a log is readable without a db join. */
+    agentName?: string;
+    /** `SessionRef.fastGrowth` — this turn's check-ins are drills. */
+    fastGrowth?: boolean;
+    /** Which step of an autonomy run this is (1-based). Absent = an ordinary turn. */
+    step?: number;
+    /** What started the turn: 'chat' | 'telegram' | 'scheduled' | 'kickoff' | … */
+    source?: string;
+    /** Groups the steps of one autonomous run into one turn in the log. */
+    runId?: string;
+  };
 };
 
 /** Run one turn on the given engine, folding its events into the store. Returns
@@ -161,6 +192,46 @@ export type RunTurnOptions = {
 export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   const { engine, store, sessionId, model, userText, toolSchemas, executors, gate } =
     opts;
+
+  // -- THE ACTIVITY LOG (naby-activity-log) ---------------------------------
+  //
+  // WHY HERE AND NOWHERE ELSE. This function is the narrowest point through
+  // which EVERY turn passes: both engines, both trees, the app, the Telegram
+  // bridge, a scheduled task and every spike. It already sees the complete event
+  // stream and every message that reaches the store, so a durable record built
+  // here is complete by construction rather than by everyone remembering to call
+  // a logger. Sprinkling `logActivity` through the engines would produce two
+  // copies that drift the first time one engine grows an event the other lacks.
+  //
+  // The kill switch is resolved from the store on the first turn of the process
+  // (once — see applyActivityLogSettings) and every call below is a no-op after
+  // that if it is off. None of these calls can throw.
+  const activityStartedAt = Date.now();
+  applyActivityLogSettings(store);
+  const activity = {
+    sessionId,
+    ...(opts.activity?.agentId !== undefined ? { agentId: opts.activity.agentId } : {}),
+    ...(opts.activity?.agentName !== undefined ? { agentName: opts.activity.agentName } : {}),
+    ...(opts.activity?.fastGrowth ? { fastGrowth: true } : {}),
+    ...(opts.activity?.step !== undefined ? { step: opts.activity.step } : {}),
+    ...(opts.activity?.source !== undefined ? { source: opts.activity.source } : {}),
+    ...(opts.activity?.runId !== undefined ? { runId: opts.activity.runId } : {}),
+  };
+  logActivity('turn_started', {
+    ...activity,
+    engine: opts.engineId ?? 'ai-sdk',
+    providerId: model.providerId,
+    requestedModel: model.model,
+    costBasis: opts.costBasis ?? 'metered',
+    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    toolCount: toolSchemas.length,
+    subagentCount: opts.subagents?.length ?? 0,
+    imageCount: opts.images?.length ?? 0,
+  });
+  // THE REQUEST, IN FULL. Truncation is the log module's business, not this
+  // call's: a caller that pre-trimmed would decide for every reader that the tail
+  // of a long prompt is not worth keeping.
+  logActivity('user_message', { ...activity, text: userText });
 
   // Record the provider that is about to answer. This is the ONLY place a
   // provider id touches storage, and it is a hint — see SessionRef.providerId.
@@ -217,6 +288,18 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     // Record what was injected (item ids, tokensUsed, droppedForBudget) so a
     // bad injection is auditable and memory hit rate is computable.
     opts.onMemoryInjection?.(injected);
+    // Same fact, durably: "why did it answer like that" is usually "what did it
+    // remember", and the injected set is not otherwise recoverable after the
+    // turn — retrieval is ranked against this turn's words and would not reproduce.
+    if (injected.items.length > 0 || injected.droppedForBudget > 0) {
+      logActivity('memory_injected', {
+        ...activity,
+        count: injected.items.length,
+        tokensUsed: injected.tokensUsed,
+        droppedForBudget: injected.droppedForBudget,
+        ids: injected.items.map((item) => item.id),
+      });
+    }
   }
 
   // -- SKILL INSTRUCTION INJECTION (Phase 1.6, HP-03a) ----------------------
@@ -312,101 +395,219 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     }
   }
 
-  for await (const ev of engine.run({
-    model,
-    messages: turnMessages,
-    ...(effectiveSystem !== undefined ? { system: effectiveSystem } : {}),
-    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
-    ...(opts.subagents !== undefined && opts.subagents.length > 0
-      ? { subagents: opts.subagents }
-      : {}),
-    toolSchemas,
-    gate,
-    executors,
-    signal,
-  })) {
-    // Cancellation: stop consuming the moment the turn is aborted. Breaking out
-    // of the for-await calls the engine generator's return(), which unwinds the
-    // engine's own loop — so an abort stops the model loop here and now rather
-    // than letting it run to its iteration cap. The signal is ALSO handed to
-    // the engine (and through it to the provider call), so this is a second
-    // barrier, not the only one.
-    if (signal.aborted) break;
+  // Counted for the turn's closing record: "how much did this turn actually do"
+  // is the first question asked of a turn that took too long or cost too much.
+  let loggedToolCalls = 0;
+  let loggedDenials = 0;
+  let engineErrorMessage: string | undefined;
 
-    events.push(ev);
-    // Every event reaches the streaming caller, INCLUDING `harness`. That is
-    // the only path a harness event takes: it is observational (see the
-    // `harness` doc in engine.ts), so it is forwarded for display and then
-    // deliberately falls off the end of the fold below without touching the
-    // store. There is no `ev.kind === 'harness'` branch there ON PURPOSE —
-    // adding one would mint a `RuntimeMessage` for it, and `RuntimeMessage` has
-    // a closed three-variant contract with NO system role (see the note at
-    // engine.ts §"Runtime message"). A harness event is transport, not
-    // conversation; persisting it would put backend-internal bookkeeping into a
-    // transcript that must replay identically on an engine that never emits it.
-    opts.onEvent?.(ev);
-
-    if (ev.kind === 'init') {
-      if (ev.model) answeringModel = ev.model;
-    } else if (ev.kind === 'text' && ev.role === 'assistant') {
-      store.appendMessage(sessionId, { role: 'assistant', content: ev.text });
-    } else if (ev.kind === 'tool_request') {
-      pending.set(ev.toolCallId, ev.toolName);
-      store.appendMessage(sessionId, {
-        role: 'assistant',
-        content: '',
-        toolCalls: [
-          {
-            toolCallId: ev.toolCallId,
-            toolName: ev.toolName,
-            input: ev.input,
-            // WHO made the call, when the backend attributed it to a subagent.
-            // Persisted with the call and not derived later, because the events
-            // that describe a subagent's LIFE (`harness`) are observational and
-            // never stored — so after a reload the call itself is the only thing
-            // left that can say which delegated run it belonged to. Providers
-            // map tool calls field by field, so an extra descriptive field never
-            // reaches a provider payload.
-            ...(ev.subagent ? { subagent: ev.subagent } : {}),
-          },
-        ],
-      });
-    } else if (ev.kind === 'gate_result' && ev.decision === 'deny') {
-      closeCall(ev.toolCallId, {
-        content: `Denied by policy gate: ${ev.reason ?? 'no reason given'}`,
-        isError: true,
-      });
-    } else if (ev.kind === 'tool_result') {
-      closeCall(ev.toolCallId, ev.output);
-    } else if (ev.kind === 'result') {
-      // F1-07. One row per ANSWERED turn, recorded here rather than in the
-      // shell adapter so that every caller of runTurn — the app, the spikes, a
-      // future scheduled task — accounts identically and none can forget.
+  try {
+    for await (const ev of engine.run({
+      model,
+      messages: turnMessages,
+      ...(effectiveSystem !== undefined ? { system: effectiveSystem } : {}),
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts.subagents !== undefined && opts.subagents.length > 0
+        ? { subagents: opts.subagents }
+        : {}),
+      toolSchemas,
+      gate,
+      executors,
+      // -- ROLLING COMPACTION'S STORAGE (session-context-management §2.3) ----
       //
-      // A pure failure (no tokens reported, not ok) is NOT recorded: a row of
-      // zeros would inflate the turn count without adding information. A turn
-      // that failed AFTER consuming tokens still is, because those tokens were
-      // still billed.
-      const usage = ev.usage;
-      const anyTokens =
-        (usage?.inputTokens ?? 0) > 0 ||
-        (usage?.outputTokens ?? 0) > 0 ||
-        (usage?.cachedInputTokens ?? 0) > 0;
-      if (ev.ok || anyTokens) {
-        const costBasis = opts.costBasis ?? 'metered';
-        store.appendUsage(sessionId, {
-          at: Date.now(),
-          engine: opts.engineId ?? 'ai-sdk',
-          providerId: model.providerId,
-          model: answeringModel,
-          inputTokens: usage?.inputTokens ?? 0,
-          outputTokens: usage?.outputTokens ?? 0,
-          cachedInputTokens: usage?.cachedInputTokens ?? 0,
-          costBasis,
-          ...(ev.costUsd !== undefined ? { reportedCostUsd: ev.costUsd } : {}),
+      // The engine that builds its own payload (AI-SDK) needs somewhere to keep
+      // the summary it folds old turns into, and it must not learn what a store
+      // is to get one. So the port is built HERE — the one place that holds both
+      // the store and the session id — and handed down as two closures.
+      //
+      // The engine folds only the payload; NOTHING here writes a message. The
+      // transcript stays exactly what was said (contract §6), which is what lets
+      // the same session continue on the Agent SDK engine, whose own compaction
+      // knows nothing about this summary.
+      rollingSummary: {
+        load: () => {
+          try {
+            return store.getSessionRollingSummary(sessionId);
+          } catch {
+            // A store that cannot answer reads as "nothing folded yet": the turn
+            // regenerates a summary rather than failing over a cache.
+            return undefined;
+          }
+        },
+        save: (summary) => {
+          try {
+            store.setSessionRollingSummary(sessionId, summary);
+          } catch {
+            // Documented as non-throwing on the port: a failed write costs the
+            // next turn one regeneration and nothing else.
+          }
+        },
+      },
+      signal,
+    })) {
+      // Cancellation: stop consuming the moment the turn is aborted. Breaking out
+      // of the for-await calls the engine generator's return(), which unwinds the
+      // engine's own loop — so an abort stops the model loop here and now rather
+      // than letting it run to its iteration cap. The signal is ALSO handed to
+      // the engine (and through it to the provider call), so this is a second
+      // barrier, not the only one.
+      if (signal.aborted) break;
+
+      events.push(ev);
+      // Every event reaches the streaming caller, INCLUDING `harness`. That is
+      // the only path a harness event takes: it is observational (see the
+      // `harness` doc in engine.ts), so it is forwarded for display and then
+      // deliberately falls off the end of the fold below without touching the
+      // store. There is no `ev.kind === 'harness'` branch there ON PURPOSE —
+      // adding one would mint a `RuntimeMessage` for it, and `RuntimeMessage` has
+      // a closed three-variant contract with NO system role (see the note at
+      // engine.ts §"Runtime message"). A harness event is transport, not
+      // conversation; persisting it would put backend-internal bookkeeping into a
+      // transcript that must replay identically on an engine that never emits it.
+      opts.onEvent?.(ev);
+
+      if (ev.kind === 'init') {
+        if (ev.model) answeringModel = ev.model;
+      } else if (ev.kind === 'text' && ev.role === 'assistant') {
+        store.appendMessage(sessionId, { role: 'assistant', content: ev.text });
+        // THE RESPONSE, IN FULL — but only once. A streaming engine emits the same
+        // sentence twice, as `partial` token deltas and then as one complete
+        // event; logging both would write the answer to disk character by
+        // character and then again whole. The complete event is the one that is
+        // also stored, so the log matches the transcript.
+        if (ev.partial !== true) {
+          logActivity('assistant_text', { ...activity, text: ev.text });
+        }
+      } else if (ev.kind === 'thinking') {
+        // Reasoning, not the reply — logged (it is the most useful thing in the
+        // file when an answer is inexplicable) and, like text, only when complete.
+        if (ev.partial !== true && ev.text) {
+          logActivity('thinking', { ...activity, text: ev.text });
+        }
+      } else if (ev.kind === 'tool_request') {
+        pending.set(ev.toolCallId, ev.toolName);
+        loggedToolCalls += 1;
+        // THE TRANSACTION. Arguments go in as the model wrote them (masked and
+        // capped by the log module), because "what exactly did it pass" is the
+        // question a tool call is usually being read for.
+        logActivity('tool_call', {
+          ...activity,
+          toolCallId: ev.toolCallId,
+          toolName: ev.toolName,
+          input: ev.input,
+          ...(ev.subagent
+            ? {
+                subagentId: ev.subagent.agentId,
+                ...(ev.subagent.agentType ? { subagentType: ev.subagent.agentType } : {}),
+              }
+            : {}),
         });
+        store.appendMessage(sessionId, {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            {
+              toolCallId: ev.toolCallId,
+              toolName: ev.toolName,
+              input: ev.input,
+              // WHO made the call, when the backend attributed it to a subagent.
+              // Persisted with the call and not derived later, because the events
+              // that describe a subagent's LIFE (`harness`) are observational and
+              // never stored — so after a reload the call itself is the only thing
+              // left that can say which delegated run it belonged to. Providers
+              // map tool calls field by field, so an extra descriptive field never
+              // reaches a provider payload.
+              ...(ev.subagent ? { subagent: ev.subagent } : {}),
+            },
+          ],
+        });
+      } else if (ev.kind === 'gate_result') {
+        // EVERY DECISION, allow as well as deny. A log that only recorded refusals
+        // would answer "what was blocked" and not "what was permitted", and the
+        // second is the question asked after something unwanted happened.
+        if (ev.decision === 'deny') loggedDenials += 1;
+        logActivity('gate_decision', {
+          ...activity,
+          toolCallId: ev.toolCallId,
+          toolName: ev.toolName,
+          decision: ev.decision,
+          ...(ev.reason !== undefined ? { reason: ev.reason } : {}),
+        });
+        if (ev.decision === 'deny') {
+          closeCall(ev.toolCallId, {
+            content: `Denied by policy gate: ${ev.reason ?? 'no reason given'}`,
+            isError: true,
+          });
+        }
+      } else if (ev.kind === 'tool_result') {
+        logActivity('tool_result', {
+          ...activity,
+          toolCallId: ev.toolCallId,
+          toolName: ev.toolName,
+          isError: ev.isError,
+          output: ev.output.content,
+        });
+        closeCall(ev.toolCallId, ev.output);
+      } else if (ev.kind === 'error') {
+        // Kept for the closing record rather than logged on its own line: an
+        // engine error is how the turn ENDED, and one line per turn saying how it
+        // ended is easier to read than two that have to be correlated.
+        engineErrorMessage = ev.message;
+      } else if (ev.kind === 'result') {
+        // F1-07. One row per ANSWERED turn, recorded here rather than in the
+        // shell adapter so that every caller of runTurn — the app, the spikes, a
+        // future scheduled task — accounts identically and none can forget.
+        //
+        // A pure failure (no tokens reported, not ok) is NOT recorded: a row of
+        // zeros would inflate the turn count without adding information. A turn
+        // that failed AFTER consuming tokens still is, because those tokens were
+        // still billed.
+        const usage = ev.usage;
+        const anyTokens =
+          (usage?.inputTokens ?? 0) > 0 ||
+          (usage?.outputTokens ?? 0) > 0 ||
+          (usage?.cachedInputTokens ?? 0) > 0;
+        if (ev.ok || anyTokens) {
+          const costBasis = opts.costBasis ?? 'metered';
+          store.appendUsage(sessionId, {
+            at: Date.now(),
+            engine: opts.engineId ?? 'ai-sdk',
+            providerId: model.providerId,
+            model: answeringModel,
+            inputTokens: usage?.inputTokens ?? 0,
+            outputTokens: usage?.outputTokens ?? 0,
+            cachedInputTokens: usage?.cachedInputTokens ?? 0,
+            costBasis,
+            ...(ev.costUsd !== undefined ? { reportedCostUsd: ev.costUsd } : {}),
+          });
+          // The same row, in the file, so a support bundle that is only the log
+          // directory still answers "what did this cost".
+          logActivity('usage', {
+            ...activity,
+            engine: opts.engineId ?? 'ai-sdk',
+            providerId: model.providerId,
+            model: answeringModel,
+            inputTokens: usage?.inputTokens ?? 0,
+            outputTokens: usage?.outputTokens ?? 0,
+            cachedInputTokens: usage?.cachedInputTokens ?? 0,
+            costBasis,
+            ...(ev.costUsd !== undefined ? { reportedCostUsd: ev.costUsd } : {}),
+          });
+        }
       }
     }
+  } catch (error) {
+    // A THROWN turn is logged and RE-THROWN, unchanged. The log observes; it does
+    // not handle. Swallowing here would turn a failing turn into a silent one for
+    // every caller above.
+    logActivity('turn_failed', {
+      ...activity,
+      durationMs: Date.now() - activityStartedAt,
+      toolCalls: loggedToolCalls,
+      denials: loggedDenials,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
   }
 
   // Nothing may be left half-written: an unclosed call would be an orphan on
@@ -417,6 +618,18 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       isError: true,
     });
   }
+
+  logActivity('turn_completed', {
+    ...activity,
+    engine: opts.engineId ?? 'ai-sdk',
+    model: answeringModel,
+    durationMs: Date.now() - activityStartedAt,
+    events: events.length,
+    toolCalls: loggedToolCalls,
+    denials: loggedDenials,
+    aborted: signal.aborted,
+    ...(engineErrorMessage !== undefined ? { error: engineErrorMessage } : {}),
+  });
 
   return events;
 }

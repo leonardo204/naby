@@ -272,7 +272,28 @@ export type EngineEvent =
       isError: boolean;
       output: ToolOutput;
     }
-  | { kind: 'result'; ok: boolean; usage?: Usage; costUsd?: number }
+  | {
+      kind: 'result';
+      ok: boolean;
+      usage?: Usage;
+      costUsd?: number;
+      /**
+       * HOW FULL THE WINDOW IS — the LAST step's reported input tokens (cache
+       * reads included), i.e. what the model actually received on its final call
+       * of this turn (specs/session-context-management.md §2.1).
+       *
+       * A SEPARATE FIELD FROM `usage`, and it must stay separate. `usage.inputTokens`
+       * is the turn's TOTAL across steps: a four-step turn on a 30k conversation
+       * reports ~120k there, which is not a window occupancy and reads as one. This
+       * field is a single step's prompt size, so it is directly comparable to
+       * `contextWindowFor(engine, model)`.
+       *
+       * UNDEFINED WHEN THE BACKEND REPORTS NO PER-STEP USAGE. Consumers must hide
+       * the gauge rather than substitute the summed figure — the spec's rule is
+       * that a wrong number is worse than no number.
+       */
+      contextTokens?: number;
+    }
   | { kind: 'error'; message: string; code?: string }
   /**
    * A transport-level observation from the engine's own harness — something the
@@ -387,7 +408,46 @@ export type EngineRunInput = {
    * (AiSdkEngine) correctly ignore it.
    */
   cwd?: string;
+  /**
+   * WHERE THIS SESSION'S ROLLING SUMMARY LIVES (specs/session-context-management
+   * §2.3). Supplied by the turn runner, which owns the store; an engine that folds
+   * old turns into a summary needs somewhere to keep it across turns, and it must
+   * not learn what a store is to get one.
+   *
+   * OPTIONAL, and its absence is a full answer: no port = fold nothing and keep
+   * nothing, which is byte-for-byte the pre-compaction payload. Engines with no
+   * payload of their own to size (the Claude Agent SDK compacts itself) ignore it.
+   */
+  rollingSummary?: RollingSummaryPort;
   signal: AbortSignal;
+};
+
+/**
+ * The session-scoped rolling summary: the text that stands in for the turns an
+ * engine folded out of its outgoing payload, plus HOW MANY leading messages it
+ * covers.
+ *
+ * `foldedCount` is what makes reuse safe. A summary is only valid for the exact
+ * prefix it was written from, so a fold of the same range reuses it verbatim and a
+ * LARGER fold extends it — and a stored count that no longer matches is simply
+ * regenerated rather than silently applied to a range it never read.
+ *
+ * NOTHING HERE TOUCHES THE TRANSCRIPT. The stored messages are never rewritten;
+ * this is a description of the payload, kept beside the session (contract §6).
+ */
+export type RollingSummaryPort = {
+  /** The stored summary, or undefined when this session has never folded. */
+  load(): RollingSummary | undefined;
+  /** Persist (or replace) the summary. Must not throw — a failed write costs the
+   *  next turn a regeneration, and nothing else. */
+  save(summary: RollingSummary): void;
+};
+
+export type RollingSummary = {
+  /** The compressed stand-in for the folded turns. */
+  text: string;
+  /** How many leading messages of the session it covers. */
+  foldedCount: number;
 };
 
 export interface Engine {

@@ -42,11 +42,21 @@ import type {
   EngineRunInput,
   JsonSchema,
   ModelSelection,
+  RollingSummary,
   RuntimeMessage,
   ToolCall,
   ToolOutput,
   Usage,
 } from '../runtime/engine.js';
+import {
+  buildSummaryPrompt,
+  foldedSummaryMessage,
+  normalizeSummary,
+  planFold,
+  SUMMARY_SYSTEM_PROMPT,
+  truncationNoticeMessage,
+} from '../runtime/compaction.js';
+import { contextWindowFor, FALLBACK_CONTEXT_WINDOW } from '../runtime/context-window.js';
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -319,6 +329,122 @@ export class AiSdkEngine implements Engine {
     this.system = options.system;
   }
 
+  /**
+   * ROLLING COMPACTION (specs/session-context-management.md §2.3).
+   *
+   * Returns the messages to SEND — and, when something was folded, the system pill
+   * that says so. The stored transcript is not read from here and is never written:
+   * `input.messages` is the turn runner's array and everything below works on
+   * copies of it (contract §6 and the module header of runtime/compaction.ts).
+   *
+   * The shape of the folded payload is [summary block, recent tail]; the system
+   * prompt rides its own field and is unaffected.
+   *
+   * THREE OUTCOMES, in order of preference:
+   *   1. UNDER THRESHOLD — nothing happens. The common case, and it is a pure
+   *      no-op: the same array, the same order, no model call, no write.
+   *   2. FOLDED WITH A SUMMARY — reuse the stored one when the folded range is
+   *      unchanged, extend it (one extra, capped model call) when more turns fold.
+   *   3. FOLDED WITH A TRUNCATION NOTICE — the summariser failed. The oldest turns
+   *      are dropped and BOTH the model and the user are told, because honesty
+   *      beats silence: a model that knows material is missing asks, a model that
+   *      does not invents.
+   */
+  private async compact(
+    input: EngineRunInput,
+    model: LanguageModelV4,
+  ): Promise<{ messages: readonly RuntimeMessage[]; notice?: EngineEvent }> {
+    // An unknown model still gets protection: FALLBACK_CONTEXT_WINDOW is the
+    // smallest window any supported provider ships, so folding against it is early
+    // rather than wrong (see its doc). The gauge, which must not be early OR wrong,
+    // treats the same unknown as "show no ratio".
+    const budget =
+      contextWindowFor('ai-sdk', model.modelId || input.model.model) ??
+      FALLBACK_CONTEXT_WINDOW;
+
+    const system = input.system ?? this.system;
+    const plan = planFold(input.messages, budget, {
+      ...(system !== undefined ? { system } : {}),
+    });
+    if (!plan.fold) return { messages: input.messages };
+
+    const port = input.rollingSummary;
+    const stored = port?.load();
+
+    // REUSE, EXACTLY. A summary is only valid for the prefix it was written from,
+    // so it is reused when the fold covers the SAME range and extended when the
+    // fold has grown past it. A stored summary covering MORE than this fold (the
+    // tail floor pulled the boundary back) is still a truthful description of a
+    // prefix of what we are folding, so it is reused rather than regenerated —
+    // it can only be more complete than needed.
+    if (stored && stored.foldedCount >= plan.foldedCount && stored.text) {
+      return {
+        messages: [foldedSummaryMessage(stored.text), ...plan.tail],
+        notice: {
+          kind: 'harness',
+          subtype: 'context-compaction',
+          detail: `folded:${plan.foldedCount}`,
+        },
+      };
+    }
+
+    // Extend: only the NEWLY folded messages are sent alongside the previous
+    // summary, which is what keeps this cheap on a session that folds repeatedly.
+    const newlyFolded = stored ? plan.folded.slice(stored.foldedCount) : plan.folded;
+    let summaryText = '';
+    try {
+      const result = await generateText({
+        model,
+        system: SUMMARY_SYSTEM_PROMPT,
+        prompt: buildSummaryPrompt(newlyFolded, stored?.text),
+        abortSignal: input.signal,
+        // No tools, deliberately: this call reads a conversation and writes a
+        // paragraph. Nothing it could ask for would be gated by anything here.
+      });
+      summaryText = normalizeSummary(result.text);
+    } catch (e) {
+      console.warn(
+        `[ai-sdk-engine] rolling summary failed, truncating instead: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+
+    if (!summaryText) {
+      // Outcome 3. No summary is persisted — a failed generation must not leave a
+      // half-truth behind for the next turn to reuse.
+      return {
+        messages: [truncationNoticeMessage(plan.foldedCount), ...plan.tail],
+        notice: {
+          kind: 'harness',
+          subtype: 'context-compaction',
+          detail: `truncated:${plan.foldedCount}`,
+        },
+      };
+    }
+
+    const next: RollingSummary = { text: summaryText, foldedCount: plan.foldedCount };
+    try {
+      port?.save(next);
+    } catch (e) {
+      // A summary that could not be stored is still a summary that can be SENT.
+      // The cost of the failed write is one regeneration next turn.
+      console.warn(
+        `[ai-sdk-engine] rolling summary could not be stored: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
+    return {
+      messages: [foldedSummaryMessage(summaryText), ...plan.tail],
+      notice: {
+        kind: 'harness',
+        subtype: 'context-compaction',
+        detail: `folded:${plan.foldedCount}`,
+      },
+    };
+  }
+
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
     const diagnostics: AiSdkEngineDiagnostics = {
       steps: 0,
@@ -334,6 +460,13 @@ export class AiSdkEngine implements Engine {
       outputTokens: 0,
       cachedInputTokens: 0,
     };
+
+    // HOW FULL THE WINDOW IS, measured rather than estimated: `ai@7` reports
+    // `usage.inputTokens` as the TOTAL prompt size of one call (cache reads
+    // included — see the `Usage` contract in runtime/engine.ts), so the LAST step's
+    // figure is exactly what the model last received. Undefined until a step
+    // reports one, which is what makes the gauge hide instead of guessing.
+    let contextTokens: number | undefined;
 
     let model: LanguageModelV4;
     try {
@@ -351,7 +484,19 @@ export class AiSdkEngine implements Engine {
     yield { kind: 'init', providerId: input.model.providerId, model: model.modelId };
 
     const tools = buildToolSet(input.toolSchemas);
-    const messages = toModelMessages(input.messages);
+
+    // -- ROLLING COMPACTION (specs/session-context-management.md §2.3) --------
+    //
+    // WE build this payload, so window management is OUR job here — the Agent SDK
+    // engine does its own and is deliberately left alone. Below the threshold this
+    // is a no-op that returns the same array `toModelMessages` would have seen, so
+    // an ordinary conversation is byte-for-byte the pre-compaction one.
+    //
+    // The STORED transcript is untouched either way: `compact` folds the local
+    // array it was handed and nothing else.
+    const compacted = await this.compact(input, model);
+    if (compacted.notice) yield compacted.notice;
+    const messages = toModelMessages(compacted.messages);
 
     // The system prompt is NOT a message (contract §6): `ai@7` rejects
     // `role:'system'` inside `messages` and directs it to the dedicated
@@ -369,7 +514,7 @@ export class AiSdkEngine implements Engine {
           message: `iteration cap reached: the model requested tools for ${this.maxSteps} consecutive steps without finishing`,
           code: 'MAX_STEPS_EXCEEDED',
         };
-        yield { kind: 'result', ok: false, usage };
+        yield { kind: 'result', ok: false, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
         return;
       }
 
@@ -401,12 +546,18 @@ export class AiSdkEngine implements Engine {
           message: msg,
           code: 'ENGINE_THREW',
         };
-        yield { kind: 'result', ok: false, usage };
+        yield { kind: 'result', ok: false, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
         return;
       }
 
       diagnostics.steps = step + 1;
       addUsage(usage, result.usage);
+      // The LAST value wins on purpose: each step re-sends the whole payload plus
+      // what the previous step added, so the final step's prompt size is the
+      // window occupancy the next turn starts from.
+      if (typeof result.usage.inputTokens === 'number') {
+        contextTokens = result.usage.inputTokens;
+      }
 
       // -- Invariant check: the SDK must have executed NOTHING. Our tools are
       //    execute-less, so any tool result here came from a path that skipped
@@ -425,7 +576,7 @@ export class AiSdkEngine implements Engine {
             `${sdkToolMessages} tool message(s) on its own — a tool executed without the gate`,
           code: 'GATE_BYPASSED',
         };
-        yield { kind: 'result', ok: false, usage };
+        yield { kind: 'result', ok: false, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
         return;
       }
 
@@ -436,7 +587,7 @@ export class AiSdkEngine implements Engine {
       const calls = result.toolCalls;
       if (result.finishReason !== 'tool-calls' || calls.length === 0) {
         // Terminal: the model stopped asking for tools.
-        yield { kind: 'result', ok: true, usage };
+        yield { kind: 'result', ok: true, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
         return;
       }
 
