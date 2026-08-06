@@ -46,6 +46,8 @@ export type {
 export {
   contextWindowFor,
   CLAUDE_CONTEXT_WINDOW,
+  CLAUDE_1M_CONTEXT_WINDOW,
+  CONTEXT_1M_BETA,
   FALLBACK_CONTEXT_WINDOW,
   type ContextWindowEngine,
 } from './runtime/context-window.js';

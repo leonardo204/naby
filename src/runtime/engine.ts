@@ -223,12 +223,44 @@ export type HarnessTask = {
   id: string;
   /** e.g. `general-purpose`. Absent for non-subagent tasks (a shell task). */
   agentType?: string;
+  /**
+   * WHAT KIND OF TASK IT IS, as the backend's own closed-form discriminant:
+   * `local_bash` (a BACKGROUND SHELL JOB — `Bash` with `run_in_background`, or a
+   * foreground one that was later backgrounded), `local_agent` (a `Task`-tool
+   * subagent), `local_workflow`, `monitor_mcp`, … (Claude Agent SDK
+   * `SDKTaskStartedMessage.task_type`).
+   *
+   * IT IS THE ONLY THING THAT TELLS THE TWO APART. Both kinds arrive on the same
+   * four subtypes with the same fields, and a shell job carries no
+   * `subagent_type` — so without this a consumer either files a background
+   * `npm run deploy` under a block labelled "Subagent", or (worse) shows nothing
+   * at all and the user cannot tell that a job is still running. A label, not
+   * prose: the free text a shell task carries (its command line, its
+   * description) is NOT here, for the same reason `detail` never echoes a body.
+   *
+   * REPORTED ON THE OPENING EDGE ONLY. `task_started` carries it; `task_progress`
+   * / `task_updated` / `task_notification` do not, so a consumer keeps the kind
+   * it learned when the run started rather than re-deriving it from a later edge.
+   */
+  taskType?: string;
   /** The tool call that spawned it, when the backend reports one. */
   toolCallId?: string;
   /** Which edge of the lifecycle this event is. */
   phase: 'started' | 'progress' | 'ended';
   /** Terminal status, on `phase:'ended'`. */
   status?: 'completed' | 'failed' | 'stopped';
+  /**
+   * WHEN THE RUNTIME SAW THIS EDGE (epoch ms) — so a consumer can say how long a
+   * background job has been running instead of only that it started.
+   *
+   * Stamped HERE, at the seam, and not by the UI on arrival: the shell replays a
+   * run's whole event buffer into the reducer on every reconnect, and a
+   * client-side clock would restart the elapsed count from zero each time — a
+   * ten-minute deploy would keep reading "3s". The backend reports no start
+   * timestamp of its own (`task_started` has no time field), so the moment the
+   * event crossed this seam is the earliest honest one we have.
+   */
+  observedAt?: number;
 };
 
 export type EngineEvent =
@@ -293,6 +325,30 @@ export type EngineEvent =
        * that a wrong number is worse than no number.
        */
       contextTokens?: number;
+      /**
+       * WHICH MODEL ACTUALLY ANSWERED — the concrete id the provider ran, as the
+       * provider reported it, NOT the id we asked for.
+       *
+       * It exists because the two differ exactly when the denominator matters. A
+       * turn configured as `default` (the Agent SDK's own "let Claude pick" row)
+       * or as an alias (`opus`) names no window at all, so the registry answered
+       * `undefined` and the gauge lost its percentage on the app's most common
+       * path. The run itself always knows: the Agent SDK's init message and every
+       * assistant message carry the resolved id, and `ai@7` reports the resolved
+       * id on the step response.
+       *
+       * Undefined only when the backend reported nothing at all (a turn that
+       * failed before its first step). Consumers fall back to the configured id.
+       */
+      contextModel?: string;
+      /**
+       * The betas the RUN negotiated, as the backend reported them. Currently one
+       * thing depends on it: `context-1m-2025-08-07` is how a Claude turn on the
+       * long-context tier is distinguished from an ordinary 200k one — a
+       * difference of five times the denominator that nothing in our own
+       * configuration can predict, because the plan decides it.
+       */
+      contextBetas?: readonly string[];
     }
   | { kind: 'error'; message: string; code?: string }
   /**

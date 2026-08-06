@@ -196,6 +196,107 @@ record(
 );
 
 // ---------------------------------------------------------------------------
+// (c) A BACKGROUND SHELL JOB IS THE SAME LIFECYCLE, A DIFFERENT KIND
+//
+// `Bash` with `run_in_background` registers a task exactly like a subagent does
+// and reports on the same four subtypes — but it carries NO `subagent_type`, so
+// a consumer that only knows about agents either labels a background `npm run
+// deploy` "Subagent" or, as it did, shows nothing at all: the spawning Bash call
+// returns instantly with a "running in the background" acknowledgement and the
+// transcript then says nothing more until the job dies, hours later, unseen.
+//
+// The kind is `task_type` (CLI discriminants: `local_bash` for a shell job,
+// `local_agent` for a Task-tool subagent), reported on the OPENING edge only —
+// which is why it has to be carried on the descriptor rather than re-derived.
+// ---------------------------------------------------------------------------
+
+const bashStarted = {
+  type: 'system',
+  subtype: 'task_started',
+  task_id: 'b-3f21',
+  tool_use_id: 'toolu_01Bash',
+  description: SECRET,
+  task_type: 'local_bash',
+  // A shell task's registry entry carries its command line; nothing that reads
+  // these messages may put it on the wire (see c4).
+  command: SECRET,
+};
+
+const bashNotification = {
+  type: 'system',
+  subtype: 'task_notification',
+  task_id: 'b-3f21',
+  tool_use_id: 'toolu_01Bash',
+  status: 'completed',
+  summary: SECRET,
+  output_file: '/tmp/b-3f21.out',
+  usage: { total_tokens: 0, tool_uses: 0, duration_ms: 41000 },
+};
+
+const bashKilled = {
+  type: 'system',
+  subtype: 'task_updated',
+  task_id: 'b-3f21',
+  // The task-state enum is wider than the notification one: an interrupted or
+  // memory-pressure-reaped shell job lands on `killed`.
+  patch: { status: 'killed', end_time: 1_700_000_041_000 },
+};
+
+const bgStarted = describeHarnessMessage(bashStarted);
+record(
+  '(c1) a background shell job is identified as one — kind local_bash, no agent type',
+  bgStarted?.task?.id === 'b-3f21' &&
+    bgStarted.task.phase === 'started' &&
+    bgStarted.task.taskType === 'local_bash' &&
+    bgStarted.task.agentType === undefined &&
+    bgStarted.task.toolCallId === 'toolu_01Bash',
+  JSON.stringify(bgStarted?.task),
+);
+
+record(
+  '(c2) a subagent keeps its own kind, so the two can never be confused',
+  started?.task?.taskType === 'local_agent' && started.task.agentType === 'general-purpose',
+  JSON.stringify(started?.task),
+);
+
+const bgEnded = describeHarnessMessage(bashNotification);
+record(
+  '(c3) the job reports back on the same edge a subagent does',
+  bgEnded?.task?.id === 'b-3f21' &&
+    bgEnded.task.phase === 'ended' &&
+    bgEnded.task.status === 'completed',
+  JSON.stringify(bgEnded?.task),
+);
+
+const bgKilled = describeHarnessMessage(bashKilled);
+record(
+  '(c4) a KILLED job is an ending (mapped to stopped) — not a mid-flight patch',
+  bgKilled?.task?.phase === 'ended' && bgKilled.task.status === 'stopped',
+  JSON.stringify(bgKilled?.task),
+);
+
+// The same rule as (b9), applied to the fields only a shell task has: its
+// command line is arbitrary text from whatever project is open, and its output
+// file is a path on this machine. The UI shows the command by reading the
+// SPAWNING TOOL CALL it already renders — never by taking it from here.
+const bgLeaked = [bgStarted, bgEnded, bgKilled]
+  .map((d) => JSON.stringify(d))
+  .filter((s) => s.includes('SECRET') || s.includes('output_file') || s.includes('/tmp/'));
+record(
+  '(c5) neither the command line nor the output path is echoed',
+  bgLeaked.length === 0,
+  bgLeaked.length === 0 ? 'clean' : bgLeaked.join(' | '),
+);
+
+// The descriptor is produced WITHOUT a clock: `observedAt` is stamped by the
+// driver (stampObserved), so this mapping stays assertable message-by-message.
+record(
+  '(c6) the pure mapping stamps no time of its own',
+  bgStarted?.task?.observedAt === undefined && bgEnded?.task?.observedAt === undefined,
+  `${bgStarted?.task?.observedAt} / ${bgEnded?.task?.observedAt}`,
+);
+
+// ---------------------------------------------------------------------------
 // (a) tool call → author
 // ---------------------------------------------------------------------------
 

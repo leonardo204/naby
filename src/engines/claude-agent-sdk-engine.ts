@@ -1015,10 +1015,19 @@ export function describeHarnessMessage(
     // `description` / `summary` are model-authored free text — omitted by rule 1.
     // A `task_updated` reports its status inside `patch`; the others carry it flat.
     const rawStatus = subtype === 'task_updated' ? m.patch?.status : m.status;
+    // `killed` IS AN ENDING. The task-state enum a `task_updated` patch reports
+    // (`pending|running|completed|failed|killed|paused`) is wider than the three
+    // outcomes a `task_notification` reports, and `killed` is the one a shell job
+    // actually reaches when it is interrupted or reaped under memory pressure —
+    // the CLI itself maps it onto `stopped` before notifying. Left unmapped it
+    // read as "no terminal status", i.e. a mid-flight patch, and the block for a
+    // background job that had already been killed would spin forever.
     const status =
       rawStatus === 'completed' || rawStatus === 'failed' || rawStatus === 'stopped'
         ? rawStatus
-        : null;
+        : rawStatus === 'killed'
+          ? 'stopped'
+          : null;
     const agentType =
       typeof m.subagent_type === 'string' && SAFE_LABEL.test(m.subagent_type)
         ? m.subagent_type
@@ -1044,6 +1053,12 @@ export function describeHarnessMessage(
           id: taskId,
           phase,
           ...(agentType ? { agentType } : {}),
+          // The KIND travels structurally too, not only inside the pill text. It
+          // is what separates a background shell job (`local_bash`) from a
+          // delegated subagent (`local_agent`) — see the HarnessTask doc — and a
+          // consumer that has to parse it back out of `detail` is a consumer
+          // that will get it wrong.
+          ...(taskType ? { taskType } : {}),
           ...(toolCallId ? { toolCallId } : {}),
           ...(status ? { status } : {}),
         }
@@ -1056,6 +1071,18 @@ export function describeHarnessMessage(
   }
 
   return { subtype: label };
+}
+
+/**
+ * Stamp the moment a lifecycle edge crossed the seam (`HarnessTask.observedAt`).
+ *
+ * Kept OUT of `describeHarnessMessage` so that function stays pure — it is the
+ * one part of this mapping that is asserted message-by-message without a clock
+ * (spike-subagent), and a `Date.now()` inside it would make every one of those
+ * assertions time-dependent. The driver, which is already impure, does it here.
+ */
+function stampObserved(task: HarnessTask): HarnessTask {
+  return { ...task, observedAt: Date.now() };
 }
 
 /**
@@ -1216,6 +1243,25 @@ export class ClaudeAgentSdkEngine implements Engine {
     // occupancy this turn ends at. Filled in the `assistant` branch of the driver
     // below (which explains why it is that message and not `result`).
     let lastStepInputTokens: number | undefined;
+
+    // THE DENOMINATOR'S TWO INPUTS, taken from the RUN rather than from what we
+    // asked for (see the `contextModel` / `contextBetas` contract in
+    // runtime/engine.ts).
+    //
+    //   lastStepModel — the concrete id, from the assistant message that produced
+    //                   the reading above. Same message, so numerator and
+    //                   denominator always describe the same call.
+    //   initModel     — the id the init message resolved, as the fallback for a
+    //                   turn that ends before any assistant message lands.
+    //   initBetas     — what the CLI negotiated. `context-1m-2025-08-07` here is
+    //                   the difference between a 200k and a 1M window, and it is
+    //                   the sign-in's plan that decides it, not this app.
+    //
+    // ALL THREE ARE MAIN-THREAD ONLY, for the same reason the token reading is: a
+    // subagent runs in its own window on possibly its own model.
+    let lastStepModel: string | undefined;
+    let initModel: string | undefined;
+    let initBetas: readonly string[] | undefined;
 
     // WHICH `Task` CALL SPAWNED WHICH SUBAGENT.
     //
@@ -1399,6 +1445,16 @@ export class ClaudeAgentSdkEngine implements Engine {
       try {
         for await (const msg of q) {
           if (msg.type === 'system' && msg.subtype === 'init') {
+            // `msg.model` is the RESOLVED id — the CLI has already turned
+            // `default` / `opus` / an empty option into the model it will run —
+            // and `msg.betas` is what it negotiated. Both are captured for the
+            // window gauge; neither can be derived from our own selection.
+            // Both read through the SDK's OWN types (`SDKSystemMessage`), not
+            // through a cast: if either field is renamed upstream, this must fail
+            // to compile rather than start reporting undefined and silently take
+            // the gauge back to where the user found it.
+            initModel = msg.model || undefined;
+            if (msg.betas) initBetas = msg.betas;
             channel.push({
               kind: 'init',
               providerId: input.model.providerId,
@@ -1450,6 +1506,12 @@ export class ClaudeAgentSdkEngine implements Engine {
                 // message reports nothing, and taking it would blank a real reading.
                 if (typeof total === 'number' && total > 0) lastStepInputTokens = total;
               }
+              // The id that produced this step. Anthropic's assistant message
+              // carries the concrete model (`claude-opus-5[1m]` on a long-context
+              // run), which is the only place the tier is visible when the CLI
+              // negotiated it without announcing a beta. Typed (`BetaMessage`)
+              // for the same reason as the init fields above.
+              if (msg.message.model) lastStepModel = msg.message.model;
             }
             const text = extractText(msg.message.content);
             // Complete thinking blocks, for the case where nothing streamed (a
@@ -1488,6 +1550,15 @@ export class ClaudeAgentSdkEngine implements Engine {
               ...(lastStepInputTokens !== undefined
                 ? { contextTokens: lastStepInputTokens }
                 : {}),
+              // The denominator's inputs. The assistant message's id wins over
+              // the init one because it is the model that produced the reading
+              // above — the CLI can swap models mid-turn (a refusal fallback
+              // does exactly that), and the numerator would then belong to a
+              // different window than the name beside it.
+              ...((lastStepModel ?? initModel) !== undefined
+                ? { contextModel: (lastStepModel ?? initModel) as string }
+                : {}),
+              ...(initBetas !== undefined ? { contextBetas: initBetas } : {}),
             });
           } else if (msg.type === 'user') {
             // A `user` message carries the SDK's built-in tool RESULTS (Task /
@@ -1517,7 +1588,7 @@ export class ClaudeAgentSdkEngine implements Engine {
                 kind: 'harness',
                 subtype: described.subtype,
                 ...(described.detail ? { detail: described.detail } : {}),
-                ...(described.task ? { task: described.task } : {}),
+                ...(described.task ? { task: stampObserved(described.task) } : {}),
               });
             }
           } else {
@@ -1536,7 +1607,7 @@ export class ClaudeAgentSdkEngine implements Engine {
                 kind: 'harness',
                 subtype: described.subtype,
                 ...(described.detail ? { detail: described.detail } : {}),
-                ...(described.task ? { task: described.task } : {}),
+                ...(described.task ? { task: stampObserved(described.task) } : {}),
               });
             }
           }

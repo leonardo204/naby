@@ -468,6 +468,22 @@ export class AiSdkEngine implements Engine {
     // reports one, which is what makes the gauge hide instead of guessing.
     let contextTokens: number | undefined;
 
+    // WHICH MODEL THE READING BELONGS TO (the `contextModel` contract in
+    // runtime/engine.ts). `ai@7` puts the provider's OWN answer on
+    // `result.response.modelId` — the id the API says it served, which can be
+    // more specific than the one we asked for (a dated snapshot behind an alias,
+    // a deployment behind a router). It is seeded from `model.modelId` so a turn
+    // that fails before its first step still names something.
+    let contextModel: string | undefined;
+
+    /** The window gauge's fields, for every `result` this run can yield — there
+     *  are four (cap, throw, gate breach, success) and a reading that reached
+     *  only some of them would make the gauge depend on how the turn ended. */
+    const gaugeFields = (): { contextTokens?: number; contextModel?: string } => ({
+      ...(contextTokens !== undefined ? { contextTokens } : {}),
+      ...(contextModel !== undefined ? { contextModel } : {}),
+    });
+
     let model: LanguageModelV4;
     try {
       model = await this.resolveModel(input.model);
@@ -481,6 +497,7 @@ export class AiSdkEngine implements Engine {
       return;
     }
 
+    contextModel = model.modelId || undefined;
     yield { kind: 'init', providerId: input.model.providerId, model: model.modelId };
 
     const tools = buildToolSet(input.toolSchemas);
@@ -514,7 +531,7 @@ export class AiSdkEngine implements Engine {
           message: `iteration cap reached: the model requested tools for ${this.maxSteps} consecutive steps without finishing`,
           code: 'MAX_STEPS_EXCEEDED',
         };
-        yield { kind: 'result', ok: false, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
+        yield { kind: 'result', ok: false, usage, ...gaugeFields() };
         return;
       }
 
@@ -546,7 +563,7 @@ export class AiSdkEngine implements Engine {
           message: msg,
           code: 'ENGINE_THREW',
         };
-        yield { kind: 'result', ok: false, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
+        yield { kind: 'result', ok: false, usage, ...gaugeFields() };
         return;
       }
 
@@ -558,6 +575,10 @@ export class AiSdkEngine implements Engine {
       if (typeof result.usage.inputTokens === 'number') {
         contextTokens = result.usage.inputTokens;
       }
+      // Taken from the SAME step as the reading above, so the gauge's numerator
+      // and denominator can never describe different models.
+      const servedModel = result.response?.modelId;
+      if (typeof servedModel === 'string' && servedModel) contextModel = servedModel;
 
       // -- Invariant check: the SDK must have executed NOTHING. Our tools are
       //    execute-less, so any tool result here came from a path that skipped
@@ -576,7 +597,7 @@ export class AiSdkEngine implements Engine {
             `${sdkToolMessages} tool message(s) on its own — a tool executed without the gate`,
           code: 'GATE_BYPASSED',
         };
-        yield { kind: 'result', ok: false, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
+        yield { kind: 'result', ok: false, usage, ...gaugeFields() };
         return;
       }
 
@@ -587,7 +608,7 @@ export class AiSdkEngine implements Engine {
       const calls = result.toolCalls;
       if (result.finishReason !== 'tool-calls' || calls.length === 0) {
         // Terminal: the model stopped asking for tools.
-        yield { kind: 'result', ok: true, usage, ...(contextTokens !== undefined ? { contextTokens } : {}) };
+        yield { kind: 'result', ok: true, usage, ...gaugeFields() };
         return;
       }
 
