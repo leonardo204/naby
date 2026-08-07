@@ -383,6 +383,10 @@ export {
   readTextDelta,
   readThinkingDelta,
   probeClaudeModels,
+  // How the run's OWN reported window is picked out of the result message's
+  // `modelUsage` — exported so the selection is assertable from the shell's
+  // test suite without a live SDK run (contextWindow.test.ts).
+  reportedContextWindow,
   MODEL_PROBE_TIMEOUT_MS,
   MODEL_PROBE_RETRY_TIMEOUT_MS,
   type ClaudeEngineDiagnostics,

@@ -17,6 +17,15 @@
 // qualifies; the compaction path has its own documented default below. Neither
 // makes this function guess.
 //
+// THIS IS NOW THE FALLBACK ON THE AGENT SDK PATH, NOT THE FIRST ANSWER. That
+// backend reports the window it actually ran on (`modelUsage[model].contextWindow`
+// on its result message), and a reported size outranks anything inferred here —
+// see the `contextWindow` contract in runtime/engine.ts. The reason is the 1M
+// tier going GA: it stopped announcing itself through either signal below, and
+// this file went on answering 200k for a 1,000,000-token run. Nothing about the
+// lookup changed; it still answers every backend that reports no window of its
+// own (all of the AI-SDK ones) and every Agent SDK turn that ends before a result.
+//
 // It is a pure lookup with no I/O: the shell imports it to label a status bar and
 // the engine imports it to size a payload, and neither can be made to wait.
 

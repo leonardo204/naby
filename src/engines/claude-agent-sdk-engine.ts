@@ -56,6 +56,7 @@ import { z } from 'zod';
 import type {
   HookCallback,
   HookInput,
+  ModelUsage,
   PreToolUseHookInput,
   PreToolUseHookSpecificOutput,
   SDKUserMessage,
@@ -778,6 +779,49 @@ export function normalizeAgentSdkUsage(raw: {
     outputTokens: raw.output_tokens ?? 0,
     cachedInputTokens: cacheRead,
   };
+}
+
+/**
+ * THE WINDOW THE RUN STATED ABOUT ITSELF — the Agent SDK's result message
+ * carries `modelUsage`, one entry per model it billed, and each entry names that
+ * model's `contextWindow`. This picks the entry that belongs to the reading we
+ * are reporting and returns its size (the `contextWindow` contract in
+ * runtime/engine.ts).
+ *
+ * IT EXISTS BECAUSE THE TIER STOPPED ANNOUNCING ITSELF. The two signals the
+ * registry infers from — the `context-1m-2025-08-07` beta on the init message
+ * and a `[1m]` marker on the served id — were both absent on a live 0.3.215 run
+ * that `modelUsage` reported at 1,000,000 tokens: the long-context tier had gone
+ * GA, so nothing flagged it any more and the gauge divided by 200k. A number the
+ * backend states cannot drift out of date that way.
+ *
+ * `model` is the id the reading belongs to (the last assistant step's, falling
+ * back to init's). WHEN THAT EXACT KEY IS MISSING, only a SOLE entry is taken:
+ * a result that billed two models cannot say which of them owns the numerator,
+ * and picking one at random would be the same guess this whole path removes.
+ * Anything else answers `undefined`, and the caller falls back to the registry.
+ *
+ * Exported so the selection is assertable without a live SDK run.
+ */
+export function reportedContextWindow(
+  modelUsage: Record<string, ModelUsage> | undefined,
+  model: string | undefined,
+): number | undefined {
+  // Typed as required by the SDK, but an older CLI on the user's machine can
+  // still send a result without it — the field is checked, not assumed.
+  if (!modelUsage || typeof modelUsage !== 'object') return undefined;
+  const keys = Object.keys(modelUsage);
+  let entry: ModelUsage | undefined = model !== undefined ? modelUsage[model] : undefined;
+  if (entry === undefined) {
+    if (keys.length !== 1) return undefined;
+    entry = modelUsage[keys[0] as string];
+  }
+  const window = entry?.contextWindow;
+  // A zero or a NaN is not a window; reporting one would divide the gauge by
+  // nothing at all, which is worse than the inference it replaces.
+  return typeof window === 'number' && Number.isFinite(window) && window > 0
+    ? window
+    : undefined;
 }
 
 function lastUserText(messages: EngineRunInput['messages']): string {
@@ -1539,6 +1583,16 @@ export class ClaudeAgentSdkEngine implements Engine {
             // input_tokens=4 with cache_read_input_tokens=9435 — i.e. a 9.4k
             // prompt reported as 4 tokens.
             const usage: Usage = normalizeAgentSdkUsage(u ?? {});
+            // THE DENOMINATOR, MEASURED RATHER THAN INFERRED. `msg.modelUsage` is
+            // read through the SDK's own result types (`SDKResultSuccess` /
+            // `SDKResultError` both declare it), not through a cast, for the same
+            // reason as the init fields above: an upstream rename must fail the
+            // build instead of quietly returning undefined and taking the gauge
+            // back to the 200k it used to guess.
+            const reportedWindow = reportedContextWindow(
+              msg.modelUsage,
+              lastStepModel ?? initModel,
+            );
             channel.push({
               kind: 'result',
               ok: !msg.is_error,
@@ -1559,6 +1613,10 @@ export class ClaudeAgentSdkEngine implements Engine {
                 ? { contextModel: (lastStepModel ?? initModel) as string }
                 : {}),
               ...(initBetas !== undefined ? { contextBetas: initBetas } : {}),
+              // Attached only when the run actually named a usable size. Absent
+              // leaves the consumer on the registry inference it has always used,
+              // so a backend that reports nothing loses nothing.
+              ...(reportedWindow !== undefined ? { contextWindow: reportedWindow } : {}),
             });
           } else if (msg.type === 'user') {
             // A `user` message carries the SDK's built-in tool RESULTS (Task /

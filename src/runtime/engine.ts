@@ -349,6 +349,26 @@ export type EngineEvent =
        * configuration can predict, because the plan decides it.
        */
       contextBetas?: readonly string[];
+      /**
+       * THE WINDOW SIZE THE BACKEND ITSELF REPORTED for the model that produced
+       * the reading above (the Agent SDK's `modelUsage[model].contextWindow` on
+       * its result message).
+       *
+       * It outranks everything the two fields above feed, because it is a
+       * measurement rather than an inference. Both of those signals are
+       * conditional on how the tier is ANNOUNCED, and the announcement moves: a
+       * live 0.3.215 run served `claude-fable-5` on a 1,000,000-token window with
+       * no `context-1m-2025-08-07` beta and no `[1m]` marker on the id — 1M had
+       * gone GA — and the gauge read `64% (127k/200k)` on a window that was five
+       * times larger. A number the run states about itself cannot go stale that
+       * way.
+       *
+       * Absent when the backend reported none (every AI-SDK turn, and an Agent
+       * SDK turn whose result names no usable entry). Consumers then fall back to
+       * `contextWindowFor(contextModel, { betas: contextBetas })` exactly as
+       * before, so this field only ever adds an answer.
+       */
+      contextWindow?: number;
     }
   | { kind: 'error'; message: string; code?: string }
   /**
