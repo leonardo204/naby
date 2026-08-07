@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
 import { applyDevModeToEnv } from './devmode.js';
+import { installApplicationMenu } from './menu.js';
 
 // ---------------------------------------------------------------------------
 // Identity — must run before anything reads `userData`
@@ -245,6 +246,9 @@ function autoOpenChatgptSealInDev(): void {
 async function start(): Promise<void> {
   await app.whenReady();
 
+  // Replaces the default menu so Cmd/Ctrl+W stops meaning "close the window"
+  // and reaches the renderer, where it closes the current session tab (menu.ts).
+  installApplicationMenu();
   migrateLegacyUserData();
   applyDevDockIcon();
   // Must run BEFORE boot(): boot reads `isChatgptOauthEnabled()` (which reads
@@ -308,6 +312,58 @@ app.on('window-all-closed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Quit confirmation
+// ---------------------------------------------------------------------------
+//
+// EVERY quit path funnels through `before-quit` — the app menu's Cmd+Q, the
+// dock menu's Quit, window-all-closed on Windows/Linux — so the confirmation
+// lives here, not on the menu item. Registered BEFORE the teardown handler
+// below and coupled to it through `quitConfirmed`: listeners run in
+// registration order, and preventDefault does NOT stop the later listeners,
+// so without the gate a declined quit would still have torn the server down
+// under a window that stays open.
+//
+// No window, no question: on Windows/Linux the quit arrives because the user
+// already closed the last window — asking "really quit?" into an empty screen
+// answers a question nobody asked. Same for a quit during startup teardown.
+
+let quitConfirmed = false;
+let quitPromptOpen = false;
+app.on('before-quit', (event) => {
+  if (quitConfirmed) return;
+
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  if (!win) {
+    quitConfirmed = true;
+    return;
+  }
+
+  event.preventDefault();
+  if (quitPromptOpen) return; // Cmd+Q mashed while the sheet is up
+
+  quitPromptOpen = true;
+  const ko = app.getLocale().toLowerCase().startsWith('ko');
+  void dialog
+    .showMessageBox(win, {
+      type: 'question',
+      buttons: ko ? ['끝내기', '취소'] : ['Quit', 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      message: ko ? 'Naby를 종료할까요?' : 'Quit Naby?',
+      detail: ko
+        ? '진행 중인 대화가 있다면 중단됩니다.'
+        : 'Any conversation still running will be stopped.',
+    })
+    .then(({ response }) => {
+      quitPromptOpen = false;
+      if (response === 0) {
+        quitConfirmed = true;
+        app.quit(); // re-enters below with the gate open → teardown runs
+      }
+    });
+});
+
+// ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
 //
@@ -328,6 +384,10 @@ const TEARDOWN_TIMEOUT_MS = 5_000;
 
 let teardownDone = false;
 app.on('before-quit', (event) => {
+  // Not yet past the confirmation gate above: that handler already deferred
+  // the quit, and tearing the server down under a quit the user may cancel
+  // would leave the window open on a dead backend.
+  if (!quitConfirmed) return;
   if (teardownDone || !bootResult) return;
   event.preventDefault();
 

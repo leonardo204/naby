@@ -460,14 +460,14 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
     show: opts.show ?? true,
     backgroundColor: '#111111',
     // WINDOWS/LINUX ONLY, and deliberately NOT `Menu.setApplicationMenu(null)`.
-    // The app builds no menu of its own, so what shows on Windows is Electron's
-    // DEFAULT menu — a File/Edit/View/Window bar the product never asked for,
-    // sitting above a UI that already owns its own chrome. Hiding the BAR while
-    // keeping the MENU alive is the difference that matters: the default menu is
-    // also where the default accelerators live (Ctrl+R reload, Ctrl+Shift+I
-    // devtools, Ctrl+0/+/- zoom, Ctrl+W close), and dropping the application
-    // menu entirely would take those with it. `autoHideMenuBar` keeps them
-    // bound, and Alt still reveals the bar for anyone who wants it.
+    // The menu (now built in menu.ts — the default roles minus the Cmd/Ctrl+W
+    // close binding) is a File/Edit/View/Window bar the product never asked to
+    // SEE, sitting above a UI that already owns its own chrome. Hiding the BAR
+    // while keeping the MENU alive is the difference that matters: the menu is
+    // also where the accelerators live (Ctrl+R reload, Ctrl+Shift+I devtools,
+    // Ctrl+0/+/- zoom), and dropping the application menu entirely would take
+    // those with it. `autoHideMenuBar` keeps them bound, and Alt still reveals
+    // the bar for anyone who wants it.
     //
     // macOS has no in-window menu bar to hide — its menu belongs to the system
     // strip — so the flag is left off there rather than asking Electron to
