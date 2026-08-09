@@ -9,7 +9,7 @@
 // Everything SPIKE-04 asserts against is therefore constructed here, and the two
 // entries differ only in what they do afterwards.
 
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, shell } from 'electron';
 import { existsSync, mkdirSync } from 'node:fs';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
@@ -500,12 +500,33 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
   // macOS system menu is never touched.
   if (process.platform !== 'darwin') win.setMenuBarVisibility(false);
 
-  // Nothing in this app should ever open a second window or navigate off
-  // loopback. Both are refused rather than merely unused: an injected script in
-  // the renderer would otherwise have a working exfiltration channel.
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // Nothing in this app should ever open a second WINDOW or navigate this
+  // window off loopback. Both stay refused — an injected script in the renderer
+  // would otherwise have a working exfiltration channel. But refusal alone made
+  // every link in a chat reply dead: rendered markdown anchors carry
+  // target="_blank", which lands in setWindowOpenHandler, and a bare deny
+  // swallows the click. The link's DESTINATION is not the threat — the second
+  // window is — so web links are handed to the OS browser and the window
+  // request is still denied.
+  const openExternally = (url: string): void => {
+    // http(s) only, and never our own loopback UI (that is in-app navigation,
+    // not a link out). Anything else — file:, custom schemes — stays refused:
+    // shell.openExternal on those is an execution channel, not a link.
+    if (!/^https?:\/\//.test(url)) return;
+    if (url.startsWith(bootResult.server.origin)) return;
+    void shell.openExternal(url);
+  };
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
+    return { action: 'deny' };
+  });
   win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(bootResult.server.origin)) event.preventDefault();
+    if (!url.startsWith(bootResult.server.origin)) {
+      event.preventDefault();
+      // A plain anchor without target=_blank tries to NAVIGATE instead of
+      // opening a window; same intent, same answer — the OS browser.
+      openExternally(url);
+    }
   });
 
   return win;
