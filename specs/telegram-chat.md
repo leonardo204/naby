@@ -2,11 +2,11 @@
 id: telegram-chat
 title: 텔레그램 양방향 챗 — 봇으로 세션과 대화한다
 type: design
-version: 0.1.0
+version: 0.1.1
 status: active
 scope: naby 봇과 열린 세션 간의 양방향 대화. 상시 폴링 루프로의 전환, "/" 제어 명령(세션 목록·연결·상태·해제), 연결 세션 개념과 유휴 타임아웃, 답장 기반 라우팅, 수신 턴의 헤드리스 실행과 응답 회신, 동시성·보안 경계를 다룬다. 에스컬레이션·체크인의 기존 텔레그램 계약은 유지된다.
-related: [phase-3-persona-agent, harness-standalone]
-updated: 2026-08-03
+related: [phase-3-persona-agent, harness-standalone, session-context-management]
+updated: 2026-08-09
 ---
 
 # 텔레그램 양방향 챗 — 봇으로 세션과 대화한다
@@ -42,6 +42,7 @@ updated: 2026-08-03
 - 연결 상태는 store settings에 저장한다: `telegram.link = {sessionId, linkedAt, lastActivityAt}` (챗은 단일 chat_id 전제 — 기존 텔레그램 설정과 동일).
 - **유휴 타임아웃 `TELEGRAM_LINK_IDLE_MS`(기본 60분)**: 마지막 활동에서 60분이 지난 뒤 평문이 오면 즉시 턴을 돌리지 않고 "연결이 오래되어 해제되었습니다. 계속하려면 /use N ..." 안내를 답하며 링크를 지운다. 타이머·크론이 아니라 **수신 시점 판정**이다 — 상시 백그라운드 작업을 늘리지 않는다.
 - 앱 쪽에서 세션이 삭제되면 링크도 무효가 된다(수신 시점에 세션 존재 확인, 없으면 안내+해제).
+- "새 탭에서 이어가기"가 링크가 가리키는 세션을 이어가면 링크는 새 세션으로 옮겨진다(`repointLink` — 옛 세션을 가리킬 때만, `linkedAt` 보존). 계약은 [session-context-management] §2.2 환경 승계에 있다.
 
 ## 4. 수신 턴의 실행과 회신
 
