@@ -93,7 +93,7 @@ import type {
   RunCtx,
   RunEvent,
 } from '../../shell/packages/feature/agent/src/server/engines/types.js';
-import type { ModelResolver } from '../runtime-entry.js';
+import type { Engine, EngineEvent, ModelResolver } from '../runtime-entry.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 
@@ -298,13 +298,49 @@ async function runOnce(
   script: LanguageModelV4GenerateResult[],
   sessionId?: string,
   onEvent?: (event: RunEvent) => void,
+  voiceBackend?: NonNullable<Parameters<typeof createNabySpec>[0]>['resolveVoiceBackend'],
 ): Promise<{ h: Harness; s: Scripted }> {
   const controller = new AbortController();
   const h = makeHarness(controller, prompt, sessionId, onEvent);
   const s = scripted(script);
   const resolveModel: ModelResolver = () => s.model;
-  await createNabySpec({ resolveModel }).runner.run(h.ctx);
+  await createNabySpec({
+    resolveModel,
+    // Left unset, the naby layer (P3-M14a) is SILENT here: an injected model
+    // resolver means this process must not reach a provider on its own, so a
+    // scripted run does not quietly pay a real backend to polish its scripted
+    // answer. Run 8 injects a deterministic one to prove the layer's own
+    // contract instead.
+    ...(voiceBackend ? { resolveVoiceBackend: voiceBackend } : {}),
+  }).runner.run(h.ctx);
   return { h, s };
+}
+
+/** A voice backend that always answers with `rewrite`, and counts its calls. The
+ *  port strips the protocol markers before the model is asked, so this stands in
+ *  for a model that returns prose and nothing else — which is exactly the case the
+ *  marker re-attachment has to survive. */
+function scriptedVoiceBackend(rewrite: string): {
+  resolve: () => Promise<{ engine: Engine; model: { providerId: string }; label: string }>;
+  calls: () => number;
+  prompts: string[];
+} {
+  let calls = 0;
+  const prompts: string[] = [];
+  const engine: Engine = {
+    async *run(input): AsyncIterable<EngineEvent> {
+      calls += 1;
+      prompts.push(JSON.stringify(input.messages));
+      yield { kind: 'init', providerId: 'voice-mock', model: 'voice-mock-1' };
+      yield { kind: 'text', role: 'assistant', text: rewrite };
+      yield { kind: 'result', ok: true, usage: { inputTokens: 40, outputTokens: 30 } };
+    },
+  };
+  return {
+    resolve: async () => ({ engine, model: { providerId: 'voice-mock' }, label: 'voice-mock' }),
+    calls: () => calls,
+    prompts,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +874,60 @@ async function main(): Promise<void> {
     `prompts: ${s13.prompts.length}, carrying the eager clause: ${
       s13.prompts.filter((p) => p.includes(EAGER)).length
     }, carrying the check-in block: ${s13.prompts.filter((p) => p.includes(BASE)).length}`,
+  );
+
+  // ==== THE NABY LAYER DOES NOT BREAK THE LOOP (P3-M14a) ==================
+  //
+  // THE REGRESSION THIS MILESTONE IS MOST ABLE TO CAUSE. The autonomy loop stops
+  // when it sees `[[DONE]]` in the step's text — and since M14a that text has been
+  // through a model that was asked to rewrite it. A rewrite that dropped the
+  // marker would produce an agent that never stops: it would run to its step cap
+  // on every goal it finished, silently, and only the bill would say so.
+  //
+  // So the layer is driven for real here, through the production engine path,
+  // with a deterministic backend standing in for the model: the port strips the
+  // markers, the "model" answers with prose alone, the port puts them back, and
+  // the loop must still stop on the FIRST step.
+  const rewritten =
+    'The message went out and the log confirms it, so the goal is met and nothing is left pending.';
+  const voice = scriptedVoiceBackend(rewritten);
+  const prompt14 = makeAgent('autovoice', 3);
+  const { h: h14 } = await runOnce(
+    prompt14,
+    [
+      toolCall('v1'),
+      text(
+        'The message has been delivered and I checked the log to be sure of it, so the work is finished.\n' +
+          '[[VERIFIED: re-read the message log, it is there]]\n[[DONE]]',
+      ),
+    ],
+    undefined,
+    undefined,
+    voice.resolve,
+  );
+  const bars14 = stepBars(h14.events);
+  const assistant14 = getStore()
+    .getMessages(h14.sessionId())
+    .filter((m) => m.role === 'assistant')
+    .map(bodyOf)
+    .filter((t) => t.length > 0);
+  const last14 = assistant14.at(-1) ?? '';
+  record(
+    checks,
+    '(m) the naby layer restyles the final block and the run still stops on [[DONE]]',
+    voice.calls() === 1 &&
+      bars14.length === 1 &&
+      bars14[0] === 'step 1/3 — stopped (done-marker)',
+    `voice calls: ${voice.calls()}, step bars: ${JSON.stringify(bars14)}`,
+  );
+  record(
+    checks,
+    '(m2) the markers were never shown to the rewriting model, and came back on the result',
+    voice.prompts.every((p) => !p.includes('[[DONE]]') && !p.includes('[[VERIFIED:')) &&
+      last14.includes(rewritten) &&
+      last14.trimEnd().endsWith('[[DONE]]') &&
+      last14.includes('[[VERIFIED:'),
+    `stored last block: ${JSON.stringify(last14.slice(0, 160))}`,
   );
 
   // ---- report -------------------------------------------------------------

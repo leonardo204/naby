@@ -105,6 +105,11 @@ export type ActivityKind =
   | 'user_message'
   | 'assistant_text'
   | 'thinking'
+  // THE NABY LAYER'S SPEND (P3-M14a, naby-voice-layer §7.1). A rewrite call is
+  // deliberately absent from the transcript and from the usage table (§8), so
+  // without this line it would be money spent where nobody can count it. The
+  // record carries the model and the tokens for exactly that reason.
+  | 'voice_rewrite'
   // -- tools and decisions --------------------------------------------------
   | 'tool_call'
   | 'tool_result'

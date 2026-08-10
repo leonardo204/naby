@@ -531,3 +531,48 @@ export interface Engine {
    * executors, normalizing its native events into EngineEvent. */
   run(input: EngineRunInput): AsyncIterable<EngineEvent>;
 }
+
+// ---------------------------------------------------------------------------
+// The naby layer's port (P3-M14a — specs/naby-voice-layer.md §8)
+// ---------------------------------------------------------------------------
+
+/** One block of assistant prose, offered for restyling. */
+export type VoiceRenderRequest = {
+  /** The text as the model wrote it — the LAST assistant block of this step. */
+  readonly text: string;
+  /** The user's own words for this turn, which is what "the language the user
+   *  wrote in" and "the way this person writes" are measured against. */
+  readonly userText: string;
+  readonly sessionId: string;
+  /** The TURN's abort signal, passed straight through. A user who pressed stop is
+   *  not waiting for a style correction (§6): an implementation must abandon its
+   *  call and answer with `req.text`. */
+  readonly signal: AbortSignal;
+};
+
+/**
+ * THE NABY LAYER, as a port: the seam through which the turn runner offers its
+ * last assistant block for restyling before the user sees it.
+ *
+ * OPTIONAL BY CONSTRUCTION. `runTurn` without one is byte-for-byte the turn it
+ * ran before this port existed — no deferral is observable, no call is made,
+ * nothing is logged. That is what keeps every spike and every headless caller
+ * unchanged, and it is the invariant the spike checks first.
+ *
+ * IT LIVES ABOVE THE ENGINE, NOT INSIDE IT. Restyling is provider-independent —
+ * the same rules apply whichever backend answered — and putting it here means the
+ * implementation can drive a DIFFERENT, cheaper backend than the turn did without
+ * the turn's engine knowing anything about it.
+ */
+export interface VoicePort {
+  /**
+   * Return the text to show the user.
+   *
+   * MUST NOT THROW AND MUST NOT RETURN EMPTY. Every failure — no backend, a
+   * timeout, a provider error, a rewrite that failed verification, an aborted turn
+   * — returns `req.text` unchanged. This layer is not allowed to be the reason an
+   * answer does not arrive (§6: "답을 막을 수 없는 층"), so the contract is stated
+   * on the port rather than left to each implementation's judgement.
+   */
+  render(req: VoiceRenderRequest): Promise<string>;
+}

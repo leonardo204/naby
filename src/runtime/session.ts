@@ -20,6 +20,7 @@ import type {
   SubagentSpec,
   ToolOutput,
   ToolSchema,
+  VoicePort,
 } from './engine.js';
 import { composeSystemWithMemory, retrieveForInjection } from './memory-inject.js';
 import {
@@ -66,6 +67,22 @@ export type RunTurnOptions = {
    * aborts the turn. */
   onEvent?: (ev: EngineEvent) => void;
   signal?: AbortSignal;
+
+  // -- the naby layer (P3-M14a, specs/naby-voice-layer.md §4.1, §8) ----------
+  //
+  // OPT-IN, and its absence is a full answer: no port means no deferral anyone can
+  // observe, no call, no log — the turn is byte-for-byte what it was before this
+  // field existed, which is the invariant the spike checks first. When present,
+  // the LAST assistant text block of this step is offered to it before it reaches
+  // `onEvent`, the store or the log, and whatever comes back is the ONE text all
+  // three of them see (§2 principle 3: what was shown is what was stored).
+  //
+  // Only the last block: text that is followed by a tool call is a progress note,
+  // and §4 is explicit that naby does not spend a model call tidying those.
+
+  /** Restyle this step's final assistant block before it is shown and stored.
+   *  Omit to disable the naby layer entirely (a pure no-op). */
+  voice?: VoicePort;
 
   // -- usage accounting (F1-07) ---------------------------------------------
   //
@@ -334,6 +351,136 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
 
   const events: EngineEvent[] = [];
 
+  // -- THE NABY LAYER'S ONE-SLOT DELAY (P3-M14a, naby-voice-layer §4.1) ------
+  //
+  // THE PROBLEM IT SOLVES. Restyling must apply to the step's LAST assistant
+  // block and to nothing else (§4): the text before a tool call is a progress
+  // note, and paying a model call to polish twenty of those is exactly the cost
+  // §5 caps. But a streaming loop cannot know a block is the last one when it
+  // arrives — only when something else does, or when the stream stops.
+  //
+  // SO THE LOOP HOLDS ONE BLOCK. A complete assistant text event is parked here
+  // instead of being folded. Anything arriving after it proves it was not the
+  // last thing said, so it is released VERBATIM and the new event is handled
+  // normally. The engine's terminal `result` — and the end of the stream, for a
+  // backend that produces none — is what proves it WAS the last, and that is the
+  // one release that goes through the port.
+  //
+  // WHY `result` COUNTS AS THE END rather than as "something else arrived". Every
+  // engine emits `result` after its final text, so treating it as an ordinary
+  // event would mean the held block is always released verbatim and the layer
+  // never runs at all. It also has to be this way round for the consumer: the
+  // shell ends the client's turn on `result`, so a rewrite delivered after it
+  // would arrive in a bubble that has already closed.
+  //
+  // NO OBSERVABLE COST WITHOUT A PORT — and, since the second review, no held
+  // block either: the parking condition itself tests `opts.voice`, so a turn with
+  // no naby layer never enters this machinery at all. The release happens before
+  // the new event is pushed, so `events`, `onEvent` and the store see the same
+  // values in the same order they always did.
+  let heldText: Extract<EngineEvent, { kind: 'text' }> | undefined;
+
+  /** The STORE half of an assistant text event — what the loop's own `text`
+   *  branch has always done. Named so the held path and the immediate path run
+   *  the same code rather than two copies of it. */
+  const foldAssistantText = (
+    ev: Extract<EngineEvent, { kind: 'text' }>,
+    /** Extra fields for the log row — used by the one caller that delivers a block
+     *  the naby layer was not allowed to touch (see `deliverText`). */
+    note?: Record<string, string>,
+  ): void => {
+    store.appendMessage(sessionId, { role: 'assistant', content: ev.text });
+    // THE RESPONSE, IN FULL — but only once. A streaming engine emits the same
+    // sentence twice, as `partial` token deltas and then as one complete event;
+    // logging both would write the answer to disk character by character and then
+    // again whole. The complete event is the one that is also stored, so the log
+    // matches the transcript.
+    if (ev.partial !== true) {
+      logActivity('assistant_text', { ...activity, text: ev.text, ...note });
+    }
+  };
+
+  /**
+   * Emit a held block: the same push, the same callback and the same fold the
+   * loop performs for every other event, in the same order.
+   *
+   * IT ALWAYS DELIVERS, INCLUDING AFTER A STOP (second review, defect 3b — this
+   * reverses the first review's instruction, and the reason is worth stating
+   * because the reversal looks like a regression).
+   *
+   * The first round argued that a block released after an abort reaches the store
+   * but not the screen, because the shell drops post-abort events — so keeping it
+   * would put a paragraph in the transcript that the user never saw. That is true
+   * about the EVENT and false about the TURN: pressing stop calls the shell's
+   * `handleStop` → `endRun` → `onRunComplete`, which is the disk reconcile
+   * (`Chat.tsx`, `reconcileFromDiskRef`). A stopped run reloads its transcript from
+   * disk immediately, so a stored block IS displayed, and the two halves agree
+   * after all. Dropping it was not a consistency measure; it deleted a completed
+   * answer from both the screen and the record, which is the one outcome §2 never
+   * chooses.
+   *
+   * What the abort still buys is that no rewrite is attempted (see
+   * `releaseHeldRestyled`): the user gets the model's own words, immediately, which
+   * is what they were waiting for when they pressed stop. `voiceSkipped` says so in
+   * the log, on the same row as the text, so the missing correction is explainable
+   * rather than mysterious.
+   */
+  const deliverText = (
+    ev: Extract<EngineEvent, { kind: 'text' }>,
+    note?: { voiceSkipped: 'aborted' },
+  ): void => {
+    events.push(ev);
+    opts.onEvent?.(ev);
+    foldAssistantText(ev, note);
+  };
+
+  /** Release the held block as the model wrote it — what happens whenever
+   *  anything else arrives, i.e. whenever it was not the last block. */
+  const releaseHeld = (): void => {
+    const held = heldText;
+    if (held === undefined) return;
+    heldText = undefined;
+    deliverText(held);
+  };
+
+  /**
+   * Release the held block THROUGH the naby layer — this one WAS the last.
+   *
+   * ABORT SKIPS THE CALL, NOT THE BLOCK (§6). A user who pressed stop is not
+   * waiting for a style correction, so no call is made and the block goes out
+   * exactly as the model wrote it — the same bytes an engine with no port at all
+   * would have produced. The signal is also handed to the port, which is a second
+   * barrier for a call already in flight.
+   *
+   * The port is documented as never throwing and never returning empty; both are
+   * re-checked here anyway, because the cost of being wrong about that is a turn
+   * whose answer vanished.
+   */
+  const releaseHeldRestyled = async (): Promise<void> => {
+    const held = heldText;
+    if (held === undefined) return;
+    heldText = undefined;
+    if (signal.aborted) {
+      deliverText(held, { voiceSkipped: 'aborted' });
+      return;
+    }
+    let text = held.text;
+    if (opts.voice) {
+      try {
+        const rendered = await opts.voice.render({
+          text: held.text,
+          userText,
+          sessionId,
+          signal,
+        });
+        if (typeof rendered === 'string' && rendered.length > 0) text = rendered;
+      } catch {
+        /* a port that broke its own contract still cannot cost the user the answer */
+      }
+    }
+    deliverText(text === held.text ? held : { ...held, text });
+  };
+
   // The model that ACTUALLY answered, for the usage row (F1-07).
   //
   // `model.model` is what we ASKED for, and it is routinely not what ran: it is
@@ -453,6 +600,28 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       // barrier, not the only one.
       if (signal.aborted) break;
 
+      // THE ONE-SLOT DELAY (P3-M14a — see `heldText`). Two lines, in this order:
+      // release whatever was held (restyled if this event proves the stream is
+      // ending, verbatim otherwise), then park this event if it is itself a
+      // complete assistant block. Releasing FIRST is what keeps `events`, the
+      // callback and the store in their original order.
+      //
+      // A `partial` text event is NOT parked: it is a token delta, there is
+      // nothing to restyle in a fragment, and holding one would stall the stream
+      // the UI is rendering. No engine emits them today; the contract is kept.
+      if (ev.kind === 'result') await releaseHeldRestyled();
+      else releaseHeld();
+      // NOTHING IS PARKED WITHOUT A PORT (second review, defect 3a). Holding a
+      // block for a layer that does not exist buys nothing and costs a window: the
+      // block sits here until the stream ends, and anything that goes wrong in
+      // between — an abort, a throw — has to be careful not to lose it. With the
+      // condition here, "no port = byte-for-byte the pre-M14a turn" is structural
+      // rather than something each release path has to remember to preserve.
+      if (opts.voice && ev.kind === 'text' && ev.role === 'assistant' && ev.partial !== true) {
+        heldText = ev;
+        continue;
+      }
+
       events.push(ev);
       // Every event reaches the streaming caller, INCLUDING `harness`. That is
       // the only path a harness event takes: it is observational (see the
@@ -469,15 +638,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       if (ev.kind === 'init') {
         if (ev.model) answeringModel = ev.model;
       } else if (ev.kind === 'text' && ev.role === 'assistant') {
-        store.appendMessage(sessionId, { role: 'assistant', content: ev.text });
-        // THE RESPONSE, IN FULL — but only once. A streaming engine emits the same
-        // sentence twice, as `partial` token deltas and then as one complete
-        // event; logging both would write the answer to disk character by
-        // character and then again whole. The complete event is the one that is
-        // also stored, so the log matches the transcript.
-        if (ev.partial !== true) {
-          logActivity('assistant_text', { ...activity, text: ev.text });
-        }
+        // WHAT REACHES HERE: every `partial` delta, and — on a turn with no naby
+        // layer — complete blocks too, since those are no longer parked. Both are
+        // folded by the same call the held path ends in (`deliverText` →
+        // `foldAssistantText`), so the store sees one behaviour, not two.
+        foldAssistantText(ev);
       } else if (ev.kind === 'thinking') {
         // Reasoning, not the reply — logged (it is the most useful thing in the
         // file when an answer is inexplicable) and, like text, only when complete.
@@ -597,6 +762,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       }
     }
   } catch (error) {
+    // NOTHING HELD MAY BE LOST, even on the failing path: the engine emitted that
+    // block, so it belongs in the transcript exactly as it would have without the
+    // delay. VERBATIM and synchronously — a turn that is already failing does not
+    // stop to buy a style correction, and awaiting a model call inside a catch
+    // before re-throwing would delay the error the caller is waiting for.
+    //
+    // A turn that failed BECAUSE it was stopped takes the abort path inside
+    // `deliverText`: the block goes to the activity log and to neither sink, so the
+    // screen and the transcript still agree.
+    releaseHeld();
     // A THROWN turn is logged and RE-THROWN, unchanged. The log observes; it does
     // not handle. Swallowing here would turn a failing turn into a silent one for
     // every caller above.
@@ -609,6 +784,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     });
     throw error;
   }
+
+  // THE STREAM IS OVER, so a block still held IS this step's last one (§4.1) —
+  // for a backend that ends without a `result`, and for the abort that breaks out
+  // of the loop above. Restyled or not, it is folded before anything else closes
+  // the turn out, so the transcript order is unchanged. A held block released by
+  // the `result` edge leaves this a no-op.
+  await releaseHeldRestyled();
 
   // Nothing may be left half-written: an unclosed call would be an orphan on
   // the next replay, which is the exact failure Bug B was about.

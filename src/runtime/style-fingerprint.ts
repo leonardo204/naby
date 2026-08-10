@@ -330,8 +330,14 @@ export function parseStyleFingerprint(raw: string | undefined | null): StyleFing
 }
 
 /** Above this fraction an ending or a habit is worth mentioning at all. Below
- *  it, saying "sometimes uses lists" would be describing noise as a preference. */
-const NOTABLE = 0.3;
+ *  it, saying "sometimes uses lists" would be describing noise as a preference.
+ *
+ *  EXPORTED since P3-M14a: the naby layer (runtime/voice.ts) asks the same
+ *  question of the same numbers — "does this person NOTABLY prefer an ending" —
+ *  when it decides whether an answer's register is a deviation. Two copies of this
+ *  threshold would mean the injected line and the rewrite trigger could disagree
+ *  about what this user prefers. */
+export const STYLE_NOTABLE = 0.3;
 
 /**
  * The ONE English line injected into a persona turn, or undefined when there is
@@ -362,10 +368,10 @@ export function renderStyleFingerprintLine(
         ? 'writes long, dense sentences'
         : 'writes medium-length sentences',
   );
-  if (fingerprint.endings.polite >= NOTABLE) traits.push('uses the polite Korean ~요 ending');
-  if (fingerprint.endings.formal >= NOTABLE) traits.push('uses the plain Korean ~다 ending');
-  if (fingerprint.questionRatio >= NOTABLE) traits.push('often asks rather than instructs');
-  if (fingerprint.listRatio >= NOTABLE) traits.push('often writes in bulleted lists');
+  if (fingerprint.endings.polite >= STYLE_NOTABLE) traits.push('uses the polite Korean ~요 ending');
+  if (fingerprint.endings.formal >= STYLE_NOTABLE) traits.push('uses the plain Korean ~다 ending');
+  if (fingerprint.questionRatio >= STYLE_NOTABLE) traits.push('often asks rather than instructs');
+  if (fingerprint.listRatio >= STYLE_NOTABLE) traits.push('often writes in bulleted lists');
 
   return (
     `Observed writing style of this user: ${traits.join('; ')}. ` +

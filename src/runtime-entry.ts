@@ -37,6 +37,8 @@ export type {
   ToolOutput,
   ToolSchema,
   Usage,
+  VoicePort,
+  VoiceRenderRequest,
 } from './runtime/engine.js';
 
 // WHICH WINDOW THIS TURN IS FILLING (session-context-management §2.1). The shell
@@ -793,6 +795,7 @@ export {
 // settings key, one injected English line. No model anywhere in it, and the
 // caller applies the same `canCaptureMemory` gate the LLM half obeys.
 export {
+  classifyEnding,
   computeStyleFingerprint,
   mergeStyleFingerprint,
   parseStyleFingerprint,
@@ -801,6 +804,43 @@ export {
   splitSentences,
   STYLE_FINGERPRINT_KEY,
   STYLE_FINGERPRINT_MIN_SAMPLES,
+  STYLE_NOTABLE,
   STYLE_SAMPLE_CAP,
+  type StyleEndings,
   type StyleFingerprint,
 } from './runtime/style-fingerprint.js';
+
+// -- the naby layer (Phase 3, P3-M14a) ---------------------------------------
+// The PURE half of specs/naby-voice-layer.md: what counts as a deviation, when a
+// rewrite is worth a model call, what the call says, and — the part that makes
+// the whole thing safe — whether the result may be shown at all. The shell owns
+// the model call, the marker preservation, the per-turn cap and the log (§8).
+export {
+  buildVoicePrompt,
+  detectVoiceDeviation,
+  extractInvariants,
+  hasLanguageDirective,
+  renderVoiceLanguageLine,
+  shouldRestyle,
+  stripNonProse,
+  verifyVoiceRewrite,
+  voiceRewriteMode,
+  voiceUserLanguage,
+  VOICE_ENDING_DOMINANCE,
+  VOICE_KOREAN_PRESENCE,
+  VOICE_LENGTH_FACTOR,
+  VOICE_MAX_RATIO,
+  VOICE_MIN_LANGUAGE_SAMPLE,
+  VOICE_MIN_PROSE_CHARS,
+  VOICE_MIN_RATIO,
+  VOICE_PREVENTIVE_THRESHOLD,
+  VOICE_TIMEOUT_MS,
+  VOICE_TRANSLATION_MAX_RATIO,
+  VOICE_TRANSLATION_MIN_RATIO,
+  VOICE_TURN_REWRITE_CAP,
+  type VoiceDeviation,
+  type VoiceInvariants,
+  type VoiceLanguage,
+  type VoiceRewriteMode,
+  type VoiceVerifyOptions,
+} from './runtime/voice.js';
