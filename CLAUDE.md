@@ -27,7 +27,7 @@
 | 빌드 | `npm run build:app`(runtime → shell → electron). 실행은 `npm run electron:dev` |
 | 검증 | 셸 테스트 `cd shell && npm test` · 타입체크 `npm run typecheck`(양 트리) · 스파이크 `npm run spike:<name>` |
 | DB 경로 | `NABY_DB_PATH` > `NABY_HOME` > `~/.naby/app.db` |
-| 상태 | 개발 중. Phase 3(페르소나 에이전트) **P3-M13까지 완료** — 신뢰 지표·연속 학습·기억 위생·빠른 진화 모드(단계 계약·모의 체크인)·기억 갱신 4연산·스타일 프로필·설정 IA 재편 |
+| 상태 | 개발 중. Phase 3(페르소나 에이전트) **P3-M14a까지 완료** — 신뢰 지표·연속 학습·기억 위생·빠른 진화 모드(단계 계약·모의 체크인)·기억 갱신 4연산·스타일 프로필·설정 IA 재편·나비 레이어(응답 재가공) |
 
 ### 어느 레이어에 쓰는가
 
@@ -52,7 +52,7 @@
 
 - `ref-docs/specs/` — **정본.** `sdd.md`의 `{DOC_ROOT}`가 `ref-docs/`이므로 형식상 기준이다. `design|impl|interface|test` 계층을 지킨다. 전략·계약·완료된 Phase가 여기 있다.
 - `specs/` — **진행 중 착수 스펙.** 평면 구조를 허용하되 **frontmatter는 필수**다(id/type/version/status/scope/related/updated). 영향도 추적이 끊기면 트리를 나눈 이점이 사라진다. 안정되면 `ref-docs/specs/<type>/`으로 승격한다.
-- 현재 `specs/`: [페르소나 에이전트](specs/phase-3-persona-agent.md) · [나비 신뢰 지표](specs/phase-3-butterfly-trust-meter.md) · [체크인 원장 계약](specs/phase-3-checkin-contracts.md) · [에이전트 내보내기](specs/phase-3-agent-export.md) · [Phase 2/2.5 계획](specs/phase-2-2.5-plan.md) · [패키징 경로 해석](specs/packaging-path-resolution.md)
+- 현재 `specs/`: [페르소나 에이전트](specs/phase-3-persona-agent.md) · [나비 신뢰 지표](specs/phase-3-butterfly-trust-meter.md) · [체크인 원장 계약](specs/phase-3-checkin-contracts.md) · [에이전트 내보내기](specs/phase-3-agent-export.md) · [나비 레이어](specs/naby-voice-layer.md) · [Phase 2/2.5 계획](specs/phase-2-2.5-plan.md) · [패키징 경로 해석](specs/packaging-path-resolution.md)
 - 새 스펙을 쓰거나 받았으면 `/spec-guard`로 기존 문서와 대조한다. **스펙을 저장하는 행위 자체가 발동 조건이다.**
 
 ### 문서 구조 (소유권 분리)
