@@ -25,10 +25,17 @@
 //   6. Windows and Linux report supported when packaged, EVEN UNSIGNED, which is
 //      the deliberate platform asymmetry of design §6.2.
 //   7. electron-updater itself imports and exposes a configurable autoUpdater.
+//   8. The "Update ready" dialog appears ONCE PER VERSION, however many times
+//      `update-downloaded` fires — while the `ready` status still reaches the
+//      UI every single time. See case 9 for why those two differ.
+//   9. Two overlapping checks register ONE listener set on the electron-updater
+//      singleton, and `dispose()` gives them back.
 //
-// What it does NOT do is hit the network. `start()` is never called and
-// `checkForUpdates` is never invoked; every case below is resolved by the
-// support probe alone.
+// What it does NOT do is hit the network. `start()` is never called, and where
+// `checkForUpdates` IS invoked (cases 9–10) it short-circuits to null because
+// this is an unpackaged dev run — electron-updater's `isUpdaterActive()` is
+// false, so nothing is fetched and no events fire on their own. Those cases
+// drive `update-downloaded` by hand for exactly that reason.
 
 import { app } from 'electron';
 import { createUpdater, detectUpdateSupport, RELEASES_URL } from './updater.js';
@@ -39,6 +46,11 @@ const cases: Case[] = [];
 
 function record(name: string, expected: string, actual: string, detail?: string): void {
   cases.push({ name, expected, actual, pass: expected === actual, ...(detail ? { detail } : {}) });
+}
+
+/** Lets the emitter's handlers and their microtasks drain before asserting. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Canned `codesign -dv` reports, verbatim in shape from the real tool. */
@@ -181,6 +193,137 @@ async function main(): Promise<void> {
     } catch (err) {
       record('electron-updater imports', 'true', 'false', err instanceof Error ? err.message : String(err));
     }
+  }
+
+  // -- 9. the update-ready dialog fires ONCE per version ---------------------
+  //
+  // THE BUG THIS PINS DOWN: `update-downloaded` re-fires on every check once
+  // the file is in electron-updater's cache (AppUpdater calls `done(false)` for
+  // a valid cached file, BaseUpdater turns that into `dispatchUpdateDownloaded`
+  // regardless). The old handler called `promptToRestart` unconditionally, so a
+  // 6-hourly check stacked one modal per check — ~24 of them over a week.
+  //
+  // The event is driven BY HAND rather than by a real download, because that is
+  // the only way to reach the branch without a published release and a network
+  // round trip. Everything else is production code: the real `createUpdater`,
+  // the real electron-updater singleton, the real listener wiring.
+  //
+  // `showRestartPrompt` always answers 1 ("Later"). Answering 0 would call
+  // `quitAndInstall` and take the probe process down with it.
+  {
+    const mod = await import('electron-updater');
+    const ns = ((mod as unknown as { default?: unknown }).default ?? mod) as typeof import('electron-updater');
+    // Cast to the plain emitter: the typed-emitter surface does not admit
+    // `emit`/`listenerCount` for arbitrary events, which is exactly what a test
+    // that stands in for electron-updater's internals needs.
+    const au = ns.autoUpdater as unknown as import('node:events').EventEmitter;
+    // Other cases in this file may legitimately hold listeners; measure the
+    // delta, never the absolute.
+    const base = au.listenerCount('update-downloaded');
+
+    const prompts: string[] = [];
+    const states: string[] = [];
+    const u = createUpdater({
+      log: () => {},
+      // `linux` short-circuits detectUpdateSupport to supported without a
+      // codesign spawn, so this case runs identically on every host.
+      probe: { isPackaged: true, platform: 'linux' },
+      showRestartPrompt: async (v: string) => {
+        prompts.push(v);
+        return 1;
+      },
+    });
+    u.onStatus((s) => states.push(s.state));
+
+    // TWO CONCURRENT CHECKS. This is the `loadAutoUpdater` race: the old code
+    // tested `if (autoUpdater) return` before an `await import(...)`, so both
+    // callers got past the guard and both registered a listener set on the
+    // singleton — doubling every emit and every prompt. In a dev build
+    // `checkForUpdates()` short-circuits to null (no network, no events), so
+    // the returned promises never settle; only the wiring is under test.
+    void u.checkNow();
+    void u.checkNow();
+    await delay(200);
+    record(
+      'two concurrent checks register ONE update-downloaded listener',
+      '1',
+      String(au.listenerCount('update-downloaded') - base),
+    );
+
+    // Same version, three times — one dialog, three status pushes.
+    au.emit('update-downloaded', { version: '9.9.9' });
+    au.emit('update-downloaded', { version: '9.9.9' });
+    au.emit('update-downloaded', { version: '9.9.9' });
+    await delay(50);
+    record('three identical update-downloaded events prompt ONCE', '1', String(prompts.length));
+    record(
+      'but every one of them still pushes `ready` to the UI',
+      '3',
+      String(states.filter((s) => s === 'ready').length),
+      'the settings panel must not go blank on a repeat',
+    );
+
+    // A genuinely new version is announced again — exactly once.
+    au.emit('update-downloaded', { version: '9.9.10' });
+    au.emit('update-downloaded', { version: '9.9.10' });
+    await delay(50);
+    record('a NEW version prompts again, once', '2', String(prompts.length));
+    record('and the second prompt names the new version', '9.9.10', String(prompts[1]));
+
+    // dispose() must hand back its listeners: `ns.autoUpdater` is a process
+    // singleton, so anything left attached pollutes every later instance.
+    u.dispose();
+    record(
+      'dispose detaches the listeners it registered',
+      '0',
+      String(au.listenerCount('update-downloaded') - base),
+    );
+  }
+
+  // -- 10. re-entrancy: a second event while the dialog is open is dropped ---
+  //
+  // The version key alone cannot cover this. Here the second event carries a
+  // DIFFERENT version, so it passes the version check and can only be stopped
+  // by the `promptOpen` guard. The prompt is held open by a promise that does
+  // not resolve until the case releases it — a stand-in for a modal the user
+  // has not answered yet.
+  {
+    const mod = await import('electron-updater');
+    const ns = ((mod as unknown as { default?: unknown }).default ?? mod) as typeof import('electron-updater');
+    const au = ns.autoUpdater as unknown as import('node:events').EventEmitter;
+    const base = au.listenerCount('update-downloaded');
+
+    let release: (() => void) | undefined;
+    const prompts: string[] = [];
+    const u = createUpdater({
+      log: () => {},
+      probe: { isPackaged: true, platform: 'linux' },
+      showRestartPrompt: async (v: string) => {
+        prompts.push(v);
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return 1;
+      },
+    });
+
+    void u.checkNow();
+    await delay(200);
+
+    au.emit('update-downloaded', { version: '8.0.0' }); // opens the dialog
+    au.emit('update-downloaded', { version: '8.0.1' }); // arrives while it is open
+    await delay(50);
+    record('an event arriving while the dialog is open is dropped', '1', String(prompts.length));
+    record('and the one dialog shown is the first', '8.0.0', String(prompts[0]));
+
+    release?.();
+    await delay(50);
+    u.dispose();
+    record(
+      'dispose detaches after a pending prompt too',
+      '0',
+      String(au.listenerCount('update-downloaded') - base),
+    );
   }
 
   updater.dispose();

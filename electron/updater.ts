@@ -172,6 +172,15 @@ export type UpdaterDeps = {
   initialDelayMs?: number;
   /** Test seam — see detectUpdateSupport. */
   probe?: Partial<SupportProbe>;
+  /**
+   * Test seam — the "Update ready" dialog. Resolves to the index of the button
+   * the user pressed, matching `dialog.showMessageBox`'s `response`: 0 is
+   * "Restart now", 1 is "Later". Production leaves this unset and gets the real
+   * dialog. It exists because the one behaviour worth regression-testing here —
+   * that the prompt appears ONCE per version — is otherwise only observable as
+   * a modal window, which no harness can see.
+   */
+  showRestartPrompt?: (version: string) => Promise<number>;
 };
 
 export type Updater = {
@@ -213,6 +222,29 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
   let supportPromise: Promise<SupportVerdict> | undefined;
   let settle: ((s: UpdateStatus) => void) | undefined;
 
+  // -- why the prompt needs its own memory ----------------------------------
+  //
+  // `update-downloaded` IS NOT A ONE-SHOT EVENT. Once the update file sits in
+  // the cache, electron-updater re-fires it on EVERY subsequent check without
+  // re-downloading anything: AppUpdater's download path finds a valid cached
+  // file and calls `done(false)`, which BaseUpdater turns straight into
+  // `dispatchUpdateDownloaded`. With a check every 6h, an app left running for
+  // a week produced ~24 stacked dialogs. On macOS they were sheets attached to
+  // the parent window, so they queued invisibly rather than tiling — the same
+  // bug, merely better hidden. It is not a platform quirk.
+  //
+  // The key is the VERSION, deliberately, and it is NOT persisted to disk:
+  //   - version-keyed means "Later" needs no separate record. The user is not
+  //     re-nagged for a version they already dismissed, and a genuinely NEW
+  //     version still gets its one announcement.
+  //   - in-memory means a restart re-announces once, which is correct. Making
+  //     it durable would trade this bug for a worse one: press "Later" and the
+  //     app never mentions the waiting update again.
+  let promptedVersion: string | undefined;
+  // Covers what the version key cannot: two `update-downloaded` events landing
+  // before the first dialog has been answered.
+  let promptOpen = false;
+
   function emit(next: Partial<UpdateStatus>): void {
     status = { ...status, ...next };
     for (const fn of listeners) {
@@ -246,10 +278,31 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
   // touches `app` and reads app-update.yml) in every process that imports this
   // file, including the spike entry that must never do either. Loading it at
   // the first check keeps the unsupported path completely inert.
+  //
+  // THE CACHE IS THE PROMISE, NOT THE RESOLVED VALUE. An `if (autoUpdater)
+  // return` guard sitting in front of an `await import(...)` is not a guard at
+  // all: two callers that arrive before the import settles both sail past it
+  // and both register a full set of listeners on `ns.autoUpdater`, which is a
+  // PROCESS SINGLETON. That is not hypothetical — the boot timer's first check
+  // and a user clicking "Check for updates" overlap easily. Two listener sets
+  // mean two `emit`s and two prompts per event. Caching the in-flight promise
+  // makes concurrent callers share one load.
   let autoUpdater: import('electron-updater').AppUpdater | undefined;
+  let autoUpdaterPromise: Promise<import('electron-updater').AppUpdater> | undefined;
+  /** Detaches exactly the handlers we attached. See `dispose`. */
+  let detachListeners: (() => void) | undefined;
 
-  async function loadAutoUpdater(): Promise<import('electron-updater').AppUpdater> {
-    if (autoUpdater) return autoUpdater;
+  function loadAutoUpdater(): Promise<import('electron-updater').AppUpdater> {
+    // A FAILED load must not poison the cache, or one transient import error
+    // would disable updates for the rest of the process's life.
+    autoUpdaterPromise ??= initAutoUpdater().catch((err: unknown) => {
+      autoUpdaterPromise = undefined;
+      throw err;
+    });
+    return autoUpdaterPromise;
+  }
+
+  async function initAutoUpdater(): Promise<import('electron-updater').AppUpdater> {
     const mod = await import('electron-updater');
     // electron-updater ships CJS; the default export is the namespace under
     // some bundler/interop combinations. Normalise rather than assume.
@@ -268,23 +321,40 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
       debug: () => {},
     };
 
-    updater.on('checking-for-update', () => emit({ state: 'checking', error: undefined }));
-    updater.on('update-available', (info: { version: string }) =>
-      emit({ state: 'available', version: info.version }),
-    );
-    updater.on('update-not-available', () => emit({ state: 'idle', version: undefined }));
-    updater.on('download-progress', (p: { percent: number }) =>
-      emit({ state: 'downloading', percent: Math.round(p.percent) }),
-    );
-    updater.on('update-downloaded', (info: { version: string }) => {
-      emit({ state: 'ready', version: info.version, percent: 100 });
-      void promptToRestart(info.version);
-    });
-    updater.on('error', (err: Error) => {
-      // An error must NOT leave the UI stuck on "checking" forever.
-      log(`[updater] check failed: ${err.message}`);
-      emit({ state: 'idle', error: err.message });
-    });
+    // Held in a table so `dispose` can take back exactly what it gave. Anonymous
+    // inline handlers could only be removed with `removeAllListeners`, which on
+    // a process singleton would also rip out electron-updater's own internals.
+    const handlers: Record<string, (...args: never[]) => void> = {
+      'checking-for-update': () => emit({ state: 'checking', error: undefined }),
+      'update-available': (info: { version: string }) =>
+        emit({ state: 'available', version: info.version }),
+      'update-not-available': () => emit({ state: 'idle', version: undefined }),
+      'download-progress': (p: { percent: number }) =>
+        emit({ state: 'downloading', percent: Math.round(p.percent) }),
+      // THE STATUS PUSH IS UNCONDITIONAL AND MUST STAY THAT WAY. The settings
+      // panel's "ready to install" row is driven by it, and this event re-fires
+      // on every check once the file is cached. Suppressing the repeat would
+      // blank a correct panel. Only the DIALOG is rate-limited, one per version.
+      'update-downloaded': (info: { version: string }) => {
+        emit({ state: 'ready', version: info.version, percent: 100 });
+        if (promptedVersion === info.version) return;
+        void promptToRestart(info.version);
+      },
+      error: (err: Error) => {
+        // An error must NOT leave the UI stuck on "checking" forever.
+        log(`[updater] check failed: ${err.message}`);
+        emit({ state: 'idle', error: err.message });
+      },
+    };
+
+    for (const [event, handler] of Object.entries(handlers)) {
+      updater.on(event as Parameters<typeof updater.on>[0], handler as () => void);
+    }
+    detachListeners = () => {
+      for (const [event, handler] of Object.entries(handlers)) {
+        updater.removeListener(event as Parameters<typeof updater.on>[0], handler as () => void);
+      }
+    };
 
     autoUpdater = updater;
     return updater;
@@ -298,7 +368,27 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
    * already on disk and `autoInstallOnAppQuit` applies it the next time the app
    * closes, so choosing "Later" genuinely costs the user nothing.
    */
+  const showRestartPrompt = deps.showRestartPrompt ?? defaultRestartPrompt;
+
   async function promptToRestart(version: string): Promise<void> {
+    // Two independent reasons to say nothing, both of which end with the user
+    // NOT looking at a second copy of the same dialog.
+    if (promptOpen || promptedVersion === version) return;
+    promptOpen = true;
+    // Marked as announced only once we have actually committed to showing it,
+    // so a version dropped by the re-entrancy guard is still announced later.
+    promptedVersion = version;
+    try {
+      const response = await showRestartPrompt(version);
+      if (response === 0) installNow();
+    } catch (err) {
+      log(`[updater] restart prompt failed: ${String(err)}`);
+    } finally {
+      promptOpen = false;
+    }
+  }
+
+  async function defaultRestartPrompt(version: string): Promise<number> {
     const win = BrowserWindow.getAllWindows()[0];
     const opts = {
       type: 'info' as const,
@@ -313,7 +403,7 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
     const { response } = win
       ? await dialog.showMessageBox(win, opts)
       : await dialog.showMessageBox(opts);
-    if (response === 0) installNow();
+    return response;
   }
 
   async function runCheck(): Promise<void> {
@@ -384,6 +474,14 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
       if (timer) clearInterval(timer);
       timer = undefined;
       listeners.clear();
+      // `ns.autoUpdater` is a PROCESS SINGLETON that outlives this closure. A
+      // disposed updater that leaves its handlers attached keeps emitting into
+      // a dead `listeners` set and keeps its own prompt bookkeeping alive, so a
+      // later instance sees phantom duplicates. Give back what we took.
+      detachListeners?.();
+      detachListeners = undefined;
+      autoUpdaterPromise = undefined;
+      autoUpdater = undefined;
     },
   };
 }
