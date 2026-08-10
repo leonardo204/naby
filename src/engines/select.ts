@@ -200,7 +200,11 @@ export async function selectEngine(
       return {
         ok: false,
         code: 'DEV_ENGINE_UNAVAILABLE',
-        message: `${ENGINE_ENV_VAR}=dev-claude was set, but ${AGENT_SDK_UNAVAILABLE_MESSAGE}`,
+        // Two sentences, not one clause: the shared message is a standalone
+        // explanation (it opens with a capital and carries its own remedy), so
+        // splicing it after "but" produced a sentence with a capital in the
+        // middle and no remedy the reader could see coming.
+        message: `${ENGINE_ENV_VAR}=dev-claude was set. ${AGENT_SDK_UNAVAILABLE_MESSAGE}`,
       };
     }
     return devSelection(`${ENGINE_ENV_VAR}=dev-claude`);

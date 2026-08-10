@@ -27,9 +27,11 @@
 // We must NOT run whatever `claude` is first on PATH: in dev a cmux shim shadows
 // the real binary and hangs; in a packaged app PATH may be minimal. So we
 // resolve a REAL binary explicitly (see `resolveClaudeBinary`): an override env
-// var, then a known location (`~/.local/bin/claude`), then a PATH search that
-// SKIPS any directory belonging to a cmux shim. If none is found we surface a
-// clear "claude CLI not found" state rather than hang.
+// var, then a known location (`~/.local/bin/claude`, and on Windows the same
+// directory with a PATHEXT extension), then a PATH search that SKIPS any
+// directory belonging to a cmux shim. If none is found we surface a clear
+// "claude CLI not found" state — WITH INSTALL INSTRUCTIONS (`claudeInstallHelp`)
+// rather than a bare "install it" — instead of hanging.
 //
 // WHAT IT DELIBERATELY DOES NOT DO
 // --------------------------------
@@ -109,6 +111,163 @@ export type ClaudeLoginState = {
 export const CLAUDE_LOGIN_COMMAND = 'claude auth login';
 
 // ---------------------------------------------------------------------------
+// Installing the CLI — the official instructions, in a shape the UI can render
+// ---------------------------------------------------------------------------
+//
+// "Install it, then run the command below" was the whole of the old advice, and
+// it is advice only for someone who already knows where "it" comes from. The
+// user this text exists for does not: they clicked "Log in", nothing happened,
+// and the app told them to install something it would not name.
+//
+// So the missing-CLI answer is STRUCTURED rather than one sentence: a docs link,
+// the recommended command FOR THIS MACHINE, and the alternatives. The UI turns
+// that into a link plus copy buttons (a command shown as prose is a command that
+// gets mis-typed), and `claudeInstallHelp` stays a PURE function of the platform
+// so the choice is testable without a Windows machine.
+//
+// Everything below is verbatim from https://code.claude.com/docs/en/setup. It is
+// not paraphrased and must not be: an install command that is nearly right is
+// worse than none.
+
+/** The official setup page. Rendered as a `target="_blank"` anchor, which
+ *  electron/boot.ts opens in the OS browser rather than inside the app. */
+export const CLAUDE_INSTALL_DOCS_URL = 'https://code.claude.com/docs/en/setup';
+
+/** Which install route a command is. A STABLE ID, not a label: the UI names it
+ *  in the user's own language (i18n), so no English leaks out of the runtime. */
+export type ClaudeInstallCommandId =
+  | 'windows-powershell'
+  | 'windows-cmd'
+  | 'windows-winget'
+  | 'unix-native'
+  | 'macos-homebrew'
+  | 'npm';
+
+export type ClaudeInstallCommand = {
+  id: ClaudeInstallCommandId;
+  /** The exact command, copy-paste ready: no prompt character, no placeholder,
+   *  nothing for the user to edit before it runs. */
+  command: string;
+};
+
+/** A fact the reader needs BEFORE running any of the commands. Ids, for the same
+ *  reason as `ClaudeInstallCommandId`.
+ *   * `no-admin-required` — the native installer needs no administrator rights,
+ *     which is the first thing a locked-down work machine's owner asks.
+ *   * `paid-plan-required` — Claude Code needs Pro/Max/Team/Enterprise or a
+ *     Console account. Learning that AFTER installing is a wasted evening. */
+export type ClaudeInstallNote = 'no-admin-required' | 'paid-plan-required';
+
+export type ClaudeInstallHelp = {
+  /** The platform family the advice was computed for. Reported so a UI (or a
+   *  test) can say WHICH machine these commands are for. */
+  platform: 'windows' | 'macos' | 'linux';
+  docsUrl: string;
+  /** The one command to try first on this platform — the native installer. */
+  recommended: ClaudeInstallCommand;
+  /** The other supported routes, best first. Never empty: npm is always here,
+   *  because it is the route that works when the native one is blocked. */
+  alternatives: ClaudeInstallCommand[];
+  notes: ClaudeInstallNote[];
+};
+
+/** Node 22+; the route that works everywhere, so it is every platform's last
+ *  alternative rather than a platform-specific one. */
+const NPM_INSTALL: ClaudeInstallCommand = {
+  id: 'npm',
+  command: 'npm install -g @anthropic-ai/claude-code',
+};
+
+/** Both facts apply on every platform, so the note list does not vary; it is a
+ *  field rather than a constant so a future platform-specific caveat has an
+ *  obvious home. */
+const INSTALL_NOTES: ClaudeInstallNote[] = ['no-admin-required', 'paid-plan-required'];
+
+/**
+ * How to install Claude Code on `platform` — pure, total, and offline.
+ *
+ * A pure function of one argument because that is what makes it checkable: the
+ * spike asserts the Windows answer on a Mac, which is exactly the case that
+ * cannot be exercised by running the app.
+ */
+export function claudeInstallHelp(
+  platform: NodeJS.Platform = process.platform,
+): ClaudeInstallHelp {
+  if (platform === 'win32') {
+    return {
+      platform: 'windows',
+      docsUrl: CLAUDE_INSTALL_DOCS_URL,
+      recommended: {
+        id: 'windows-powershell',
+        command: 'irm https://claude.ai/install.ps1 | iex',
+      },
+      alternatives: [
+        {
+          id: 'windows-cmd',
+          command:
+            'curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd',
+        },
+        { id: 'windows-winget', command: 'winget install Anthropic.ClaudeCode' },
+        NPM_INSTALL,
+      ],
+      notes: INSTALL_NOTES,
+    };
+  }
+
+  const unixNative: ClaudeInstallCommand = {
+    id: 'unix-native',
+    command: 'curl -fsSL https://claude.ai/install.sh | bash',
+  };
+
+  if (platform === 'darwin') {
+    return {
+      platform: 'macos',
+      docsUrl: CLAUDE_INSTALL_DOCS_URL,
+      recommended: unixNative,
+      alternatives: [
+        { id: 'macos-homebrew', command: 'brew install --cask claude-code' },
+        NPM_INSTALL,
+      ],
+      notes: INSTALL_NOTES,
+    };
+  }
+
+  // Everything else takes the Linux advice: the native installer plus npm.
+  // Homebrew is deliberately NOT offered here — the docs list it for macOS.
+  return {
+    platform: 'linux',
+    docsUrl: CLAUDE_INSTALL_DOCS_URL,
+    recommended: unixNative,
+    alternatives: [NPM_INSTALL],
+    notes: INSTALL_NOTES,
+  };
+}
+
+/** What a user is told when no `claude` executable can be found anywhere.
+ *
+ *  It names the thing, says it needs installing, warns about the plan (the one
+ *  fact that turns a successful install into a dead end), and points at the
+ *  page. The STRUCTURED `claudeInstallHelp` above carries the same instructions
+ *  for a UI that can draw a link and a copy button; this string is for the
+ *  places that can only carry a sentence. */
+/** The first sentence on its own, for somewhere with no room for the rest.
+ *
+ *  THE CHAT CHIP IS WHY THIS EXISTS. It renders a sign-in failure in a small
+ *  amber span inside a popover; four sentences there is a wall of text, and the
+ *  reader is one click from a settings card that shows the commands anyway. The
+ *  full message stays for the places that DO have room (and for a caller that
+ *  has only a string), so this is a prefix of it, not a second wording — the
+ *  composition below is what keeps them from drifting apart. */
+export const CLAUDE_CLI_MISSING_HEADLINE =
+  'Claude Code is not installed on this computer, so there is no sign-in to use.';
+
+export const CLAUDE_CLI_MISSING_MESSAGE =
+  `${CLAUDE_CLI_MISSING_HEADLINE} ` +
+  'Install it with the command for your system (the native installer needs no administrator rights), ' +
+  'then sign in. Claude Code requires a Pro, Max, Team or Enterprise plan, or a Console account — ' +
+  `the free plan does not include it. Setup guide: ${CLAUDE_INSTALL_DOCS_URL}`;
+
+// ---------------------------------------------------------------------------
 // Resolving a REAL `claude` binary (never the cmux shim)
 // ---------------------------------------------------------------------------
 
@@ -131,35 +290,82 @@ function isClaudeExecutable(path: string): boolean {
 }
 
 /**
+ * The file names a `claude` executable can have HERE.
+ *
+ * On POSIX there is exactly one: the mode bits carry executability, so the file
+ * is called `claude`. On Windows executability lives in the EXTENSION, and the
+ * set of extensions that count is `PATHEXT` — the native installer writes
+ * `claude.exe`, an npm global writes `claude.cmd`.
+ *
+ * ONE FUNCTION BECAUSE THERE ARE TWO PROBES. `resolveClaudeBinary` looks in the
+ * known install location AND along PATH, and the extension list was applied to
+ * only the second one. So on Windows the known-location probe stat'd
+ * `%USERPROFILE%\.local\bin\claude` — a name that never exists there, the
+ * installer having written `claude.exe` — and always missed. PATH was then the
+ * only thing left, and PATH is exactly what a JUST-INSTALLED CLI is missing from
+ * in an already-running Electron process: the installer edits the registry, and
+ * this process inherited its environment at launch. Install, restart nothing,
+ * and the app still says the CLI is not there.
+ */
+export function claudeExecutableNames(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform !== 'win32') return ['claude'];
+  return (env.PATHEXT || '.EXE;.CMD;.BAT')
+    .split(';')
+    .map((ext) => ext.trim())
+    // An empty PATHEXT entry (a trailing ';' is common) would otherwise become
+    // the bare name — which on Windows is not executable, so it is dropped.
+    .filter((ext) => ext.length > 0)
+    .map((ext) => `claude${ext.toLowerCase()}`);
+}
+
+/**
  * The absolute path of a REAL `claude` binary, or `null` when none is found.
  *
  * Order, most-authoritative first:
  *   1. `NABY_CLAUDE_BIN` — an explicit override. Used by the spikes (to point at
  *      a fake `claude`) and by a power user whose install we do not model.
- *   2. `~/.local/bin/claude` — the known location the CLI installs to. Preferred
- *      over PATH because PATH is exactly where the cmux shim shadows it.
+ *   2. `~/.local/bin/claude` — the known location the CLI installs to (on
+ *      Windows, `%USERPROFILE%\.local\bin\claude.exe`). Preferred over PATH
+ *      because PATH is where the cmux shim shadows it, and because a freshly
+ *      installed CLI is not on THIS process's PATH at all.
  *   3. A PATH search that SKIPS shim directories. First non-shim hit wins.
+ *
+ * `platform` is a parameter rather than a read of `process.platform` so the
+ * Windows layout is assertable from a spike on any machine — the bug above was
+ * invisible precisely because it could not be exercised where it was written.
  *
  * Never spawns anything — resolution is a handful of `stat` calls, cheap enough
  * to run on the resolve path of every status check.
  */
-export function resolveClaudeBinary(env: NodeJS.ProcessEnv = process.env): string | null {
+export function resolveClaudeBinary(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   const override = env.NABY_CLAUDE_BIN?.trim();
   if (override) return isClaudeExecutable(override) ? override : null;
 
+  const names = claudeExecutableNames(env, platform);
+
   // `env.HOME` is honoured (not just `homedir()`) so a test can redirect the
-  // known-location probe at a temp home and force the PATH search.
-  const home = env.HOME?.trim() || homedir();
-  const explicit = join(home, '.local', 'bin', 'claude');
-  if (isClaudeExecutable(explicit)) return explicit;
+  // known-location probe at a temp home and force the PATH search. On Windows
+  // `HOME` is usually unset, so `USERPROFILE` — the variable the setup docs
+  // themselves use for this path — is consulted before falling back.
+  const home =
+    env.HOME?.trim() ||
+    (platform === 'win32' ? env.USERPROFILE?.trim() : undefined) ||
+    homedir();
+  const knownDir = join(home, '.local', 'bin');
+  for (const name of names) {
+    const explicit = join(knownDir, name);
+    if (isClaudeExecutable(explicit)) return explicit;
+  }
 
   const pathVar = env.PATH || '';
   if (!pathVar) return null;
-  const sep = process.platform === 'win32' ? ';' : ':';
-  const names =
-    process.platform === 'win32'
-      ? (env.PATHEXT || '.EXE;.CMD;.BAT').split(';').map((ext) => `claude${ext.toLowerCase()}`)
-      : ['claude'];
+  const sep = platform === 'win32' ? ';' : ':';
   for (const dir of pathVar.split(sep)) {
     if (!dir || pathDirIsShim(dir)) continue;
     for (const name of names) {
@@ -369,7 +575,7 @@ export function checkClaudeLogin(opts: CheckClaudeLoginOptions = {}): ClaudeLogi
         : 'Not signed in to Claude, and no `claude` command was found on this computer.',
       remedy: cliFound
         ? `Run \`${CLAUDE_LOGIN_COMMAND}\`, then re-check.`
-        : `Install the Claude Code CLI, then run \`${CLAUDE_LOGIN_COMMAND}\`.`,
+        : `${CLAUDE_CLI_MISSING_MESSAGE} Then run \`${CLAUDE_LOGIN_COMMAND}\`.`,
       cliFound,
       checkedAt,
       account: null,
@@ -550,8 +756,13 @@ export type ClaudeLoginResult =
    *  (force) until `loggedIn` flips — this call does NOT wait for the user. */
   | { ok: true; started: true; command: string }
   /** Could not launch (no CLI, or spawn failed). `command` is the copy-paste
-   *  fallback the UI shows for a headless machine. */
-  | { ok: false; error: string; command: string };
+   *  fallback the UI shows for a headless machine.
+   *
+   *  `installHelp` is present ONLY for the "there is no CLI here" failure, and
+   *  its presence is the signal: a spawn that failed for some other reason is
+   *  not fixed by installing anything, so offering install instructions there
+   *  would be a wrong answer stated confidently. */
+  | { ok: false; error: string; command: string; installHelp?: ClaudeInstallHelp };
 
 /**
  * Start `claude auth login` so a browser opens for the user to authorise.
@@ -579,10 +790,14 @@ export function claudeLogin(opts: ClaudeLoginOptions = {}): ClaudeLoginResult {
 
   const bin = resolveClaudeBinary(env);
   if (!bin) {
+    // WHERE and HOW, not just "install it": the sentence for a caller that can
+    // only render text, plus the structured form for one that can draw a link
+    // and a copy button (see `claudeInstallHelp`).
     return {
       ok: false,
-      error: 'The `claude` CLI was not found on this computer. Install it, then run the command below.',
+      error: CLAUDE_CLI_MISSING_MESSAGE,
       command,
+      installHelp: claudeInstallHelp(),
     };
   }
 
@@ -662,18 +877,37 @@ export async function claudeLogout(env: NodeJS.ProcessEnv = process.env): Promis
 // The shape the UI needs
 // ---------------------------------------------------------------------------
 
+/** What the UI reads: the status, whether the dev engine exists in this build,
+ *  and — ONLY when no CLI was found — how to install one. */
+export type ClaudeLoginDescription = ClaudeLoginState & {
+  relevant: boolean;
+  /** Install instructions for THIS machine, or `null` when a `claude` binary was
+   *  found (nothing to install). Computed here, in the one place that already
+   *  knows `cliFound`, so no UI has to re-derive "should I be offering this". */
+  installHelp: ClaudeInstallHelp | null;
+};
+
+/** Attach install instructions when, and only when, the CLI is missing. */
+function describe(state: ClaudeLoginState): ClaudeLoginDescription {
+  return {
+    ...state,
+    relevant: agentSdkResolvable(),
+    installHelp: state.cliFound ? null : claudeInstallHelp(),
+  };
+}
+
 /**
- * The authoritative status PLUS whether the dev engine is part of this build. A
- * packaged app has no Agent SDK, so a sign-in indicator there would describe a
- * capability the app does not have — the UI uses `relevant` to hide itself.
+ * The authoritative status PLUS whether the dev engine is part of this build.
+ * `relevant` is false when the Agent SDK does not resolve here, and the UI hides
+ * itself rather than showing a sign-in for a capability that cannot run.
  *
  * Async because it runs `claude auth status` (cached). Prefer this over the
  * synchronous `describeClaudeLogin`, which reads only the credential file.
  */
 export async function describeClaudeLoginAsync(
   opts: CheckClaudeLoginOptions & { force?: boolean } = {},
-): Promise<ClaudeLoginState & { relevant: boolean }> {
-  return { ...(await getClaudeAuthState(opts)), relevant: agentSdkResolvable() };
+): Promise<ClaudeLoginDescription> {
+  return describe(await getClaudeAuthState(opts));
 }
 
 /**
@@ -682,6 +916,6 @@ export async function describeClaudeLoginAsync(
  */
 export function describeClaudeLogin(
   opts: CheckClaudeLoginOptions & { force?: boolean } = {},
-): ClaudeLoginState & { relevant: boolean } {
-  return { ...getClaudeLoginState(opts), relevant: agentSdkResolvable() };
+): ClaudeLoginDescription {
+  return describe(getClaudeLoginState(opts));
 }

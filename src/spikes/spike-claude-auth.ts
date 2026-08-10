@@ -15,6 +15,16 @@
 //      lacks — into `account.email`.
 //   3. LOGOUT invokes the CLI (`claude auth logout`), not a file delete.
 //   4. SIGNED-OUT is mapped from `loggedIn:false`.
+//   5. WINDOWS RESOLUTION finds `%USERPROFILE%\.local\bin\claude.exe`. The known
+//      location was probed WITHOUT an extension, which is a name that never
+//      exists on Windows, so that probe always missed and PATH was the only
+//      thing left — and PATH in an already-running Electron process does not
+//      contain what was installed five minutes ago. A Windows user could install
+//      the CLI correctly and still be told it was not there. `platform` is a
+//      parameter of `resolveClaudeBinary` so this is provable from a Mac.
+//   6. INSTALL HELP is a pure function of the platform, and says what the
+//      official setup page says — so the settings UI can offer the right
+//      command with a copy button instead of "install it, then run…".
 //
 // It uses a FAKE `claude` executable that prints the known JSON for `auth status`
 // and records `auth logout` — so no real `claude auth login/logout` ever runs
@@ -27,8 +37,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   checkClaudeAuthStatus,
+  claudeExecutableNames,
+  claudeInstallHelp,
+  claudeLogin,
   claudeLogout,
   resolveClaudeBinary,
+  CLAUDE_INSTALL_DOCS_URL,
 } from '../engines/claude-login.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
@@ -70,10 +84,11 @@ function writeFakeClaude(dir: string, opts: { loggedIn: boolean; marker: string 
 }
 
 /** A bare `claude` file (not a working script) — enough for stat-based
- *  resolution to consider it, used to prove a shim dir is SKIPPED. */
-function writeStubClaude(dir: string): string {
+ *  resolution to consider it, used to prove a shim dir is SKIPPED and to lay out
+ *  a fake Windows install (`name` = 'claude.exe') on a machine that is not one. */
+function writeStubClaude(dir: string, name = 'claude'): string {
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, 'claude');
+  const path = join(dir, name);
   writeFileSync(path, '#!/bin/sh\nexit 0\n');
   chmodSync(path, 0o755);
   return path;
@@ -153,6 +168,136 @@ async function main(): Promise<void> {
       name: 'resolveClaudeBinary returns null when the override points nowhere',
       pass: noBin === null,
       evidence: `resolved=${noBin}`,
+    });
+
+    // ---- 6. WINDOWS: the known location is probed WITH an extension -------
+    // REGRESSION. The native Windows installer writes
+    // `%USERPROFILE%\.local\bin\claude.exe`; the known-location probe stat'd the
+    // extensionless name only, so it never matched and the app fell back to
+    // PATH — which an already-running Electron process inherited BEFORE the
+    // install. PATH is empty here precisely to prove the known location alone
+    // now answers.
+    const winHome = join(root, 'win-home');
+    const winExe = writeStubClaude(join(winHome, '.local', 'bin'), 'claude.exe');
+    const winFromHome = resolveClaudeBinary({ HOME: winHome, PATH: '' }, 'win32');
+    checks.push({
+      name: 'win32: ~/.local/bin/claude.exe is found with no PATH at all',
+      pass: winFromHome === winExe,
+      evidence: `resolved=${winFromHome} expected=${winExe}`,
+    });
+
+    // The variable the setup docs name for that path is USERPROFILE, and Windows
+    // usually has no HOME at all.
+    const winFromUserProfile = resolveClaudeBinary({ USERPROFILE: winHome, PATH: '' }, 'win32');
+    checks.push({
+      name: 'win32: %USERPROFILE% is honoured when HOME is unset',
+      pass: winFromUserProfile === winExe,
+      evidence: `resolved=${winFromUserProfile} expected=${winExe}`,
+    });
+
+    // The extension list is PATHEXT's, applied to the known location as well as
+    // to PATH — an extensionless file in that directory is not executable on
+    // Windows and must not be picked.
+    const winBareHome = join(root, 'win-home-bare');
+    writeStubClaude(join(winBareHome, '.local', 'bin'), 'claude');
+    const winBare = resolveClaudeBinary({ HOME: winBareHome, PATH: '' }, 'win32');
+    checks.push({
+      name: 'win32: an extensionless ~/.local/bin/claude is NOT accepted',
+      pass: winBare === null,
+      evidence: `resolved=${winBare}`,
+    });
+
+    // A `.cmd` install (npm global on Windows) is found because PATHEXT lists it.
+    const winCmdHome = join(root, 'win-home-cmd');
+    const winCmd = writeStubClaude(join(winCmdHome, '.local', 'bin'), 'claude.cmd');
+    const winCmdResolved = resolveClaudeBinary(
+      { HOME: winCmdHome, PATH: '', PATHEXT: '.COM;.EXE;.BAT;.CMD' },
+      'win32',
+    );
+    checks.push({
+      name: 'win32: PATHEXT drives the names tried (claude.cmd resolves)',
+      pass: winCmdResolved === winCmd,
+      evidence: `resolved=${winCmdResolved} expected=${winCmd}`,
+    });
+
+    // ---- 7. NON-WIN32 IS UNCHANGED --------------------------------------
+    // The same probe on a POSIX platform: the bare name, and only the bare name.
+    const posixHome = join(root, 'posix-home');
+    const posixBin = writeStubClaude(join(posixHome, '.local', 'bin'), 'claude');
+    const posixResolved = resolveClaudeBinary({ HOME: posixHome, PATH: '' }, 'linux');
+    const posixNames = claudeExecutableNames({ PATHEXT: '.EXE;.CMD' }, 'darwin');
+    checks.push({
+      name: 'non-win32: ~/.local/bin/claude still resolves, and only that name is tried',
+      pass:
+        posixResolved === posixBin &&
+        posixNames.length === 1 &&
+        posixNames[0] === 'claude' &&
+        // The default (no platform argument) is this machine, as before.
+        resolveClaudeBinary({ HOME: posixHome, PATH: '' }) === posixBin,
+      evidence: `resolved=${posixResolved} expected=${posixBin} names=${JSON.stringify(posixNames)}`,
+    });
+
+    // An empty PATHEXT entry (a trailing ';' is common on Windows) must not
+    // become the bare, unexecutable name.
+    const extNames = claudeExecutableNames({ PATHEXT: '.EXE;.CMD;' }, 'win32');
+    checks.push({
+      name: 'win32: empty PATHEXT entries are dropped rather than becoming `claude`',
+      pass: JSON.stringify(extNames) === JSON.stringify(['claude.exe', 'claude.cmd']),
+      evidence: `names=${JSON.stringify(extNames)}`,
+    });
+
+    // ---- 8. INSTALL HELP is the official setup page, as data --------------
+    const win = claudeInstallHelp('win32');
+    const mac = claudeInstallHelp('darwin');
+    const linux = claudeInstallHelp('linux');
+    const ids = (h: { alternatives: { id: string }[] }) => h.alternatives.map((a) => a.id);
+    checks.push({
+      name: 'claudeInstallHelp(win32) recommends the native PowerShell installer',
+      pass:
+        win.platform === 'windows' &&
+        win.recommended.id === 'windows-powershell' &&
+        win.recommended.command === 'irm https://claude.ai/install.ps1 | iex' &&
+        JSON.stringify(ids(win)) === JSON.stringify(['windows-cmd', 'windows-winget', 'npm']) &&
+        win.docsUrl === CLAUDE_INSTALL_DOCS_URL,
+      evidence: `recommended=${win.recommended.command} alternatives=${JSON.stringify(ids(win))}`,
+    });
+    checks.push({
+      name: 'claudeInstallHelp(darwin/linux) recommends the native script; brew is macOS-only',
+      pass:
+        mac.platform === 'macos' &&
+        mac.recommended.command === 'curl -fsSL https://claude.ai/install.sh | bash' &&
+        JSON.stringify(ids(mac)) === JSON.stringify(['macos-homebrew', 'npm']) &&
+        linux.platform === 'linux' &&
+        linux.recommended.command === mac.recommended.command &&
+        JSON.stringify(ids(linux)) === JSON.stringify(['npm']),
+      evidence: `mac=${JSON.stringify(ids(mac))} linux=${JSON.stringify(ids(linux))}`,
+    });
+    checks.push({
+      name: 'every platform carries the two caveats: no admin rights, paid plan required',
+      pass: [win, mac, linux].every(
+        (h) =>
+          h.notes.includes('no-admin-required') &&
+          h.notes.includes('paid-plan-required') &&
+          h.alternatives.some((a) => a.command === 'npm install -g @anthropic-ai/claude-code'),
+      ),
+      evidence: `notes=${JSON.stringify(win.notes)}`,
+    });
+
+    // ---- 9. a login attempt with no CLI hands back the install help -------
+    // No browser can open here: resolution fails before anything is spawned.
+    const loginNoCli = claudeLogin({ env: { NABY_CLAUDE_BIN: join(root, 'does-not-exist') } });
+    checks.push({
+      name: 'claudeLogin with no CLI returns structured install help, not just "install it"',
+      pass:
+        loginNoCli.ok === false &&
+        loginNoCli.installHelp?.docsUrl === CLAUDE_INSTALL_DOCS_URL &&
+        (loginNoCli.installHelp?.recommended.command.length ?? 0) > 0 &&
+        loginNoCli.error.includes(CLAUDE_INSTALL_DOCS_URL) &&
+        // The copy-paste sign-in command still comes back for a headless box.
+        loginNoCli.command === 'claude auth login --claudeai',
+      evidence: `error=${JSON.stringify(loginNoCli.ok === false ? loginNoCli.error : '')} help=${JSON.stringify(
+        loginNoCli.ok === false ? loginNoCli.installHelp?.recommended : null,
+      )}`,
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -441,14 +441,28 @@ export function isClaudeAgentSdkAvailable(): boolean {
   return resolveClaudeAgentSdkPath() !== null;
 }
 
-/** What a caller is told when the SDK is missing. Written for a NON-DEVELOPER:
- *  the dev engine is a development-only path, so the actionable advice is to
- *  configure a provider key, not to install an npm package. */
+/**
+ * What a caller is told when the SDK does not resolve.
+ *
+ * IT NO LONGER SAYS "NOT PART OF THIS APP", BECAUSE THAT STOPPED BEING TRUE.
+ * Release builds now SHIP the Agent SDK (electron-builder.yml packs it and
+ * unpacks it from the asar), so the old wording described a design that has been
+ * reversed: what a shipped build gates is the USE of the dev engine, not its
+ * presence. A user who hit this was told to stop trying — the app they had could
+ * never do it — when the real state was "this copy of the app is damaged".
+ *
+ * So it states the failure, not a conclusion about the build, and gives the two
+ * things a NON-DEVELOPER can do: use a provider they have a key for, or
+ * reinstall. The developer's reading of the same event — a checkout with no
+ * dependencies installed — is last and parenthesised, because it is the case
+ * that comes with someone who can diagnose it.
+ */
 export const AGENT_SDK_UNAVAILABLE_MESSAGE =
-  'The built-in development model is not part of this installed app, so it cannot answer. ' +
-  'Open Settings (gear icon, bottom left) → "AI provider", pick a provider and paste its API key. ' +
-  '(Developers: the development model only works when running from a source checkout, ' +
-  'where @anthropic-ai/claude-agent-sdk is installed.)';
+  'The built-in Claude (subscription) model could not be loaded on this computer, so it cannot answer. ' +
+  'Open Settings (gear icon, bottom left) → "AI provider" and pick a provider you have an API key for; ' +
+  'if you would rather use the built-in model, reinstalling Naby restores it. ' +
+  '(Developers: @anthropic-ai/claude-agent-sdk did not resolve — run `npm install` in a source checkout, ' +
+  'or check that the packaged copy under app.asar.unpacked is present.)';
 
 let cachedSdk: Promise<AgentSdk> | undefined;
 

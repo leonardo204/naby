@@ -413,8 +413,22 @@ export {
   getClaudeLoginState,
   resetClaudeLoginCache,
   resolveClaudeBinary,
+  claudeExecutableNames,
+  // WHERE to get the CLI when this computer has none — the official setup
+  // instructions as DATA (link, recommended command, alternatives, caveats), so
+  // the settings UI can draw a link and copy buttons instead of restating a
+  // sentence that only says "install it".
+  claudeInstallHelp,
+  CLAUDE_CLI_MISSING_HEADLINE,
+  CLAUDE_CLI_MISSING_MESSAGE,
+  CLAUDE_INSTALL_DOCS_URL,
   type CheckClaudeLoginOptions,
+  type ClaudeInstallCommand,
+  type ClaudeInstallCommandId,
+  type ClaudeInstallHelp,
+  type ClaudeInstallNote,
   type ClaudeLoginAccount,
+  type ClaudeLoginDescription,
   type ClaudeLoginOptions,
   type ClaudeLoginResult,
   type ClaudeLoginState,
@@ -563,6 +577,20 @@ export {
   type ProviderResolution,
   type ResolvedProvider,
 } from './providers/resolve.js';
+
+// "Which Gemini models may this key use" — the metered counterpart of
+// `probeClaudeModels`. One Google key opens a whole catalogue, so the model is
+// a CHOICE rather than a string the user has to know; this is where that choice
+// is fetched. The key goes in as a parameter and comes back out as nothing:
+// the answer is a list of model ids.
+export {
+  GOOGLE_MODELS_ENDPOINT,
+  GOOGLE_MODELS_PAGE_SIZE,
+  GOOGLE_MODELS_TIMEOUT_MS,
+  listGoogleModels,
+  parseGoogleModelList,
+  type GoogleModelListOptions,
+} from './providers/google-models.js';
 
 // -- the butterfly trust meter (Phase 3, P3-M5) ------------------------------
 // Pure arithmetic: Wilson bound, stage thresholds, ADWIN-style change detection,
