@@ -31,12 +31,12 @@
 // queue and the browser filter too, and three copies of "how old is too old" is
 // three places for the answer to drift.
 //
-// P3-M13b REPLACES THE BOOLEAN TIER WITH THE CONTINUOUS ONE it was standing in
-// for (conversational-learning-hardening §3.2). `retrievability` is still asked
-// of memory-hygiene, still lives strictly BELOW relevance, and still cannot
-// change how much budget is spent — see `rankCandidates` for why moving from a
-// boolean to a real number does not weaken the invariant P3-M10 wrote it for.
-import { retrievability } from './memory-hygiene.js';
+// P3-M13b MADE THIS TIER THE CONTINUOUS CURVE and it had to be reverted: a
+// continuous second tier never ties, so it swallowed the third one whole and
+// scope precedence stopped happening (see `rankCandidates`). The tier stays
+// two-valued. M13b's strength model is NOT lost by that — `isMemoryStale` is
+// the strength-scaled curve, thresholded.
+import { isMemoryStale } from './memory-hygiene.js';
 import type {
   InjectedMemory,
   MemoryInjectionQuery,
@@ -226,7 +226,7 @@ export function memorySimilarity(a: MemoryItem, b: MemoryItem): number {
  *     "confidently wrong from an old fact" failure for the strictly worse "did
  *     not know a fact it has written down" one. This is a BINDING invariant
  *     (§4 rejects multiplying decay into relevance), and it holds STRUCTURALLY
- *     here: the retrievability comparison is only reached when the relevance
+ *     here: the staleness comparison is only reached when the relevance
  *     difference is exactly 0, so no amount of accumulated age can out-argue any
  *     relevance difference at all.
  *   * DECAY SECOND means it decides only what was otherwise ARBITRARY — two
@@ -234,14 +234,26 @@ export function memorySimilarity(a: MemoryItem, b: MemoryItem): number {
  *     memory at once. That is where a month-dead fact was previously winning
  *     budget on nothing but scope order.
  *
- * WHAT CHANGED IN M13b, AND WHAT DID NOT. P3-M10 used a BOOLEAN tier (stale or
- * not) and said so, on the grounds that "a continuous decay curve would let
- * accumulated age out-argue a relevance difference somewhere". That risk was
- * real for a curve MULTIPLIED into the score; it does not exist for a curve
- * confined to a strictly lower comparison tier, which is what this is. The gain
- * is that two memories that are both stale — previously indistinguishable, and
- * therefore ordered by scope alone — are now ordered by how strongly they are
- * still held, which is the whole point of tracking strength.
+ * WHY THIS TIER IS TWO-VALUED, AND MUST STAY THAT WAY. M13b briefly made it the
+ * raw `retrievability` curve, reasoning that a curve confined to a lower tier
+ * cannot out-argue relevance. That much was true — and it missed that a lower
+ * tier can still ANNIHILATE the tier below IT. `retrievability` is a continuous
+ * function of `lastInjectedAt ?? updatedAt`, so two rows a single millisecond
+ * apart differ by ~1e-306 rather than by 0, `decay !== 0` fires, and
+ * `comparePrecedence` becomes unreachable code. Scope precedence is not a
+ * tunable that a later milestone may trade away: phase-1_5-memory-contracts §5
+ * states it as a contract, and only the type order below it is adjustable.
+ *
+ * The failure that reaches the user is worse than the lost ordering. Injection
+ * stamps `lastInjectedAt` and bumps `strength`, which RAISES retrievability —
+ * so an injected row wins the tier again next turn, and again. A handful of
+ * early winners homestead the budget while everything else starves. That is the
+ * exact failure M8c introduced relevance ranking to fix, resurrected with
+ * "recently injected" swapped in for "recently written".
+ *
+ * A THRESHOLD (`Math.abs(decay) > EPS`) is not the fix: phase-3-memory-hygiene
+ * §2.2 rejected precisely that, since the epsilon is a "somewhere" nobody can
+ * verify. Ties have to be common for the tier below to exist at all.
  *
  * `now` is a parameter rather than a `Date.now()` call so the ordering is a pure
  * function of its inputs and a spike can pin it.
@@ -266,15 +278,19 @@ function rankCandidates(
   // identically for the same item every time it is asked — a `Date.now()` read
   // inside the comparison could flip an answer mid-sort and produce an
   // inconsistent ordering, which V8 is entitled to turn into anything at all.
-  const retention = new Map<string, number>();
-  for (const item of items) retention.set(item.id, retrievability(item, now));
+  // DISCRETE ON PURPOSE — see the "WHY THIS TIER IS TWO-VALUED" note above.
+  // `isMemoryStale` is itself the strength-scaled curve thresholded at e^-1, so
+  // a strongly held memory still ages more slowly than a weakly held one; what
+  // is deliberately given up is ordering two stale rows against each other.
+  const stale = new Map<string, boolean>();
+  for (const item of items) stale.set(item.id, isMemoryStale(item, now));
   return [...items].sort((a, b) => {
     const relevance = (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0);
     if (relevance !== 0) return relevance;
-    // DESCENDING: the more retrievable memory first. Two rows with identical
-    // access history and strength give exactly 0 here and fall through, which is
-    // what keeps the Phase-1.5 precedence order deciding everything it used to.
-    const decay = (retention.get(b.id) ?? 0) - (retention.get(a.id) ?? 0);
+    // ASCENDING on staleness: the still-retrievable memory first. Two rows on
+    // the same side of the threshold tie here and fall through, which is what
+    // keeps the Phase-1.5 precedence order deciding everything it used to.
+    const decay = Number(stale.get(a.id) ?? false) - Number(stale.get(b.id) ?? false);
     if (decay !== 0) return decay;
     return comparePrecedence(a, b);
   });
