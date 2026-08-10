@@ -136,16 +136,23 @@ export type SelectEngineOptions = ResolveOptions & {
  *
  * It has to serve two very different readers at once, so it is ordered for the
  * one who cannot fix it by reading code: what is wrong, then the one action that
- * fixes it, then — parenthesised and last — the developer's alternative.
+ * fixes it, then — parenthesised and last — the other route.
+ *
+ * THE PARENTHESIS USED TO SAY "a source checkout also enables the built-in
+ * development model", which was true while release builds excluded the Agent
+ * SDK and is not any more: they bundle it, and the key gate now controls USE
+ * rather than presence. A reader on Windows who took that sentence literally
+ * concluded the subscription was unavailable to them and went looking for a
+ * checkout, when what they were missing was a local Claude Code sign-in.
  */
 export function noEngineMessage(): string {
   return (
     'Naby has no way to answer yet. ' +
     'Open Settings (gear icon, bottom left) → "AI provider", pick your provider, paste its API key and press Save. ' +
     "The key is stored in this computer's secure credential store and is only ever sent to the provider you chose. " +
-    '(Developers: running from a source checkout with @anthropic-ai/claude-agent-sdk installed also enables the ' +
-    'built-in development model, which uses your local Claude sign-in and needs no API key. ' +
-    `Set ${ENGINE_ENV_VAR}=dev-claude to force it.)`
+    '(The Claude subscription option answers with the Claude Code sign-in on this computer instead of a key, ' +
+    'so it needs Claude Code installed and signed in; in an installed build it also stays closed until the ' +
+    `developer-mode key is entered. Set ${ENGINE_ENV_VAR}=dev-claude to force it.)`
   );
 }
 
