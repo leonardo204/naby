@@ -701,7 +701,31 @@ export async function checkClaudeAuthStatus(
  *  `claude auth status` per flick. */
 const CACHE_MS = 10_000;
 
-let cached: ClaudeLoginState | undefined;
+/**
+ * THE CACHE IS KEYED BY CREDENTIAL NAMESPACE, NOT GLOBAL.
+ *
+ * It used to be one slot: `let cached`. With one sign-in that is merely a cache;
+ * with more than one (claude-multi-account §5.2) it is a bug that MIXES ACCOUNTS.
+ * Ask about account A, ask about account B within ten seconds, and B is answered
+ * with A's email, A's organisation and A's plan — the settings list then shows two
+ * rows with one identity, and the chip can name an account the turn is not using.
+ *
+ * `CLAUDE_CONFIG_DIR` is exactly the right key because it is exactly what
+ * partitions the credentials themselves: the Keychain service name carries that
+ * path's hash, and the credential file and identity file live inside it. Same
+ * directory = same sign-in = the answer is reusable. Different directory = a
+ * different account, and nothing about A's answer is evidence about B.
+ *
+ * The empty-string key is the machine default (`~/.claude`) — the one every
+ * single-account install uses, whose behaviour is unchanged.
+ */
+const cached = new Map<string, ClaudeLoginState>();
+
+/** The namespace an environment points at: the config directory, or '' for the
+ *  machine default. */
+function cacheKey(env: NodeJS.ProcessEnv): string {
+  return env.CLAUDE_CONFIG_DIR?.trim() || '';
+}
 
 /**
  * The synchronous, file-only cached entry point. Retained for the electron spike
@@ -711,9 +735,12 @@ export function getClaudeLoginState(
   opts: CheckClaudeLoginOptions & { force?: boolean } = {},
 ): ClaudeLoginState {
   const now = opts.now ?? Date.now();
-  if (!opts.force && cached && now - cached.checkedAt < CACHE_MS) return cached;
-  cached = checkClaudeLogin(opts);
-  return cached;
+  const key = cacheKey(opts.env ?? process.env);
+  const hit = cached.get(key);
+  if (!opts.force && hit && now - hit.checkedAt < CACHE_MS) return hit;
+  const fresh = checkClaudeLogin(opts);
+  cached.set(key, fresh);
+  return fresh;
 }
 
 /**
@@ -726,15 +753,26 @@ export async function getClaudeAuthState(
   opts: CheckClaudeLoginOptions & { force?: boolean } = {},
 ): Promise<ClaudeLoginState> {
   const now = opts.now ?? Date.now();
-  if (!opts.force && cached && now - cached.checkedAt < CACHE_MS) return cached;
-  cached = await checkClaudeAuthStatus(opts);
-  return cached;
+  const key = cacheKey(opts.env ?? process.env);
+  const hit = cached.get(key);
+  if (!opts.force && hit && now - hit.checkedAt < CACHE_MS) return hit;
+  const fresh = await checkClaudeAuthStatus(opts);
+  cached.set(key, fresh);
+  return fresh;
 }
 
-/** Drop the cache. Exported for the spikes, and called after login/logout so the
- *  next check reflects the new reality rather than a 10s-stale answer. */
+/**
+ * Drop the cache — ALL OF IT, deliberately.
+ *
+ * Every caller means "something changed" (a login, a logout, an account added or
+ * removed, an account switch), and none of them is in a position to know which
+ * namespaces that change is evidence about: `claude auth logout` in one directory
+ * can end a session the other directory's answer described. Clearing one entry
+ * would be a guess; clearing everything costs one CLI call per namespace that is
+ * actually asked about again.
+ */
 export function resetClaudeLoginCache(): void {
-  cached = undefined;
+  cached.clear();
 }
 
 // ---------------------------------------------------------------------------

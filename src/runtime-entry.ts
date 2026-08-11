@@ -455,6 +455,11 @@ export {
   // `modelUsage` — exported so the selection is assertable from the shell's
   // test suite without a live SDK run (contextWindow.test.ts).
   reportedContextWindow,
+  // How a `rate_limit_event` becomes the runtime's provider-independent
+  // `rate_limit` event — exported for exactly the same reason as the line above.
+  // A live subscription cannot be driven into `allowed_warning` on demand, so a
+  // captured fixture is the ONLY way this is ever exercised (rateLimit.test.ts).
+  describeRateLimit,
   MODEL_PROBE_TIMEOUT_MS,
   MODEL_PROBE_RETRY_TIMEOUT_MS,
   type ClaudeEngineDiagnostics,
@@ -501,6 +506,43 @@ export {
   type ClaudeLoginStatus,
   type ClaudeLogoutResult,
 } from './engines/claude-login.js';
+
+// MORE THAN ONE CLAUDE SUBSCRIPTION, CHOSEN BY HAND (claude-multi-account §5).
+//
+// The shell gets the OPERATIONS and the LIST, and deliberately nothing that
+// resolves a path: `claudeAccountConfigDir` and friends stay unexported here so
+// the only handle that can cross into the shell — and from there to a renderer —
+// is an opaque account id (§5.6). Every function below takes the id and resolves
+// the directory inside the runtime.
+export {
+  addClaudeAccount,
+  claudeLoginForAccount,
+  claudeLogoutForAccount,
+  describeClaudeAccounts,
+  describeClaudeLoginForAccount,
+  probeClaudeAccountIsolation,
+  removeClaudeAccount,
+  verifyClaudeAccount,
+  type AddClaudeAccountResult,
+  type ClaudeAccountsDescription,
+  type ClaudeAccountView,
+  type ClaudeIsolationProbe,
+  type RemoveClaudeAccountResult,
+  type VerifyClaudeAccountResult,
+} from './engines/claude-accounts.js';
+export {
+  activeClaudeAccountId,
+  claudeAccountsSupported,
+  listClaudeAccounts,
+  readClaudeAccountIsolation,
+  setActiveClaudeAccount,
+  CLAUDE_ACCOUNTS_DIR_NAME,
+  CLAUDE_ACTIVE_ACCOUNT_KEY,
+  isClaudeAccountId,
+  type ClaudeAccountIsolation,
+  type ClaudeAccountMeta,
+  type ClaudeAccountStatus,
+} from './runtime/claude-accounts.js';
 
 // Which engine answers a turn, and the sentence that explains it to a user.
 export {

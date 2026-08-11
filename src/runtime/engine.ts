@@ -263,6 +263,15 @@ export type HarnessTask = {
   observedAt?: number;
 };
 
+/**
+ * How close an account is to a usage limit (specs/claude-multi-account.md §3.4).
+ *
+ * A CLOSED set, unlike the window's name — these three are what the display
+ * BRANCHES on (silence / amber / red), so a fourth value arriving must fail to
+ * compile here rather than fall through to the quiet case and hide a refusal.
+ */
+export type RateLimitStatus = 'allowed' | 'allowed_warning' | 'rejected';
+
 export type EngineEvent =
   | { kind: 'init'; providerId: string; model: string }
   | {
@@ -369,6 +378,93 @@ export type EngineEvent =
        * before, so this field only ever adds an answer.
        */
       contextWindow?: number;
+    }
+  /**
+   * HOW MUCH OF THE SUBSCRIPTION IS LEFT — the backend's own statement about the
+   * account's usage window (specs/claude-multi-account.md §3.3, §4).
+   *
+   * A SIBLING OF `result`, not a field on it, because it does not belong to a
+   * turn. The backend reports it whenever the limit information CHANGES, which
+   * can be mid-turn, more than once, or never — a turn on an API key, Bedrock or
+   * Vertex produces none at all, since there is no subscription to be limited.
+   * Folding it into `result` would have forced a turn boundary onto a fact that
+   * has none, and would have thrown away every reading but the last.
+   *
+   * OBSERVATIONAL, exactly like `harness` — see the contract in that doc below.
+   * It is not persisted, it mints no `RuntimeMessage`, and nothing downstream may
+   * branch on it. In particular the autonomy loop must NOT read it: "stop because
+   * the account is nearly out" is a policy decision, and taking it here would
+   * silently make a run's length depend on backend billing state that the other
+   * engine never reports. The one thing it is for is telling the user.
+   *
+   * DECLARED FLAT, on purpose. The SDK's own type is not re-exported and not
+   * referenced: this seam is what makes a provider swappable (contract §2), and a
+   * type imported from one vendor's package would put that vendor in the
+   * definition of every consumer. Any engine that learns of a usage window can
+   * fill these fields; the ones it cannot answer stay absent.
+   */
+  | {
+      /**
+       * The three states the backend distinguishes. `allowed_warning` is the one
+       * this whole path exists for — it is the only advance notice there is.
+       * Always present: a reading with no status says nothing at all, so an
+       * engine that cannot determine one emits no event rather than a default.
+       */
+      kind: 'rate_limit';
+      status: RateLimitStatus;
+      /**
+       * WHEN THE WINDOW ROLLS OVER — **UNIX time in SECONDS**, not milliseconds.
+       *
+       * THE UNIT IS PART OF THE CONTRACT and is stated here because it is the one
+       * thing about this event that can be wrong without looking wrong: a seconds
+       * value read as milliseconds puts the reset in 1970 (the countdown then
+       * shows nothing at all), and a milliseconds value read as seconds puts it
+       * roughly fifty thousand years out. Neither throws.
+       *
+       * Seconds because that is what the backend sends (an observed reading:
+       * `1786426200` → 2026-08-11T05:30Z) and because a conversion is a second
+       * place for the unit to be lost. Consumers multiply by 1000 to compare
+       * against `Date.now()`.
+       *
+       * Optional: the backend omits it on some readings, and an absent reset is
+       * rendered as no countdown rather than as zero.
+       */
+      resetsAt?: number;
+      /**
+       * WHICH WINDOW is the one currently binding — `five_hour`, `seven_day`,
+       * `seven_day_opus`, … as the backend names it.
+       *
+       * An open string rather than a closed union, deliberately: the set is the
+       * vendor's plan catalog and it grows whenever a plan does. A closed union
+       * would make a new plan fail to compile here — at the seam, in code that
+       * only passes the label through — while the label itself is perfectly
+       * renderable. Consumers must treat it as a label to display, never as a
+       * value to branch on.
+       */
+      limitType?: string;
+      /**
+       * HOW FULL THE WINDOW IS, as the backend reports it — RAW and UNNORMALIZED.
+       *
+       * ⚠️ THE SCALE IS UNVERIFIED. The SDK documents none, and it did not appear
+       * at all in the readings we have observed. Nothing here assumes a fraction
+       * or a percentage; the one place that turns it into a number for a human is
+       * a single normalization function in the shell, and the rule that survives
+       * either answer is `undefined` → draw nothing.
+       */
+      utilization?: number;
+      /** The same three states, for the paid-overage allowance when the account
+       *  has one. Absent on accounts that do not. */
+      overageStatus?: RateLimitStatus;
+      /** Reset for the OVERAGE window. Same unit as `resetsAt` — UNIX SECONDS. */
+      overageResetsAt?: number;
+      /** Why overage is unavailable (`org_level_disabled`, `out_of_credits`, …).
+       *  An open string for the same reason as `limitType`. */
+      overageDisabledReason?: string;
+      /** True while the account is spending overage rather than its included
+       *  allowance — the one field here that changes what the usage COSTS. */
+      isUsingOverage?: boolean;
+      /** The threshold the backend says was just crossed, when it names one. */
+      surpassedThreshold?: number;
     }
   | { kind: 'error'; message: string; code?: string }
   /**

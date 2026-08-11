@@ -67,12 +67,18 @@ import type {
   EngineRunInput,
   HarnessTask,
   JsonSchema,
+  RateLimitStatus,
   RuntimeImage,
   RuntimeMessage,
   SubagentAttribution,
   ToolCall,
   Usage,
 } from '../runtime/engine.js';
+// The account → environment rule (claude-multi-account §5.1). Imported from the
+// PURE half of the account registry, which knows nothing about the CLI or this
+// engine: `engines/claude-accounts.ts` would import `claude-login.ts`, which
+// imports THIS module, and the cycle would run through the engine's own graph.
+import { claudeAccountEnvFor } from '../runtime/claude-accounts.js';
 
 // What may be echoed out of a harness message. Both are the "rule 1" guard in
 // regex form: a LABEL is a short type name we are willing to render, an ID is an
@@ -312,9 +318,40 @@ export function buildQueryOptions(args: {
   preToolUse: HookCallback;
   abortController: AbortController;
   onStderr: (data: string) => void;
+  /**
+   * WHICH CLAUDE SUBSCRIPTION ANSWERS (claude-multi-account §5.1), or undefined
+   * for "the one sign-in this computer has" — the single-account case, which must
+   * behave exactly as it always did.
+   *
+   * An id, never a path: this function asks the runtime to resolve it, so the
+   * directory layout stays inside the runtime (§5.6) and no caller — least of all
+   * the shell — ever holds one.
+   */
+  accountId?: string;
+  /** The environment the account's environment is built FROM. A parameter rather
+   *  than a read of `process.env` so the substitution rule below is assertable
+   *  without mutating the process running the assertion. */
+  env?: NodeJS.ProcessEnv;
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
+  // ABSENT MEANS ABSENT. When no account is chosen (or the id resolves to
+  // nothing — no naby home was named, the id is not one we minted), `env` is not
+  // set at all, and the SDK documents that as "the subprocess inherits
+  // process.env": byte-for-byte the behaviour every existing install has today.
+  // The alternative — passing `{...process.env}` unconditionally — would look
+  // equivalent and would not be: it freezes the environment at THIS moment and
+  // hands the child a copy, which is a different thing to reason about for a
+  // change that is supposed to be invisible when unused.
+  const accountEnv = args.accountId
+    ? claudeAccountEnvFor(args.accountId, args.env ?? process.env)
+    : undefined;
   return {
+    // The account's namespace, spread over the inherited environment.
+    // `claudeAccountEnv` owns the spread because the SDK REPLACES rather than
+    // merges this object (sdk.d.ts) — a bare `{ CLAUDE_CONFIG_DIR }` here would
+    // launch the CLI with no PATH and no HOME, and the failure would read as
+    // "the model could not start" rather than as the environment bug it is.
+    ...(accountEnv ? { env: accountEnv } : {}),
     // NOTE: `tools` is deliberately NOT set. Setting `tools: []` stripped ALL
     // built-in executors, which also killed Task / Skill / delegation — so the
     // harness could never run and its activity could never be shown. Omitting
@@ -1131,6 +1168,111 @@ export function describeHarnessMessage(
   return { subtype: label };
 }
 
+// ---------------------------------------------------------------------------
+// RATE LIMIT — the subscription's remaining allowance (specs/claude-multi-
+// account.md §3.3, §4.3).
+// ---------------------------------------------------------------------------
+//
+// THE STREAM IS THE ONLY STABLE SOURCE. The result message carries no limit
+// information of any kind — no `rate_limits`, no `subscription_type` (confirmed
+// against `SDKResultSuccess` and against a live turn's result keys) — and the
+// one-shot control request that would answer it is named
+// `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`, which is a
+// statement that it has no contract. `rate_limit_event`, by contrast, is a
+// declared member of the `SDKMessage` union, so it simply ARRIVES in the loop
+// below: no extra round trip, no second process, no latency.
+//
+// Until now it fell through to the else branch and became a harness LABEL —
+// `describeHarnessMessage` echoes closed-set fields only, so the numbers were
+// dropped on the floor and the shell's limit display, which is fully built, sat
+// dark for want of anything to render.
+//
+// Pure and exported for the same reason `reportedContextWindow` is: the SDK is
+// absent from a packaged build and a live subscription cannot be driven into
+// `allowed_warning` on demand, so the only way this is ever exercised is against
+// a captured fixture.
+
+/** Read a number only when it really is one. A NaN reset would render as an
+ *  empty countdown and a NaN utilization as `NaN%`; absent is the honest answer
+ *  for both. */
+function finiteNumber(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/** Read one of the three states, or nothing. Anything else — a value the vendor
+ *  adds later — is treated as unknown rather than coerced to `allowed`, which
+ *  would report an account as healthy on the strength of a string we do not
+ *  understand. */
+function rateLimitStatus(v: unknown): RateLimitStatus | undefined {
+  return v === 'allowed' || v === 'allowed_warning' || v === 'rejected' ? v : undefined;
+}
+
+/**
+ * Turn an SDK `rate_limit_event` into the runtime's provider-independent
+ * `rate_limit` event (runtime/engine.ts).
+ *
+ * Returns null when there is nothing worth saying — no `rate_limit_info`, or a
+ * status we cannot place. `status` is the one field the display branches on, so
+ * a reading without one is not a quieter reading, it is no reading.
+ *
+ * `resetsAt` IS PASSED THROUGH UNCHANGED, IN SECONDS. The observed event carries
+ * `1786426200`, which is 2026-08-11T05:30Z read as seconds and the year 1970 read
+ * as milliseconds, so the unit matters and the contract names it. It is not
+ * converted here: the field crosses two more seams before anything compares it to
+ * a clock, and a multiplication at each of them is how a unit gets applied twice.
+ * One statement in the contract, one conversion at the point of use.
+ *
+ * `utilization` is likewise passed through RAW — its scale is undocumented and it
+ * has never been observed arriving at all (§8). Normalizing it here would be
+ * inventing the very number the spec refuses to invent.
+ *
+ * Typed against `unknown` rather than the SDK's `SDKRateLimitEvent` so a fixture
+ * can be handed to it in a test that never loads the SDK, and so an older CLI
+ * that sends fewer fields degrades to absent fields instead of throwing.
+ */
+export function describeRateLimit(msg: unknown): Extract<EngineEvent, { kind: 'rate_limit' }> | null {
+  if (!msg || typeof msg !== 'object') return null;
+  const info = (msg as { rate_limit_info?: unknown }).rate_limit_info;
+  if (!info || typeof info !== 'object') return null;
+  const i = info as Record<string, unknown>;
+
+  const status = rateLimitStatus(i.status);
+  if (!status) return null;
+
+  const resetsAt = finiteNumber(i.resetsAt);
+  const utilization = finiteNumber(i.utilization);
+  const overageStatus = rateLimitStatus(i.overageStatus);
+  const overageResetsAt = finiteNumber(i.overageResetsAt);
+  const surpassedThreshold = finiteNumber(i.surpassedThreshold);
+  // Both are rendered, so both go through the same label guard every other
+  // echoed string in this file uses (rule 1 above): a plan name is a short token
+  // and anything longer is not one.
+  const limitType = typeof i.rateLimitType === 'string' && SAFE_LABEL.test(i.rateLimitType)
+    ? i.rateLimitType
+    : undefined;
+  const overageDisabledReason =
+    typeof i.overageDisabledReason === 'string' && SAFE_LABEL.test(i.overageDisabledReason)
+      ? i.overageDisabledReason
+      : undefined;
+
+  return {
+    kind: 'rate_limit',
+    status,
+    ...(resetsAt !== undefined ? { resetsAt } : {}),
+    ...(limitType !== undefined ? { limitType } : {}),
+    ...(utilization !== undefined ? { utilization } : {}),
+    ...(overageStatus !== undefined ? { overageStatus } : {}),
+    ...(overageResetsAt !== undefined ? { overageResetsAt } : {}),
+    ...(overageDisabledReason !== undefined ? { overageDisabledReason } : {}),
+    // Read as a strict boolean: the SDK ships both `isUsingOverage` and
+    // `overageInUse`, so whichever one this build sends is taken, and neither
+    // being present means "not on overage" rather than an absent field, because
+    // that is what the display would show anyway.
+    ...(i.isUsingOverage === true || i.overageInUse === true ? { isUsingOverage: true } : {}),
+    ...(surpassedThreshold !== undefined ? { surpassedThreshold } : {}),
+  };
+}
+
 /**
  * Stamp the moment a lifecycle edge crossed the seam (`HarnessTask.observedAt`).
  *
@@ -1239,11 +1381,25 @@ export class ClaudeAgentSdkEngine implements Engine {
   /** Diagnostics from the most recent run(); the spike asserts on this. */
   diagnostics: ClaudeEngineDiagnostics = { stderr: [], shadowWarningSeen: false };
 
-  // NO CONSTRUCTOR OPTIONS. There used to be one — `isolated`, which background
-  // callers passed to get `settingSources: []` for a call the user never made.
-  // Every turn is isolated now (harness-standalone §2.3), so the flag would only
-  // be a way to ask for what is already true, and a reader would reasonably infer
-  // that NOT passing it means something is loaded. Nothing is.
+  // ONE CONSTRUCTOR OPTION, AND IT IS NOT A FLAG.
+  //
+  // There used to be one — `isolated`, which background callers passed to get
+  // `settingSources: []` for a call the user never made. It was removed because
+  // every turn is isolated now (harness-standalone §2.3), so the flag could only
+  // ask for what was already true while implying that omitting it meant something
+  // was loaded.
+  //
+  // `accountId` is a different kind of thing: WHICH of the user's Claude
+  // subscriptions this turn spends (claude-multi-account §5). It belongs on the
+  // instance rather than on `EngineRunInput` because it is not part of the
+  // provider-independent turn contract — no other engine has a notion of it — and
+  // it is PINNED AT CONSTRUCTION, which is the same instant the turn starts.
+  // That is what makes §5.4 honest: a switch mid-turn cannot reach a child
+  // process that has already been launched, so the app refuses the switch rather
+  // than letting the header name one account while the answer spends another.
+  //
+  // Undefined is the ordinary case and means "the one sign-in this computer has".
+  constructor(private readonly opts: { accountId?: string } = {}) {}
 
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
     // The SDK is loaded HERE, inside run(), so that constructing the engine is
@@ -1492,6 +1648,9 @@ export class ClaudeAgentSdkEngine implements Engine {
         mcpServer: server,
         preToolUse,
         abortController: ac,
+        // Absent for every single-account install, which is what keeps this
+        // change invisible there (see the note on `buildQueryOptions`).
+        ...(this.opts.accountId ? { accountId: this.opts.accountId } : {}),
         onStderr: (data: string) => {
           diagnostics.stderr.push(data);
           if (data.includes(SHADOW_WARNING)) diagnostics.shadowWarningSeen = true;
@@ -1663,6 +1822,17 @@ export class ClaudeAgentSdkEngine implements Engine {
                 ...(described.task ? { task: stampObserved(described.task) } : {}),
               });
             }
+          } else if (msg.type === 'rate_limit_event') {
+            // THE SUBSCRIPTION'S REMAINING ALLOWANCE — first-class, and placed
+            // ABOVE the catch-all below on purpose: that branch routes anything
+            // it does not recognise into `describeHarnessMessage`, which keeps
+            // the label and throws the numbers away, and this event is nothing
+            // BUT numbers. See `describeRateLimit`.
+            //
+            // Observational, like `harness`: it is forwarded for display and
+            // touches neither the transcript nor the gate.
+            const limit = describeRateLimit(msg);
+            if (limit) channel.push(limit);
           } else {
             // Everything else the SDK emits. Previously dropped silently; now
             // surfaced as an OBSERVATIONAL harness event (a short safe label,

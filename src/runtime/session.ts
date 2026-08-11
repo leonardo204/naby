@@ -623,16 +623,26 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       }
 
       events.push(ev);
-      // Every event reaches the streaming caller, INCLUDING `harness`. That is
-      // the only path a harness event takes: it is observational (see the
-      // `harness` doc in engine.ts), so it is forwarded for display and then
-      // deliberately falls off the end of the fold below without touching the
-      // store. There is no `ev.kind === 'harness'` branch there ON PURPOSE —
-      // adding one would mint a `RuntimeMessage` for it, and `RuntimeMessage` has
-      // a closed three-variant contract with NO system role (see the note at
-      // engine.ts §"Runtime message"). A harness event is transport, not
-      // conversation; persisting it would put backend-internal bookkeeping into a
-      // transcript that must replay identically on an engine that never emits it.
+      // Every event reaches the streaming caller, INCLUDING `harness` and
+      // `rate_limit`. That is the only path either of them takes: both are
+      // observational (see their docs in engine.ts), so they are forwarded for
+      // display and then deliberately fall off the end of the fold below without
+      // touching the store. There is no `ev.kind === 'harness'` branch there ON
+      // PURPOSE — adding one would mint a `RuntimeMessage` for it, and
+      // `RuntimeMessage` has a closed three-variant contract with NO system role
+      // (see the note at engine.ts §"Runtime message"). A harness event is
+      // transport, not conversation; persisting it would put backend-internal
+      // bookkeeping into a transcript that must replay identically on an engine
+      // that never emits it.
+      //
+      // `rate_limit` is held to the SAME RULE, and its temptation is a different
+      // one: it carries numbers, so it looks like something to store and act on.
+      // It is not. Storing it would put an account's billing state into a
+      // transcript that must replay on an engine with no subscription at all, and
+      // BRANCHING on it — ending a run early because the account is nearly out —
+      // would make a run's length depend on a signal only one backend emits,
+      // which is the provider-independence this seam exists to protect. It is for
+      // telling the user, and for nothing else.
       opts.onEvent?.(ev);
 
       if (ev.kind === 'init') {
