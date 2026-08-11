@@ -43,6 +43,12 @@ import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
 import type { Updater, UpdateStatus } from './updater.js';
 import { isDevModeAvailable, isDevModeUnlocked, lockDevMode, unlockDevMode } from './devmode.js';
+import {
+  asNotifyLocale,
+  isNotifyKind,
+  sanitizeLabel,
+  showNotification,
+} from './notifications.js';
 import type { ProviderDescription, ProviderProfile } from '../dist/naby-runtime.mjs';
 import { isChatgptOauthEnabled } from '../src/providers/chatgpt-oauth.js';
 
@@ -197,6 +203,22 @@ export const CHANNELS = [
   // same native panel owned by THIS app, attached to the window, which is what
   // gives it our menu bar and therefore working clipboard shortcuts.
   'fs:pickFolder',
+
+  // OS NOTIFICATIONS — the only channel that reaches a user looking at another
+  // window. It exists because naby can now finish work AFTER the turn that
+  // started it (background jobs), and an unread badge in a window nobody is
+  // looking at is the same silence in a new shape.
+  //
+  // IT CANNOT BE MADE TO SAY ANYTHING. The payload is `{kind, locale, label}`:
+  // `kind` selects from a fixed catalogue in electron/notifications.ts, `locale`
+  // picks en or ko, and `label` is the ONE variable field — a session title,
+  // sanitized and truncated on the main side. There is no title/body channel,
+  // for the same reason there is no `invoke(channel, payload)`: a renderer that
+  // can compose an OS-drawn, app-branded banner is a phishing primitive.
+  //
+  // WHETHER to fire is decided in the renderer, which is the only place that
+  // knows whether the user is already looking at the session in question.
+  'notify:show',
 ] as const;
 
 export type Channel = (typeof CHANNELS)[number];
@@ -579,6 +601,25 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     if (result.canceled) return ok(null);
     const picked = result.filePaths[0];
     return ok(picked ? picked : null);
+  });
+
+  handle('notify:show', (payload) => {
+    const { kind, locale, label } = asObject(payload);
+    // The enum is the whole guard on what may be SAID. An unknown kind is a
+    // refusal, not a fallback: falling back would let a caller reach the
+    // catalogue by guessing.
+    if (!isNotifyKind(kind)) {
+      return fail('INTERNAL', 'unknown notification kind');
+    }
+    const shown = showNotification({
+      kind,
+      locale: asNotifyLocale(locale),
+      // Sanitized HERE, on the trusted side, so a renderer bug cannot put a
+      // second line (or a bidi override) into a banner drawn by the OS with our
+      // name on it.
+      label: sanitizeLabel(label),
+    });
+    return ok({ shown });
   });
 
   // The M→R half of contract §1.3. Broadcast to every live webContents rather

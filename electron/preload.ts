@@ -339,6 +339,35 @@ const fsOps = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// OS notifications — the reach the desktop build did not have
+// ---------------------------------------------------------------------------
+//
+// One named function, and it takes NO TEXT. `kind` selects a message from a
+// fixed catalogue in the main process, `locale` picks en or ko, and `label` is
+// the single variable field (a session title) that main sanitizes and truncates
+// before it ever reaches the OS.
+//
+// THAT SHAPE IS THE POINT. A `notify(title, body)` channel would hand any script
+// that achieves execution in the page an OS-drawn banner with this app's name on
+// it, saying whatever it liked — the same class of hole the no-`invoke`-helper
+// rule at the top of this file exists to prevent. The renderer decides WHETHER
+// to notify (only it knows if the user is already looking at that session); it
+// does not decide what naby says.
+//
+// FEATURE-DETECTED by the renderer (`window.naby?.notifications`): in a plain
+// browser it is absent and the app falls back to its badge, exactly as before.
+const notifications = {
+  /** Show one catalogue message. Resolves `{shown}` — false when the OS refused
+   *  (notifications off, no daemon, permission denied), never a rejection. */
+  sessionDone: (input: { locale?: 'en' | 'ko'; label?: string }): Promise<Result<{ shown: boolean }>> =>
+    ipcRenderer.invoke('notify:show', {
+      kind: 'session-done',
+      locale: input.locale ?? 'en',
+      label: input.label ?? '',
+    }),
+};
+
 contextBridge.exposeInMainWorld('naby', {
   /** Per-launch session token (design §5.4). Required on every request. */
   sessionToken,
@@ -365,6 +394,9 @@ contextBridge.exposeInMainWorld('naby', {
    *  browser, all scoped to the open project by a containment check in the main
    *  process. */
   fsOps,
+  /** OS notifications, from a fixed catalogue. The renderer picks the message
+   *  and supplies one bounded label; it cannot compose the text. */
+  notifications,
   /** Resolve a File dropped from the OS (Finder/Explorer) to its absolute path.
    *  `File.path` was removed in Electron 32, so this is the only supported way to
    *  recover the on-disk path of a dragged file — used to insert an absolute path

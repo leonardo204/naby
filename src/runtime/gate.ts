@@ -10,6 +10,7 @@
 
 import type { Gate, GateDecision, ToolCall } from './engine.js';
 import { MUTATING_TOOLS } from './fs-tools.js';
+import { JOB_EXECUTION_TOOLS } from './job-tools.js';
 
 export type GateLogEntry = {
   seq: number;
@@ -165,12 +166,20 @@ export function phase1HarnessFloor(runtimeToolNames: readonly string[] = []): De
   // read-only observation mode permit the exact thing it exists to forbid. They
   // are subtracted here rather than at the call site so no future composition
   // root can hand them in by accident.
-  const mutatingRuntime = new Set<string>(MUTATING_TOOLS);
+  //
+  // `naby_start_job` is subtracted for the same reason, and needs saying because
+  // it is a NABY-LAYER tool rather than a workspace one: the naby layer is
+  // attached to every turn including a read-only one, so this floor is the only
+  // thing standing between plan mode and a shell command that merely happens not
+  // to be waited on. Its two observers (`naby_check_job` /
+  // `naby_read_job_output`) are deliberately NOT subtracted — reporting on work
+  // already started is exactly what a read-only turn should still be able to do.
+  const executingRuntime = new Set<string>([...MUTATING_TOOLS, ...JOB_EXECUTION_TOOLS]);
   const allow = new Set<string>([
-    ...runtimeToolNames.filter((n) => !mutatingRuntime.has(n)),
+    ...runtimeToolNames.filter((n) => !executingRuntime.has(n)),
     ...OBSERVATION_BUILTINS,
   ]);
-  const dangerous = new Set<string>([...DANGEROUS_BUILTINS, ...MUTATING_TOOLS]);
+  const dangerous = new Set<string>([...DANGEROUS_BUILTINS, ...executingRuntime]);
   return (call: ToolCall): GateDecision => {
     if (dangerous.has(call.toolName)) {
       return {

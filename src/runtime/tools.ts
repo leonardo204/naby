@@ -27,6 +27,7 @@ import {
   makeDelegate,
   type DelegationSink,
 } from './delegate.js';
+import { buildJobTools, type JobToolOptions } from './job-tools.js';
 import {
   CHECKIN_TOOL_NAME,
   CHECKIN_MAX_OPTIONS,
@@ -845,13 +846,23 @@ export const sendMessageSchema: ToolSchema = {
  * When a `delegation` sink is supplied AND it has somewhere to delegate with depth
  * left (`canDelegate`), `naby_delegate` is included — the manual subagent path for
  * engines with no native one (Phase 2.5 M4b). Absent otherwise, so a turn never
- * advertises delegation it cannot perform. */
+ * advertises delegation it cannot perform.
+ *
+ * When `jobs` is supplied — it carries the directory a job would run in, and
+ * optionally the sink its ending leaves through — the three background-job tools
+ * are included. THIS IS WHY THEY ARE HERE and not in `buildWorkspaceTools`:
+ * starting work that outlives the turn, hearing it end and being given a turn to
+ * report it is something naby does itself on every engine, including the ones
+ * that bring their own file and shell tools (see `job-tools.ts`). Omit it — no
+ * project directory, a headless runtime — and the tools are absent rather than
+ * present and unusable. */
 export function buildToolset(
   outbox: Outbox,
   mcp?: McpProposalSink,
   memory?: MemoryLearningSink,
   checkin?: CheckinSink,
   delegation?: DelegationSink,
+  jobs?: JobToolOptions,
 ): {
   toolSchemas: ToolSchema[];
   executors: Record<string, Executor>;
@@ -878,6 +889,11 @@ export function buildToolset(
     // The schema enumerates the roster, so it is built per turn from the sink.
     toolSchemas.push(delegateSchema(delegation.subagents));
     executors[DELEGATE_TOOL_NAME] = makeDelegate(delegation);
+  }
+  if (jobs) {
+    const jobTools = buildJobTools(jobs);
+    toolSchemas.push(...jobTools.toolSchemas);
+    Object.assign(executors, jobTools.executors);
   }
   return { toolSchemas, executors };
 }

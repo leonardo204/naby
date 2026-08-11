@@ -30,6 +30,7 @@
 
 import { DANGEROUS_BUILTINS, OBSERVATION_BUILTINS } from './gate.js';
 import { MUTATING_TOOLS, READONLY_TOOLS } from './fs-tools.js';
+import { JOB_EXECUTION_TOOLS, JOB_OBSERVATION_TOOLS } from './job-tools.js';
 
 // ---------------------------------------------------------------------------
 // Which actions are consequential enough to be scored
@@ -49,6 +50,12 @@ export const CONSEQUENTIAL_RUNTIME_TOOLS: readonly string[] = [
   // Omitting them would let the agent edit a project all day and register as
   // having done nothing worth being asked about.
   ...MUTATING_TOOLS,
+  // Starting a background job (`job-tools.ts`) is running a shell command. That
+  // the caller does not wait for it changes who hears the result, not what the
+  // command may do — a job that deploys is exactly the act this meter measures,
+  // and it would be perverse for `run_command "npm run deploy"` to count while
+  // the same deploy started in the background did not.
+  ...JOB_EXECUTION_TOOLS,
 ];
 
 /**
@@ -64,13 +71,21 @@ export const CONSEQUENTIAL_RUNTIME_TOOLS: readonly string[] = [
  * doing something risky, and a plan-mode refusal of `ExitPlanMode` would land as
  * a safety TRIPWIRE, hard-blocking butterfly on a call that changes nothing.
  *
- * These names are spelled out rather than imported from `tools.ts` because that
- * module imports THIS one (`CHECKIN_TOOL_NAME`); an import back would be a cycle
- * evaluated at module load.
+ * The `naby_*` names below are spelled out rather than imported from `tools.ts`
+ * because that module imports THIS one (`CHECKIN_TOOL_NAME`); an import back
+ * would be a cycle evaluated at module load. `job-tools.ts` has no such cycle —
+ * it imports only the engine types and `jobs.ts` — so its two lists are imported
+ * for real, and the classification cannot drift from the tools.
  */
 export const OBSERVATION_RUNTIME_TOOLS: readonly string[] = [
   // Our workspace reads (`fs-tools.ts`) — the counterpart of MUTATING_TOOLS.
   ...READONLY_TOOLS,
+  // Asking how a background job is going and reading its log (`job-tools.ts`)
+  // are observations: they change nothing, on this machine or anywhere else.
+  // Under this module's fail-closed default an unlisted name would be scored as
+  // an unsupervised consequential act — so "did my deploy finish?" would count
+  // against the very agent that was being diligent about reporting back.
+  ...JOB_OBSERVATION_TOOLS,
   // The runtime's own non-mutating tools. `naby_add_mcp` only files a PROPOSED
   // registry entry (the user approves before anything loads), `naby_delegate`
   // spawns a subagent whose own calls are each gated and counted separately, and

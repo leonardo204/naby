@@ -54,7 +54,21 @@ import type { Executor, ToolOutput, ToolSchema } from './engine.js';
  */
 export const MUTATING_TOOLS: readonly string[] = ['write_file', 'edit_file', 'run_command'];
 
-/** Workspace tools that only inspect. Safe under a read-only baseline. */
+/**
+ * Workspace tools that only inspect. Safe under a read-only baseline.
+ *
+ * The classification is load-bearing twice over — `checkin.ts` spreads this list
+ * into `OBSERVATION_RUNTIME_TOOLS`, which is FAIL-CLOSED (an unlisted name is
+ * recorded as an unsupervised consequential act, and a gate refusal of one
+ * becomes a safety tripwire), and `phase1HarnessFloor` allows exactly the
+ * non-mutating runtime tools.
+ *
+ * THE BACKGROUND-JOB TOOLS ARE NOT HERE ANY MORE. They moved to the naby layer
+ * (`job-tools.ts`), which is where a capability naby owns end to end belongs —
+ * see that module's header. Their classification moved with them
+ * (`JOB_OBSERVATION_TOOLS` / `JOB_EXECUTION_TOOLS`); nothing about it is inferred
+ * from where a tool is defined.
+ */
 export const READONLY_TOOLS: readonly string[] = ['read_file', 'list_dir', 'glob', 'grep'];
 
 // ---------------------------------------------------------------------------
@@ -321,12 +335,25 @@ export const editFileSchema: ToolSchema = {
   },
 };
 
+/**
+ * `run_command` — SYNCHRONOUS, and only that.
+ *
+ * It had a `background: true` flag once. That put the one mechanism that can give
+ * the model another turn inside the toolset we withhold from `dev-claude`, and it
+ * meant an ai-sdk turn had TWO ways to start background work — one that ends in a
+ * report and one that does not, chosen by whichever tool the model happened to
+ * reach for. Backgrounding is now `naby_start_job` in the naby layer, on every
+ * engine, and this tool waits for its command like the name says.
+ */
 export const runCommandSchema: ToolSchema = {
   name: 'run_command',
   description:
-    'Run a shell command in the project directory and return its output and exit code. ' +
-    'Use it for builds, tests, git and other tooling. Avoid interactive commands — there is no ' +
-    'terminal to answer a prompt, and the command will simply time out.',
+    'Run a shell command in the project directory and WAIT for it, returning its output and exit ' +
+    'code. Use it for builds, tests, git and other tooling that finishes quickly. Avoid interactive ' +
+    'commands — there is no terminal to answer a prompt, and the command will simply time out. ' +
+    'For work that takes longer than a minute, do not run it here and do not raise the timeout: ' +
+    'start it as a background job instead, which is the only way you can report the outcome after ' +
+    'this turn ends.',
   parameters: {
     type: 'object',
     properties: {

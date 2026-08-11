@@ -127,10 +127,16 @@ export {
 } from './runtime/tools.js';
 
 // The WORKSPACE toolset — read/search/edit/run over the open project, so a turn
-// on ANY provider can look at the code instead of asking the user to paste it.
-// Merged alongside MCP in the shell rather than folded into `buildToolset`,
-// because it needs a `cwd` and a permission mode that only the composition root
-// knows. `MUTATING_TOOLS` is what the gate floor keys on.
+// on a provider that brings NO tools of its own can look at the code instead of
+// asking the user to paste it. It is a replacement kit, so the shell withholds it
+// from the Claude Agent SDK engine and merges it alongside MCP rather than folding
+// it into `buildToolset`: which engine this is, and whether the turn may change
+// anything, are facts only the composition root has. `MUTATING_TOOLS` is what the
+// gate floor keys on.
+//
+// BACKGROUND JOBS ARE NOT PART OF THIS KIT (see the job tools below). They are
+// something naby does on every engine, so a `cwd` alone was never the reason a
+// toolset had to live out here.
 export {
   buildWorkspaceTools,
   MUTATING_TOOLS,
@@ -150,6 +156,66 @@ export {
   editFileSchema,
   runCommandSchema,
 } from './runtime/fs-tools.js';
+
+// THE BACKGROUND-JOB TOOLS — naby layer, not workspace.
+//
+// They are surfaced by `buildToolset` (above), so they reach EVERY engine —
+// including `dev-claude`, which brings its own file and shell tools and is
+// therefore never given the workspace kit. naby spawns the process, holds the
+// handle, hears it exit and starts the turn that reports it; the Claude Agent
+// SDK's own background shell can do none of that once the query ends, so this is
+// not a stand-in for a missing provider capability but a capability of ours.
+export {
+  buildJobTools,
+  makeStartJob,
+  makeCheckJob,
+  makeReadJobOutput,
+  startJobSchema,
+  checkJobSchema,
+  readJobOutputSchema,
+  START_JOB_TOOL_NAME,
+  CHECK_JOB_TOOL_NAME,
+  READ_JOB_OUTPUT_TOOL_NAME,
+  JOB_OBSERVATION_TOOLS,
+  JOB_EXECUTION_TOOLS,
+  type JobToolOptions,
+} from './runtime/job-tools.js';
+
+// BACKGROUND JOBS — the mechanism behind "돌려놓고 끝나면 알려줄게".
+//
+// The runtime owns the child process and hears it exit; it cannot dispatch a
+// turn, so the ending leaves through `JobSink`, which the shell injects at the
+// toolset composition root. Everything else here is for reading a job's state
+// from outside a turn (the shell's own reporting) and for the spike.
+export {
+  startJob,
+  getJob,
+  listJobs,
+  listRunningJobs,
+  killJob,
+  readJobOutput,
+  notifyFinished,
+  resolveJobRecord,
+  statusFromExit,
+  isTerminalJobStatus,
+  isJobId,
+  newJobId,
+  jobCommandLabel,
+  describeJob,
+  jobsDir,
+  setJobsHome,
+  resetJobRegistry,
+  JOBS_DIR_NAME,
+  JOB_LOG_MAX_BYTES,
+  JOB_OUTPUT_DEFAULT_CHARS,
+  JOB_OUTPUT_MAX_CHARS,
+  JOB_MAX_RUNTIME_MS,
+  type JobRecord,
+  type JobSink,
+  type JobStatus,
+  type StartJobInput,
+  type StartJobResult,
+} from './runtime/jobs.js';
 
 // Persistence (F1-05). The shell depends on the `Store` INTERFACE; the driver
 // it constructs is its own choice. SqliteStore is the durable one — note that

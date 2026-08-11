@@ -19,6 +19,7 @@ import { CredentialVault, type SafeStorageLike } from './credentials.js';
 import { mintSessionToken, TOKEN_QUERY_PARAM } from './hardening.js';
 import { registerIpcHandlers } from './ipc.js';
 import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
+import { installReloadGuard } from './reload-guard.js';
 import { ProviderProfileStore } from './providers.js';
 import { createUpdater, type Updater } from './updater.js';
 // TYPE-ONLY. The runtime bundle is loaded lazily through a computed URL (see
@@ -437,7 +438,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
 // the renderer exists without its credential. Passing it over IPC would mean an
 // async round trip the page could race.
 
-export function createMainWindow(bootResult: BootResult, opts: { show?: boolean } = {}): BrowserWindow {
+export function createMainWindow(
+  bootResult: BootResult,
+  opts: { show?: boolean; packaged?: boolean } = {},
+): BrowserWindow {
   const preloadPath = join(dirname(fileURLToPath(import.meta.url)), 'preload.cjs');
 
   const win = new BrowserWindow({
@@ -464,10 +468,11 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
     // close binding) is a File/Edit/View/Window bar the product never asked to
     // SEE, sitting above a UI that already owns its own chrome. Hiding the BAR
     // while keeping the MENU alive is the difference that matters: the menu is
-    // also where the accelerators live (Ctrl+R reload, Ctrl+Shift+I devtools,
-    // Ctrl+0/+/- zoom), and dropping the application menu entirely would take
-    // those with it. `autoHideMenuBar` keeps them bound, and Alt still reveals
-    // the bar for anyone who wants it.
+    // also where the accelerators live (Ctrl+Shift+I devtools, Ctrl+0/+/- zoom
+    // — and Ctrl+R reload in a DEV build only, see menu-template.ts), and
+    // dropping the application menu entirely would take those with it.
+    // `autoHideMenuBar` keeps them bound, and Alt still reveals the bar for
+    // anyone who wants it.
     //
     // macOS has no in-window menu bar to hide — its menu belongs to the system
     // strip — so the flag is left off there rather than asking Electron to
@@ -499,6 +504,16 @@ export function createMainWindow(bootResult: BootResult, opts: { show?: boolean 
   // some Windows builds; this starts it hidden. Guarded to non-darwin so the
   // macOS system menu is never touched.
   if (process.platform !== 'darwin') win.setMenuBarVisibility(false);
+
+  // THE BROWSER REFRESH KEYS, in a window that is not a browser. Cmd/Ctrl+R and
+  // F5 would throw away the running turn's stream and the whole renderer state
+  // to re-fetch a page this very process serves. menu-template.ts already keeps
+  // Reload off a packaged build's View menu, which kills the accelerators; this
+  // catches the keystroke itself, which is what covers F5 (no menu item ever
+  // bound it) and anything the renderer might bind. Packaged builds only — see
+  // reload-guard.ts. `app.isPackaged` is false for both spike entries that
+  // share this function, so their windows are untouched.
+  installReloadGuard(win.webContents, { packaged: opts.packaged ?? app.isPackaged });
 
   // Nothing in this app should ever open a second WINDOW or navigate this
   // window off loopback. Both stay refused — an injected script in the renderer
