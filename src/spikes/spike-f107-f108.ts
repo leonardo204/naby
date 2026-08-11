@@ -27,6 +27,12 @@
 // PROVIDER SELECTION (F1-08 "two providers reachable", minus real keys)
 //   (b1) two providers configured; the stored setting decides which one
 //        resolves, and switching the setting switches the answer.
+//   (b2) the PREFILLED model a new google profile gets is a free-tier-capable
+//        flash id, never `gemini-2.5-pro` — which a free-tier key cannot call
+//        even once (the API answers `limit: 0`, not "out of quota"), so the old
+//        default failed a new user's very first question.
+//   (b3) …and changing that prefill leaves EXISTING profiles alone: the default
+//        is read only where a profile is created.
 //
 // USAGE + COST (F1-07)
 //   (c1) a turn's usage is PERSISTED and survives a store reopen.
@@ -75,7 +81,13 @@ import { SqliteStore } from '../runtime/store/sqlite-store.js';
 import type { McpEntry, Store } from '../runtime/store/store.js';
 import { readSettings, toSelectOptions, writeSettings } from '../runtime/settings.js';
 import { summarizeSessionUsage } from '../runtime/usage.js';
-import { clearCredentialBridge } from '../providers/resolve.js';
+import { clearCredentialBridge, defaultProfileFor } from '../providers/resolve.js';
+import { describeProviders } from '../providers/registry.js';
+// The DESKTOP-side profile store. It imports `node:fs` and a TYPE from the
+// runtime bundle and nothing else — no `electron` at runtime — so the spike can
+// drive the real class rather than a stand-in. (b3) depends on that being the
+// real one: a re-implementation would prove only that the copy is harmless.
+import { ProviderProfileStore } from '../../electron/providers.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 
@@ -335,6 +347,95 @@ async function checkProviderSelection(store: Store): Promise<void> {
   writeSettings(store, { enginePreference: '', selectedProvider: '' });
   delete process.env.NABY_ANTHROPIC_API_KEY;
   delete process.env.NABY_OPENAI_API_KEY;
+}
+
+/**
+ * (b2)+(b3) — THE PREFILLED MODEL A NEW PROVIDER PROFILE GETS.
+ *
+ * WHY THIS IS WORTH AN ASSERTION. `describeProviders().defaultModel` is what the
+ * settings wizard puts in the box, and for google it was `gemini-2.5-pro` — a
+ * model a FREE-TIER key cannot call even once. The API does not answer "you are
+ * out of quota", it answers `limit: 0` for
+ * `generate_content_free_tier_requests`, meaning the free tier has no allocation
+ * for that model at all. So the very first question a new user asked failed,
+ * 100% of the time, in the flow the default exists to make painless.
+ *
+ * Nothing else in the tree could catch that: the id is a string, it is spelled
+ * correctly, and every test that names a Gemini model names its own literal.
+ * Only an assertion about what the DEFAULT is can hold the line — which is what
+ * this is. It deliberately does NOT hardcode one id: the check is "a flash-family
+ * id, and not pro", so picking a newer flash generation stays a one-line change
+ * while a revert to pro fails here.
+ *
+ * (b3) is the other half of the same story: fixing a default must not disturb
+ * anyone who already chose. The prefill is read only when a profile is CREATED.
+ */
+function checkProviderDefaults(userDataDir: string): void {
+  const google = describeProviders().find((d) => d.kind === 'google');
+  const model = google?.defaultModel ?? '';
+
+  // "flash", and explicitly not "pro". `gemini-2.5-flash-lite` and
+  // `gemini-2.5-flash` both satisfy it; `gemini-2.5-pro` cannot.
+  const isFlash = /^gemini-.*flash/.test(model);
+  record(
+    '(b2) the google default model is a FREE-TIER-capable flash id, never pro (limit: 0)',
+    isFlash && !model.includes('pro'),
+    `defaultModel="${model}" (free-tier requests for gemini-2.5-pro are limit: 0 — the ` +
+      `default must be answerable on a key minted five minutes ago)`,
+  );
+
+  // A default nobody reads is not a default. `defaultProfileFor` is the one
+  // constructor of a new profile (the IPC credential:set path and the wizard
+  // both go through it), so it must carry the same id — no second list.
+  const profile = defaultProfileFor('google');
+  record(
+    '(b2) defaultProfileFor("google") carries exactly that id — one list, not two',
+    profile.model === model && model.length > 0,
+    `profile.model="${profile.model}" description.defaultModel="${model}"`,
+  );
+
+  // -- (b3) an EXISTING profile is never rewritten -------------------------
+  //
+  // Driven through the real ProviderProfileStore, in a temp userData dir.
+  const dir = join(userDataDir, 'existing-user');
+  const profiles = new ProviderProfileStore({ userDataDir: dir });
+  // Someone who set google up before this change — on the old default, or on a
+  // paid key where pro is exactly what they want.
+  profiles.upsert({ ...defaultProfileFor('google'), model: 'gemini-2.5-pro' });
+
+  // The wizard's materialization step, verbatim from electron/ipc.ts's
+  // `credential:set`: a default profile is created ONLY when none exists.
+  if (!profiles.get('google')) profiles.upsert(defaultProfileFor('google'));
+
+  const after = profiles.get('google');
+  record(
+    '(b3) changing the default does NOT touch a profile the user already has',
+    after?.model === 'gemini-2.5-pro',
+    `stored model stayed "${after?.model}" while the new-profile default is "${model}"`,
+  );
+
+  // And the guard that makes that true is really in the production path — the
+  // same source-level assertion spike-devmode uses for its IPC wiring, because
+  // an unguarded `upsert(defaultProfileFor(...))` would pass everything above
+  // while silently rewriting every stored model on the next key save.
+  const ipcSrc = readFileSync(resolve(here, '..', '..', 'electron', 'ipc.ts'), 'utf8');
+  const guarded = /if\s*\(!deps\.profiles\.get\(providerId\)\)\s*\{[\s\S]{0,600}?defaultProfileFor\(/.test(
+    ipcSrc,
+  );
+  record(
+    '(b3) credential:set materializes a default ONLY when no profile exists',
+    guarded,
+    'electron/ipc.ts guards defaultProfileFor() behind `if (!deps.profiles.get(providerId))`',
+  );
+
+  // A brand-new user, on the other hand, gets the new default.
+  const fresh = new ProviderProfileStore({ userDataDir: join(userDataDir, 'new-user') });
+  if (!fresh.get('google')) fresh.upsert(defaultProfileFor('google'));
+  record(
+    '(b3) …but a NEW profile is created on the flash default',
+    fresh.get('google')?.model === model,
+    `new profile model="${fresh.get('google')?.model}"`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -645,6 +746,8 @@ async function main(): Promise<void> {
     const settingsStore: Store = new SqliteStore({ path: dbPath });
     await checkProviderSelection(settingsStore);
     settingsStore.close();
+
+    checkProviderDefaults(dir);
 
     await checkUsage(usageDb);
     await checkMcp(dbPath, logPath);

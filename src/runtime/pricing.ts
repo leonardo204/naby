@@ -173,6 +173,23 @@ export const MODEL_PRICES: readonly ModelPrice[] = [
     cachedInputPerMTok: 0.31,
     source: 'ai.google.dev/pricing (paid tier, prompts <= 200k tokens)',
   },
+  // Flash-lite FIRST in reading order, though the longest-prefix rule is what
+  // actually decides: `gemini-2.5-flash-lite` also matches the `gemini-2.5-flash`
+  // prefix below, and without this row it would be billed at flash rates — three
+  // times the input and six times the output it actually costs. That matters
+  // more than usual since flash-lite is the google DEFAULT (registry.ts explains
+  // why), so it is the row most sessions will hit.
+  //
+  // `cachedInputPerMTok` is deliberately OMITTED rather than guessed: per the
+  // field doc, omission bills cache reads as normal input, which can only
+  // overstate. An invented cache rate could understate, which rule 1 forbids.
+  {
+    providerKind: 'google',
+    modelPrefix: 'gemini-2.5-flash-lite',
+    inputPerMTok: 0.1,
+    outputPerMTok: 0.4,
+    source: 'ai.google.dev/pricing (paid tier)',
+  },
   {
     providerKind: 'google',
     modelPrefix: 'gemini-2.5-flash',

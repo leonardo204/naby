@@ -388,8 +388,42 @@ export function describeProviders(env: NodeJS.ProcessEnv = process.env): Provide
       label: 'Google Gemini',
       configFields: [],
       credentialKinds: ['api-key'],
-      modelMeaning: 'Gemini model id, e.g. gemini-2.5-pro',
-      defaultModel: 'gemini-2.5-pro',
+      modelMeaning: 'Gemini model id, e.g. gemini-2.5-flash-lite or gemini-2.5-pro',
+      // WHY NOT PRO, and why this is not a taste question.
+      //
+      // The default used to be `gemini-2.5-pro`, and a FREE-TIER key cannot run
+      // that model even once. The field report, verbatim:
+      //
+      //   Quota exceeded for metric:
+      //   generativelanguage.googleapis.com/generate_content_free_tier_requests,
+      //   limit: 0, model: gemini-2.5-pro
+      //
+      // `limit: 0` is not "you used it up" — it is "this model has no free-tier
+      // allocation at all". So a user who had just minted a key at
+      // aistudio.google.com and accepted the prefill got a hard failure on their
+      // FIRST question, every time, with an error that reads like their own
+      // fault. A default that cannot answer once is not a default.
+      //
+      // WHY FLASH-LITE. In that same report `gemini-flash-lite-latest` answered
+      // (and only later hit a TOKEN quota, which is an ordinary usage limit, not
+      // a wall). That makes flash-lite the one branch of the family with FIELD
+      // evidence of a working free tier, and it carries the family's largest
+      // free daily allowance, which is what the report's second failure was
+      // about.
+      //
+      // WHY THE PINNED ID AND NOT `-latest`. An alias silently re-points when
+      // Google ships a new generation: the model the app defaults to could
+      // change behaviour, price and context window between two launches of the
+      // same build, with no diff to look at. `gemini-2.5-flash-lite` is a GA id
+      // that means one thing forever. It will age — and ageing is a visible,
+      // scheduled problem, which is the kind we want.
+      //
+      // THIS IS A PREFILL, NOT A SETTING. It is read only when a profile is
+      // being CREATED (`defaultProfileFor`, and the settings row's
+      // `row.model || row.defaultModel`); every stored profile keeps its own
+      // `model`, so nobody who already chose pro is moved off it, and anyone on
+      // a paid key can switch back in the model picker.
+      defaultModel: 'gemini-2.5-flash-lite',
       envVar: 'NABY_GOOGLE_API_KEY',
       keyHelp: 'aistudio.google.com → Get API key',
     },

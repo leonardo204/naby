@@ -95,7 +95,7 @@ export const FALLBACK_CONTEXT_WINDOW = 128_000;
  * Model id -> window size, as ordered prefix rules (first match wins).
  *
  * The ids are the ones this codebase actually produces: `describeProviders`
- * defaults (`claude-sonnet-4-5`, `anthropic.claude-…-v1:0`, `gemini-2.5-pro`,
+ * defaults (`claude-sonnet-4-5`, `anthropic.claude-…-v1:0`, `gemini-2.5-flash-lite`,
  * `gpt-4o`), the client model catalog's ChatGPT slugs (`gpt-5.6-sol`, …) and the
  * Claude aliases. Sizes are the providers' published INPUT windows.
  */
