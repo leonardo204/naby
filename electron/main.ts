@@ -248,7 +248,11 @@ async function start(): Promise<void> {
 
   // Replaces the default menu so Cmd/Ctrl+W stops meaning "close the window"
   // and reaches the renderer, where it closes the current session tab (menu.ts).
-  installApplicationMenu();
+  // `packaged` also decides whether Reload / Force Reload appear at all: a
+  // shipped build has no use for reloading a page it serves itself, a dev run
+  // does (reload-guard.ts). Passed explicitly rather than read inside, so the
+  // one behavioural difference between a dev run and a release is visible here.
+  installApplicationMenu({ packaged: app.isPackaged });
   migrateLegacyUserData();
   applyDevDockIcon();
   // Must run BEFORE boot(): boot reads `isChatgptOauthEnabled()` (which reads
