@@ -44,8 +44,9 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 type Check = { name: string; pass: boolean; evidence: string };
 const checks: Check[] = [];
@@ -65,19 +66,81 @@ const REAL_HOME = homedir();
 const REAL_CLAUDE_DIR = join(REAL_HOME, '.claude');
 const REAL_NABY_DIR = join(REAL_HOME, '.naby');
 
-/** A fingerprint of a directory: what is in it and when it last changed. Compared
- *  before and after to prove this run left the user's own files alone. */
-function fingerprint(dir: string): string {
+/**
+ * THE SAFETY FINGERPRINTS. Taken before and after, to prove this run left the
+ * user's own files alone.
+ *
+ * WHY THE NABY ONE WALKS THE TREE. The first version of this read ONE directory:
+ * its entry names plus its mtime. That misses the exact leak this spike exists to
+ * catch. A directory's mtime moves when its OWN entries change, so once
+ * `~/.naby/claude-accounts` exists — and it does the moment anyone adds a second
+ * account for real — a stray `~/.naby/claude-accounts/acct-…` appearing mid-run
+ * changes NEITHER the entry list NOR the mtime of `~/.naby`. Measured, not
+ * reasoned: with the shallow version, creating that directory between the two
+ * reads still printed "naby unchanged" and the spike still passed. A safety check
+ * that cannot fail is not a safety check.
+ *
+ * WHY THE CLAUDE ONE DOES NOT. `~/.claude` holds a growing session transcript per
+ * project, written continuously by any `claude` the developer happens to have
+ * open, so a recursive path set there would fail for reasons that have nothing to
+ * do with this spike — and an alarm that goes off on a busy machine gets read as
+ * noise. So it stays shallow and names the thing that actually matters outright:
+ * `.credentials.json`, the file whose loss is the disaster in this file's header,
+ * checked by size and mtime so a rewrite is caught even though the directory
+ * around it did not change.
+ */
+
+/** Every path under `dir`, relative and sorted. NAMES ONLY: a leak is something
+ *  APPEARING, and mtimes on live files would flap without telling us anything. */
+function treePaths(dir: string, base: string = dir, out: string[] = []): string[] {
+  let entries: Dirent[];
   try {
-    const st = statSync(dir);
-    return `${readdirSync(dir).sort().join(',')}|mtime=${st.mtimeMs}`;
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    out.push(relative(base, full));
+    // Not followed: a symlink out of the home is not part of the home, and a loop
+    // would hang the spike before it asserted anything.
+    if (entry.isDirectory() && !entry.isSymbolicLink()) treePaths(full, base, out);
+  }
+  return out;
+}
+
+/** The real naby home, ALL THE WAY DOWN. */
+function nabyFingerprint(): string {
+  try {
+    statSync(REAL_NABY_DIR);
   } catch {
     return 'absent';
   }
+  return treePaths(REAL_NABY_DIR).sort().join(',');
 }
 
-const BEFORE_CLAUDE = fingerprint(REAL_CLAUDE_DIR);
-const BEFORE_NABY = fingerprint(REAL_NABY_DIR);
+/** The real `~/.claude`: its top level, plus the credential file by size and
+ *  mtime. */
+function claudeFingerprint(): string {
+  let top: string;
+  try {
+    top = readdirSync(REAL_CLAUDE_DIR).sort().join(',');
+  } catch {
+    return 'absent';
+  }
+  let creds = 'absent';
+  try {
+    const st = statSync(join(REAL_CLAUDE_DIR, '.credentials.json'));
+    creds = `size=${st.size}@${st.mtimeMs}`;
+  } catch {
+    // No credential file on this machine. 'absent' is then the honest reading,
+    // and it still fails the comparison if one APPEARS or is created by us.
+  }
+  return `${top}|credentials=${creds}`;
+}
+
+const BEFORE_CLAUDE = claudeFingerprint();
+const BEFORE_NABY = nabyFingerprint();
 
 const ROOT = mkdtempSync(join(tmpdir(), 'naby-claude-accounts-spike-'));
 const TEMP_HOME = join(ROOT, 'naby-home');
@@ -413,11 +476,19 @@ async function main(): Promise<void> {
   }
 
   // ---- 10. and the real home is exactly as we found it --------------------
+  const afterClaude = claudeFingerprint();
+  const afterNaby = nabyFingerprint();
+  // Name the paths that appeared. "naby CHANGED" sends the reader looking; the
+  // list tells them which code path to look at, which is the whole value of
+  // catching this here rather than in a bug report a week later.
+  const appeared = treePaths(REAL_NABY_DIR)
+    .filter((p) => !BEFORE_NABY.split(',').includes(p))
+    .slice(0, 10);
   record(
-    'SAFETY — the real ~/.claude and ~/.naby are byte-identical to before this ran',
-    fingerprint(REAL_CLAUDE_DIR) === BEFORE_CLAUDE && fingerprint(REAL_NABY_DIR) === BEFORE_NABY,
-    `claude ${fingerprint(REAL_CLAUDE_DIR) === BEFORE_CLAUDE ? 'unchanged' : 'CHANGED'}; naby ${
-      fingerprint(REAL_NABY_DIR) === BEFORE_NABY ? 'unchanged' : 'CHANGED'
+    'SAFETY — the real ~/.claude and the real ~/.naby TREE are exactly as before this ran',
+    afterClaude === BEFORE_CLAUDE && afterNaby === BEFORE_NABY,
+    `claude ${afterClaude === BEFORE_CLAUDE ? 'unchanged' : 'CHANGED'}; naby ${
+      afterNaby === BEFORE_NABY ? 'unchanged' : `CHANGED (appeared: ${appeared.join(' ')})`
     }`,
   );
 }
