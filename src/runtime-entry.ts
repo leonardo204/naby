@@ -386,14 +386,17 @@ export { decideMemoryWrite } from './runtime/memory-gate.js';
 // putHarnessItem/importHarnessSet run it before an import lands. Exported so the
 // shell (HP-06 review UI) can pre-inspect an import decision.
 export { decideHarnessImport } from './runtime/harness-gate.js';
-// The BUILT-IN harness bundle (skill-hub-builtin §2.7): the `confluence-context`
-// skill and the `confluence-researcher` subagent ship as rows, seeded at boot and
-// switched by whether the `cic` System MCP preset is configured. The shell owns
-// both call sites — boot (getStore) and the System MCP save/remove.
+// The BUILT-IN harness bundles (skill-hub-builtin §2.7): `cic` ships the
+// `confluence-context` skill and the `confluence-researcher` subagent, `atlassian`
+// ships the `confluence-upload` skill. Both are seeded as rows at boot and switched
+// by whether the owning System MCP preset is configured. The shell owns both call
+// sites — boot (getStore) and the System MCP save/remove.
 export {
   applyBuiltinHarnessActivation,
+  ATLASSIAN_HARNESS_BUNDLE_ID,
   builtinHarnessAutoStatusKey,
   builtinHarnessOrigin,
+  bundleOwning,
   BUILTIN_HARNESS_ASSETS,
   BUILTIN_HARNESS_BUNDLES,
   CIC_HARNESS_BUNDLE_ID,
@@ -404,6 +407,7 @@ export type {
   BuiltinHarnessActivationResult,
   BuiltinHarnessAsset,
   BuiltinHarnessOptions,
+  BuiltinHarnessSeedOptions,
   BuiltinHarnessSeedResult,
   HarnessSeedStore,
 } from './runtime/harness-seed.js';

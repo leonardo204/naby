@@ -1,13 +1,25 @@
 // src/runtime/harness-seed.ts
 //
-// THE BUILT-IN HARNESS — a skill and a subagent that ship WITH naby, and the one
-// switch that turns them on (skill-hub-builtin §2.7).
+// THE BUILT-IN HARNESS — the artifacts that ship WITH naby, and the switches that
+// turn them on (skill-hub-builtin §2.7).
 //
-// WHAT SHIPS. `confluence-context` (skill) decides whether a question needs the
-// company wiki, and hands the actual research to `confluence-researcher`
-// (subagent), which talks to the `cic` MCP server and returns a compressed answer.
-// The two are one capability in two pieces: the skill without the subagent has
-// nobody to delegate to, and the subagent without the skill is never called.
+// WHAT SHIPS, IN TWO BUNDLES.
+//
+//   `cic`: `confluence-context` (skill) decides whether a question needs the
+//   company wiki, and hands the actual research to `confluence-researcher`
+//   (subagent), which talks to the `cic` MCP server and returns a compressed
+//   answer. The two are one capability in two pieces: the skill without the
+//   subagent has nobody to delegate to, and the subagent without the skill is
+//   never called.
+//
+//   `atlassian`: `confluence-upload` (skill) drives the confUploader CLI so a
+//   markdown file becomes a Confluence page with its tables, links and mermaid
+//   diagrams intact. It is READ's opposite number and it hangs off a different
+//   credential, which is why it is a second bundle rather than a third cic item.
+//
+// A BUNDLE IS THE UNIT, NOT THE ITEM. Every rule below is stated over a bundle id,
+// so a third server with its own harness is one entry in BUILTIN_HARNESS_BUNDLES
+// and one `harnessBundle` on its preset — no new branch anywhere.
 //
 // WHY THEY ARE ROWS, NOT FILES. The alternative was writing the two `.md` files
 // into the naby harness home at boot and letting the scanner import them. That
@@ -59,16 +71,47 @@ export type { BuiltinHarnessAsset };
  *  the bundle names its items. Nothing branches on the string anywhere else. */
 export const CIC_HARNESS_BUNDLE_ID = 'cic';
 
+/** The bundle id the `atlassian` System MCP preset switches.
+ *
+ *  WHY ATLASSIAN AND NOT CIC. `confluence-upload` drives the confUploader CLI with
+ *  `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` — the same
+ *  three values the atlassian preset already collects (`CONFLUENCE_URL`,
+ *  `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN`, systemMcp.ts). A user who has
+ *  configured atlassian has, by construction, a Confluence account and a token;
+ *  a user who has only cic has a READ index and may have neither. So the atlassian
+ *  credential is the honest opt-in signal for a skill that WRITES pages.
+ *
+ *  NOTE what this does NOT claim: naby does not hand those stored values to the
+ *  skill. They live in the mcp-atlassian entry's `env` and reach that stdio process
+ *  only — `run_command` gets the app's own environment. The preset proves the user
+ *  HAS Confluence access; the skill still asks for the values it needs (which is
+ *  what its body says). */
+export const ATLASSIAN_HARNESS_BUNDLE_ID = 'atlassian';
+
 /**
  * Which built-in items each bundle owns.
  *
  * Declared here rather than in the artifact frontmatter because it is not a fact
  * about the document — it is a fact about which SERVER makes the document useful,
  * and that pairing belongs next to the activation rule it drives.
+ *
+ * A bundle is a SET OF NAMES, and the two bundles are disjoint. Nothing here
+ * assumes a name belongs to at most one bundle, but `bundleOwning` (below) does
+ * take the first match, so keep them disjoint.
  */
 export const BUILTIN_HARNESS_BUNDLES: Readonly<Record<string, readonly string[]>> = {
   [CIC_HARNESS_BUNDLE_ID]: ['confluence-context', 'confluence-researcher'],
+  [ATLASSIAN_HARNESS_BUNDLE_ID]: ['confluence-upload'],
 };
+
+/** The bundle that owns an item, if any. The inverse of the table above, computed
+ *  rather than maintained, so the two can never disagree. */
+export function bundleOwning(name: string): string | undefined {
+  for (const [bundleId, names] of Object.entries(BUILTIN_HARNESS_BUNDLES)) {
+    if (names.includes(name)) return bundleId;
+  }
+  return undefined;
+}
 
 /** `provenance.origin` of a seeded row: a non-path HANDLE, like a set import's
  *  `set:<name>@<version>`. It must not look like a file, because there is no file
@@ -95,6 +138,36 @@ export type HarnessSeedStore = Pick<
 export type BuiltinHarnessOptions = {
   /** User-scope key. Defaults to the single-user id the rest of the runtime uses. */
   userId?: string;
+};
+
+export type BuiltinHarnessSeedOptions = BuiltinHarnessOptions & {
+  /**
+   * Bundle ids whose server is ALREADY CONFIGURED at seed time. Items of those
+   * bundles are seeded ENABLED instead of disabled.
+   *
+   * WHY THIS EXISTS. The switch (`applyBuiltinHarnessActivation`) fires when a
+   * credential is SAVED or REMOVED. A built-in that ships in a LATER release is
+   * seeded on the next boot of an install where the credential was saved months
+   * ago — no save happens, so nothing ever turns it on, and the user's reward for
+   * having configured the server early is a permanently inert skill they must find
+   * in Settings. Seeding it active closes that hole without asking them to re-save.
+   *
+   * WHY IT IS A CALLER ARGUMENT AND NOT A STORE READ. This module reads no
+   * settings and no MCP registry on purpose (see the header): "is this preset
+   * configured" is the shell's question, asked at the one call site that already
+   * owns the registry. Absent/empty ⇒ every item seeds disabled, which is exactly
+   * what this function did before this parameter existed.
+   *
+   * WHY THIS DOES NOT CHANGE `cic`. The caller passes EVERY configured bundle —
+   * no per-bundle special case, which is the property §2.1 keeps everywhere. It
+   * still cannot alter the cic path, because this branch only runs for an ABSENT
+   * row, and no release ever had the cic preset without the cic rows (they shipped
+   * together in 0.6.0). An install that has the credential therefore always has the
+   * rows, seeding reports them `kept`, and nothing here is reached. The atlassian
+   * bundle is the opposite and is exactly why the parameter exists: its preset has
+   * existed since 0.2.0 and its skill arrives now.
+   */
+  activeBundles?: readonly string[];
 };
 
 /** What a seed run did. Returned rather than logged so a spike can assert it. */
@@ -144,18 +217,24 @@ function findRow(
  * between the row and the asset is the USER'S edit, and a boot-time "refresh" would
  * be a product that silently rewrites what its owner wrote. The cost is that a
  * later naby release cannot push a corrected skill body into an install that has
- * the old one; that is the right trade for two documents the user is invited to
- * edit, and a future upgrade path can be an explicit, reported action.
+ * the old one; that is the right trade for documents the user is invited to edit,
+ * and a future upgrade path can be an explicit, reported action.
  *
- * ARRIVES DISABLED, ALWAYS. `requestedStatus:'disabled'` is what the gate is handed,
- * and the automatic status is recorded as 'disabled' so the first activation knows
- * the row is still untouched.
+ * ARRIVES DISABLED UNLESS ITS SERVER IS ALREADY THERE. `requestedStatus:'disabled'`
+ * is what the gate is normally handed, and the automatic status is recorded to match
+ * so the first activation knows the row is still untouched. When the caller says the
+ * item's bundle is already configured (`activeBundles`), the row is seeded 'enabled'
+ * and the record says 'enabled' — the same two writes the switch would have made, at
+ * the only moment the switch cannot run (see `BuiltinHarnessSeedOptions`). Either
+ * way the record and the row agree on arrival, which is what makes "the user has not
+ * touched this" decidable later.
  */
 export function seedBuiltinHarness(
   store: HarnessSeedStore,
-  opts?: BuiltinHarnessOptions,
+  opts?: BuiltinHarnessSeedOptions,
 ): BuiltinHarnessSeedResult {
   const userId = opts?.userId ?? DEFAULT_USER_ID;
+  const active = new Set(opts?.activeBundles ?? []);
   const out: BuiltinHarnessSeedResult = { seeded: [], kept: [] };
 
   for (const asset of BUILTIN_HARNESS_ASSETS) {
@@ -163,6 +242,12 @@ export function seedBuiltinHarness(
       out.kept.push(asset.name);
       continue;
     }
+    const bundleId = bundleOwning(asset.name);
+    // 'artifact' is a TRUSTED tier, so the gate honours an 'enabled' request
+    // (harness-gate invariant 1/3 pins only 'external'). Nothing here can enable
+    // an EXISTING row: the `findRow` guard above already returned for those.
+    const arrivesEnabled = bundleId !== undefined && active.has(bundleId);
+    const arrivalStatus: HarnessStatus = arrivesEnabled ? 'enabled' : 'disabled';
     const body = harnessAssetBody(asset.raw);
     const toolRefs = asset.toolRefs ? [...asset.toolRefs] : undefined;
     // The skill's frontmatter `triggers` become the row's triggers, which is what
@@ -203,9 +288,9 @@ export function seedBuiltinHarness(
               },
             }),
       },
-      requestedStatus: 'disabled',
+      requestedStatus: arrivalStatus,
     });
-    store.setSetting(builtinHarnessAutoStatusKey(asset.name), 'disabled');
+    store.setSetting(builtinHarnessAutoStatusKey(asset.name), arrivalStatus);
     out.seeded.push(asset.name);
   }
   return out;

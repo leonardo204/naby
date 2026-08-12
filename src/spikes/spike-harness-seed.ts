@@ -1,11 +1,14 @@
 // src/spikes/spike-harness-seed.ts
 //
-// THE BUILT-IN HARNESS BUNDLE — verification (skill-hub-builtin §2.7).
+// THE BUILT-IN HARNESS BUNDLES — verification (skill-hub-builtin §2.7).
 //
-// naby ships two harness artifacts: the `confluence-context` skill and the
-// `confluence-researcher` subagent. Together they are one capability — ask the
-// company wiki — and that capability is worthless without the `cic` MCP server,
-// because the subagent's only four tools are cic's. This spike proves the three
+// naby ships three harness artifacts in TWO bundles. `cic` owns the
+// `confluence-context` skill and the `confluence-researcher` subagent: together
+// they are one capability — ask the company wiki — and that capability is
+// worthless without the `cic` MCP server, because the subagent's only four tools
+// are cic's. `atlassian` owns the `confluence-upload` skill, which drives the
+// confUploader CLI; its switch is the atlassian preset because that preset already
+// collects the same three Confluence values the CLI needs. This spike proves the
 // claims that make shipping them safe rather than annoying:
 //
 //   (a) THE COMPILED COPY IS THE FILE. `harness-assets/generated.ts` is a build
@@ -28,6 +31,20 @@
 //       the whole point — an automatic switch that can undo a person's explicit
 //       choice makes the choice meaningless, which is the same rule the import gate
 //       states for re-scans (harness-gate invariants 5 and 7).
+//   (g) A SECOND BUNDLE IS A SECOND SWITCH, AND THE TWO DO NOT TOUCH. atlassian's
+//       save/remove moves `confluence-upload` and NOTHING else; cic's moves the
+//       other two and not it. Plus the case a save/remove cannot cover: a skill
+//       that ships LATER than its preset. The atlassian preset has existed since
+//       0.2.0, so an existing user will never save it again — `activeBundles` makes
+//       the boot seed arrive enabled for them, while still arriving disabled for
+//       someone who has not configured the preset.
+//   (h) THE TWO SKILLS FIT IN ONE TURN. Both declare `confluence` as a trigger,
+//       because both are about Confluence — so a turn naming it wants BOTH, and
+//       skill-inject ranks by scope-then-recency with no relevance signal. At the
+//       old 2000-token budget their sum (2828) did not fit and the loser was picked
+//       by seed order, which for an upload request meant the model got the RESEARCH
+//       skill and reached for a page-create path that mangles markdown. This checks
+//       the budget the shell actually uses, read out of the shell's own source.
 //
 // It also proves the thing that silently defeated all of the above the first time
 // it was wired: A SUBAGENT FILE NAMES ITS TOOLS IN A SPELLING NABY DOES NOT USE.
@@ -47,8 +64,10 @@ import { fileURLToPath } from 'node:url';
 import { BUILTIN_HARNESS_ASSETS } from '../runtime/harness-assets/generated.js';
 import {
   applyBuiltinHarnessActivation,
+  ATLASSIAN_HARNESS_BUNDLE_ID,
   builtinHarnessAutoStatusKey,
   builtinHarnessOrigin,
+  bundleOwning,
   BUILTIN_HARNESS_BUNDLES,
   CIC_HARNESS_BUNDLE_ID,
   harnessAssetBody,
@@ -74,6 +93,20 @@ function record(name: string, pass: boolean, evidence: string): void {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SKILL = 'confluence-context';
 const SUBAGENT = 'confluence-researcher';
+const UPLOAD = 'confluence-upload';
+
+/** The shell's per-turn skill budget, READ OUT OF THE SHELL rather than restated.
+ *  Every budget claim below is measured against the number the engine will really
+ *  use, so lowering it there fails here instead of quietly killing a skill. */
+function shellSkillTokenBudget(): number {
+  const src = readFileSync(
+    resolve(ROOT, 'shell/packages/feature/agent/src/server/engines/naby.ts'),
+    'utf8',
+  );
+  const m = src.match(/const SKILL_TOKEN_BUDGET = (\d[\d_]*);/);
+  if (!m) throw new Error('SKILL_TOKEN_BUDGET not found in the shell engine');
+  return Number(m[1]!.replace(/_/g, ''));
+}
 
 function rowFor(store: MemoryStore, name: string): HarnessItem | undefined {
   const asset = BUILTIN_HARNESS_ASSETS.find((a) => a.name === name)!;
@@ -126,6 +159,44 @@ function checkAssetsAreVerbatim(): void {
     !body.startsWith('---') && body.includes('# confluence-context'),
     `body starts: ${JSON.stringify(body.slice(0, 40))}`,
   );
+
+  // The upload skill is TOOL-BEARING, and that is the point: it does its work by
+  // running a CLI, so a turn with no shell (an unprojected session has no
+  // `run_command` executor — fs-tools registers it only with a cwd) must not be
+  // handed 1.1k tokens telling it to run one. skill-inject holds it back and
+  // COUNTS it (excludedForTools), which is the observable form of that decision.
+  const upload = BUILTIN_HARNESS_ASSETS.find((a) => a.name === UPLOAD)!;
+  record(
+    '(a) the upload skill declares the one tool it actually needs: run_command',
+    upload.kind === 'skill' &&
+      (upload.toolRefs ?? []).join(',') === 'run_command' &&
+      (upload.triggers?.length ?? 0) > 0,
+    `toolRefs=${(upload.toolRefs ?? []).join(',') || 'NONE'}; triggers=${upload.triggers?.length ?? 0}`,
+  );
+
+  // What the naby edit is FOR. The upstream document told the model to reach for
+  // `AskUserQuestion` and described "Claude Code's Bash tool"; naby denies the
+  // former outright (claude-agent-sdk-engine NATIVE_ASK_USER_QUESTION_TOOL) and
+  // does not have the latter. A skill body that names tools naby refuses is a skill
+  // that stalls at the first question it needs to ask.
+  const uploadBody = harnessAssetBody(upload.raw);
+  // The upstream told the model to ASK with `AskUserQuestion` ("… `AskUserQuestion`
+  // 또는 …", "… `AskUserQuestion` 으로 묻기"). The shipped body may only name that
+  // tool to say naby does not have it; every instruction to ask must point at
+  // naby's answer (a direct question, or `naby_checkin` for a decision).
+  const instructsAsk = /`AskUserQuestion`\s*(또는|으로|로)\b/.test(uploadBody);
+  record(
+    '(a) the shipped body names no tool naby denies, and names the ones it has',
+    !instructsAsk &&
+      uploadBody.includes('`AskUserQuestion` 도구가 없다') &&
+      !/Claude Code의 `Bash`/.test(uploadBody) &&
+      uploadBody.includes('`run_command`') &&
+      uploadBody.includes('`naby_checkin`'),
+    `instructs AskUserQuestion: ${instructsAsk ? 'STILL THERE' : 'no'}; ` +
+      `states naby lacks it: ${uploadBody.includes('`AskUserQuestion` 도구가 없다')}; ` +
+      `run_command named: ${uploadBody.includes('`run_command`')}; ` +
+      `naby_checkin offered instead: ${uploadBody.includes('`naby_checkin`')}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -137,10 +208,21 @@ function checkSeeding(): void {
   const first = seedBuiltinHarness(store);
   const skill = rowFor(store, SKILL);
   const agent = rowFor(store, SUBAGENT);
+  const upload = rowFor(store, UPLOAD);
   record(
-    '(b) both items seed, DISABLED — a skill that cannot research must not fire',
-    first.seeded.length === 2 && skill?.status === 'disabled' && agent?.status === 'disabled',
-    `seeded=${first.seeded.join(',')}; statuses=${skill?.status}/${agent?.status}`,
+    '(b) all three items seed, DISABLED — a skill with no server must not fire',
+    first.seeded.length === BUILTIN_HARNESS_ASSETS.length &&
+      skill?.status === 'disabled' &&
+      agent?.status === 'disabled' &&
+      upload?.status === 'disabled',
+    `seeded=${first.seeded.join(',')}; statuses=${skill?.status}/${agent?.status}/${upload?.status}`,
+  );
+
+  record(
+    '(b) the upload row carries its trigger list and its tool requirement',
+    (upload?.skill?.triggers?.length ?? 0) > 0 &&
+      (upload?.skill?.toolRefs ?? []).join(',') === 'run_command',
+    `triggers=${(upload?.skill?.triggers ?? []).join(', ')}; toolRefs=${(upload?.skill?.toolRefs ?? []).join(',')}`,
   );
 
   record(
@@ -163,7 +245,7 @@ function checkSeeding(): void {
   record(
     '(b) a second boot seeds nothing and does not touch the row',
     second.seeded.length === 0 &&
-      second.kept.length === 2 &&
+      second.kept.length === BUILTIN_HARNESS_ASSETS.length &&
       after.id === before.id &&
       after.updatedAt === before.updatedAt,
     `seeded=${second.seeded.length}; kept=${second.kept.join(',')}; id stable=${after.id === before.id}`,
@@ -288,6 +370,115 @@ function checkActivation(): void {
 }
 
 // ---------------------------------------------------------------------------
+// (g) a second bundle, a second switch — and the seed-time case a switch misses
+// ---------------------------------------------------------------------------
+
+function checkSecondBundle(): void {
+  const cic = BUILTIN_HARNESS_BUNDLES[CIC_HARNESS_BUNDLE_ID] ?? [];
+  const atl = BUILTIN_HARNESS_BUNDLES[ATLASSIAN_HARNESS_BUNDLE_ID] ?? [];
+  record(
+    '(g) the bundles are disjoint, and every shipped asset belongs to exactly one',
+    atl.join(',') === UPLOAD &&
+      cic.every((n) => !atl.includes(n)) &&
+      BUILTIN_HARNESS_ASSETS.every((a) => bundleOwning(a.name) !== undefined) &&
+      bundleOwning(UPLOAD) === ATLASSIAN_HARNESS_BUNDLE_ID &&
+      bundleOwning(SKILL) === CIC_HARNESS_BUNDLE_ID,
+    `atlassian=[${atl.join(',')}]; cic=[${cic.join(',')}]; unowned=${
+      BUILTIN_HARNESS_ASSETS.filter((a) => !bundleOwning(a.name))
+        .map((a) => a.name)
+        .join(',') || 'none'
+    }`,
+  );
+
+  // Saving the atlassian credential moves ITS item and nothing else. This is the
+  // check that would have caught a bundle table where one name appeared twice.
+  const store = seeded();
+  const on = applyBuiltinHarnessActivation(store, ATLASSIAN_HARNESS_BUNDLE_ID, true);
+  record(
+    '(g) saving atlassian enables ONLY the upload skill — cic\'s two stay off',
+    on.changed.join(',') === UPLOAD &&
+      rowFor(store, UPLOAD)?.status === 'enabled' &&
+      rowFor(store, SKILL)?.status === 'disabled' &&
+      rowFor(store, SUBAGENT)?.status === 'disabled',
+    `changed=${on.changed.join(',')}; upload=${rowFor(store, UPLOAD)?.status}; ` +
+      `context=${rowFor(store, SKILL)?.status}; researcher=${rowFor(store, SUBAGENT)?.status}`,
+  );
+
+  // ...and the cic switch does not reach across either.
+  const cicOn = applyBuiltinHarnessActivation(store, CIC_HARNESS_BUNDLE_ID, true);
+  const atlOff = applyBuiltinHarnessActivation(store, ATLASSIAN_HARNESS_BUNDLE_ID, false);
+  record(
+    '(g) removing atlassian disables only the upload skill — cic keeps running',
+    cicOn.changed.length === 2 &&
+      atlOff.changed.join(',') === UPLOAD &&
+      rowFor(store, UPLOAD)?.status === 'disabled' &&
+      rowFor(store, SKILL)?.status === 'enabled',
+    `cic changed=${cicOn.changed.join(',')}; atlassian off changed=${atlOff.changed.join(',')}; ` +
+      `upload=${rowFor(store, UPLOAD)?.status}; context=${rowFor(store, SKILL)?.status}`,
+  );
+
+  // THE CASE THE SWITCH CANNOT REACH. The atlassian preset shipped in 0.2.0; this
+  // skill ships now. An existing user saved that credential long ago and will never
+  // save it again, so without a seed-time answer the row would arrive disabled and
+  // stay there — a shipped feature nobody is told to turn on.
+  const existing = new MemoryStore();
+  const early = seedBuiltinHarness(existing, {
+    activeBundles: [ATLASSIAN_HARNESS_BUNDLE_ID],
+  });
+  record(
+    '(g) a user who configured atlassian LAST YEAR gets the new skill switched on',
+    early.seeded.length === BUILTIN_HARNESS_ASSETS.length &&
+      rowFor(existing, UPLOAD)?.status === 'enabled' &&
+      existing.getSetting(builtinHarnessAutoStatusKey(UPLOAD)) === 'enabled',
+    `upload=${rowFor(existing, UPLOAD)?.status}; ` +
+      `autoStatus=${existing.getSetting(builtinHarnessAutoStatusKey(UPLOAD))}`,
+  );
+
+  record(
+    '(g) ...and the bundles whose server is NOT configured still arrive disabled',
+    rowFor(existing, SKILL)?.status === 'disabled' &&
+      rowFor(existing, SUBAGENT)?.status === 'disabled',
+    `context=${rowFor(existing, SKILL)?.status}; researcher=${rowFor(existing, SUBAGENT)?.status}`,
+  );
+
+  // The record written at seed time is what makes ownership decidable afterwards:
+  // an item seeded ENABLED and then turned off by hand must stay off when the
+  // credential is re-saved, exactly like one that was switched on later.
+  existing.setHarnessEnabled(rowFor(existing, UPLOAD)!.id, false);
+  const resaved = applyBuiltinHarnessActivation(existing, ATLASSIAN_HARNESS_BUNDLE_ID, true);
+  record(
+    '(g) an item seeded ON and then turned OFF by hand stays off through a re-save',
+    resaved.userOwned.includes(UPLOAD) &&
+      resaved.changed.length === 0 &&
+      rowFor(existing, UPLOAD)?.status === 'disabled',
+    `userOwned=${resaved.userOwned.join(',')}; status=${rowFor(existing, UPLOAD)?.status}`,
+  );
+
+  // An unknown bundle id is inert rather than fatal — the seed must not care that
+  // some caller knows about a preset this build does not.
+  const unknown = new MemoryStore();
+  seedBuiltinHarness(unknown, { activeBundles: ['no-such-bundle'] });
+  record(
+    '(g) an unknown active bundle changes nothing',
+    rowFor(unknown, UPLOAD)?.status === 'disabled' && rowFor(unknown, SKILL)?.status === 'disabled',
+    `upload=${rowFor(unknown, UPLOAD)?.status}; context=${rowFor(unknown, SKILL)?.status}`,
+  );
+
+  // And the default — no `activeBundles` at all — is byte-for-byte the old
+  // behaviour, which is what keeps the cic path unchanged by this parameter.
+  const plain = new MemoryStore();
+  seedBuiltinHarness(plain);
+  record(
+    '(g) with no activeBundles argument, seeding is exactly what it always was',
+    BUILTIN_HARNESS_ASSETS.every((a) => {
+      const row = plain.listHarness('user', DEFAULT_USER_ID, { kind: a.kind }).find((r) => r.name === a.name);
+      return row?.status === 'disabled' && plain.getSetting(builtinHarnessAutoStatusKey(a.name)) === 'disabled';
+    }),
+    `all ${BUILTIN_HARNESS_ASSETS.length} rows disabled with autoStatus 'disabled'`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // (f) the skill is TRIGGERED, not always-on
 // ---------------------------------------------------------------------------
 
@@ -349,7 +540,7 @@ function checkTriggerGating(): void {
   );
 
   // What the gating is worth, in the unit that motivated it: the skill budget.
-  const SKILL_BUDGET = 2000;
+  const SKILL_BUDGET = shellSkillTokenBudget();
   const cost = estimateTokens(renderSkillBlock(row));
   const onQuiet = selectSkillsForInjection([row], QUIET_TURNS[0]!, SKILL_BUDGET);
   const onWiki = selectSkillsForInjection([row], TRIGGERING_TURNS[0]!, SKILL_BUDGET);
@@ -361,6 +552,140 @@ function checkTriggerGating(): void {
       onWiki.tokensUsed === cost,
     `block=${cost} tokens = ${Math.round((cost / SKILL_BUDGET) * 100)}% of a ${SKILL_BUDGET}-token budget; ` +
       `quiet turn tokensUsed=${onQuiet.tokensUsed}; wiki turn tokensUsed=${onWiki.tokensUsed}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// (h) the upload skill: which turns reach it, and whether it fits
+// ---------------------------------------------------------------------------
+
+/** Turns that must reach `confluence-upload`. Note the third and fourth: they carry
+ *  no full "confluence"/"컨플루언스" at all, which is why the trigger list also has
+ *  the abbreviation people type and the CLI's own name. The fifth is a pasted parent
+ *  page URL — the strongest upload signal there is, and it names no product. */
+const UPLOAD_TURNS = [
+  '이 md 파일을 컨플루언스에 올려줘',
+  'design.md를 confluence 부모 페이지 아래 자식으로 올려줘',
+  '컨플에 올려줘',
+  'confupload로 문서 세 개 정리해서 올려줘',
+  '이 문서를 https://altimedia.atlassian.net/wiki/spaces/ENG/pages/123/Design 아래에 붙여줘',
+];
+
+/** Ordinary work in a coding agent, four of which are ABOUT UPLOADING SOMETHING
+ *  ELSE. This corpus is the reason `업로드`/`upload` are NOT triggers: as raw
+ *  substrings (skill-inject matches with `includes`) they are among the most common
+ *  words in a product codebase, and each false positive costs a 1.1k-token document
+ *  on a turn that will never touch Confluence. */
+const UPLOAD_DECOYS = [
+  '파일 업로드 API 만들어줘',
+  's3 uploadFile이 왜 실패하는지 봐줘',
+  '이미지 업로드 컴포넌트에 진행률 붙여줘',
+  'review the multipart upload retry logic',
+  '이 함수 리팩터링해줘',
+  '이 테스트가 왜 실패하는지 봐줘',
+  'rename this variable and update the callers',
+  '사내 위키에서 그 용어 찾아줘',
+];
+
+function checkUploadTriggersAndBudget(): void {
+  const budget = shellSkillTokenBudget();
+  const store = seeded();
+  applyBuiltinHarnessActivation(store, CIC_HARNESS_BUNDLE_ID, true);
+  applyBuiltinHarnessActivation(store, ATLASSIAN_HARNESS_BUNDLE_ID, true);
+  const upload = rowFor(store, UPLOAD)!;
+  const context = rowFor(store, SKILL)!;
+  const triggers = upload.skill?.triggers ?? [];
+  // A turn that can run commands — what the upload skill needs to participate.
+  const withShell = new Set(['read_file', 'write_file', 'run_command']);
+
+  record(
+    '(h) the upload skill declares the two words the request always contains',
+    triggers.includes('confluence') && triggers.includes('컨플루언스'),
+    `triggers=${triggers.join(', ')}`,
+  );
+
+  const missed = UPLOAD_TURNS.filter((t) => !skillMatchesTurn(upload, t));
+  record(
+    '(h) every way a person asks for an upload reaches it',
+    missed.length === 0,
+    `${UPLOAD_TURNS.length} turns, all matched: ${missed.length === 0 ? 'yes' : `NO — missed ${JSON.stringify(missed)}`}`,
+  );
+
+  const leaked = UPLOAD_DECOYS.filter((t) => skillMatchesTurn(upload, t));
+  record(
+    '(h) an ordinary turn about uploading something else does NOT reach it',
+    leaked.length === 0,
+    `${UPLOAD_DECOYS.length} decoys, none matched: ${leaked.length === 0 ? 'yes' : `NO — leaked ${JSON.stringify(leaked)}`}`,
+  );
+
+  // THE MEASUREMENT THAT DECIDED THE TRIGGER LIST. `업로드`/`upload` look like the
+  // obvious triggers for an upload skill and are exactly wrong: substring-matched,
+  // they fire on the decoy corpus. Kept as a check so a later "just add upload"
+  // has to look at this number first.
+  const naive: HarnessItem = {
+    ...upload,
+    skill: { ...upload.skill!, triggers: ['업로드', 'upload'] },
+  };
+  const naiveHits = UPLOAD_DECOYS.filter((t) => skillMatchesTurn(naive, t));
+  record(
+    '(h) ...whereas `업로드`/`upload` as triggers would fire on unrelated work',
+    naiveHits.length >= 4 && leaked.length === 0,
+    `naive triggers hit ${naiveHits.length}/${UPLOAD_DECOYS.length}: ${JSON.stringify(naiveHits)}`,
+  );
+
+  // A skill nobody can inject is a dead row. The upstream document was 2585 tokens
+  // — over the budget BY ITSELF, so it would have been dropped on every turn it
+  // ever matched. This is the check that made compressing it a precondition.
+  const uploadCost = estimateTokens(renderSkillBlock(upload));
+  const contextCost = estimateTokens(renderSkillBlock(context));
+  record(
+    '(h) the shipped body fits the turn budget ON ITS OWN — otherwise it is a dead row',
+    uploadCost <= budget,
+    `upload=${uploadCost} tokens vs budget ${budget} (${Math.round((uploadCost / budget) * 100)}%); ` +
+      `the upstream 265-line original was 2585 — over a 2000 budget by itself`,
+  );
+
+  // BOTH skills fire on any turn naming Confluence, because both are about
+  // Confluence. Ranking has no relevance signal (scope, then recency), so if they
+  // do not both fit, the survivor is decided by seed order rather than by the
+  // request — and for "upload this md" the survivor was the RESEARCH skill.
+  const enabled = store.listHarness('user', DEFAULT_USER_ID, { kind: 'skill', status: 'enabled' });
+  const both = selectSkillsForInjection(enabled, UPLOAD_TURNS[0]!, budget, withShell);
+  record(
+    '(h) a turn that names Confluence gets BOTH — no coin flip between them',
+    both.skills.length === 2 &&
+      both.droppedForBudget === 0 &&
+      both.tokensUsed === uploadCost + contextCost &&
+      both.tokensUsed <= budget,
+    `injected=${both.skills.map((s) => s.name).join(',')}; used=${both.tokensUsed}` +
+      ` (${contextCost}+${uploadCost}) of ${budget}; dropped=${both.droppedForBudget}`,
+  );
+
+  // The regression this budget change fixed, pinned so it cannot come back
+  // silently: at the old 2000 the pair did not fit and the upload skill lost.
+  const old = selectSkillsForInjection(enabled, UPLOAD_TURNS[0]!, 2000, withShell);
+  record(
+    '(h) ...which at the OLD 2000 budget it did not — one was dropped and counted',
+    old.skills.length === 1 && old.droppedForBudget === 1,
+    `at 2000: injected=${old.skills.map((s) => s.name).join(',')}; dropped=${old.droppedForBudget}` +
+      ` — the pair costs ${uploadCost + contextCost}`,
+  );
+
+  // Tool gating, the other half of "never half-run": no shell this turn, no
+  // instructions telling the model to run a CLI. Held back AND counted.
+  const noShell = selectSkillsForInjection(enabled, UPLOAD_TURNS[0]!, budget, new Set(['read_file']));
+  record(
+    '(h) a turn with no run_command is not handed a CLI runbook — held and counted',
+    noShell.excludedForTools === 1 && !noShell.skills.some((s) => s.name === UPLOAD),
+    `excludedForTools=${noShell.excludedForTools}; injected=${noShell.skills.map((s) => s.name).join(',') || 'none'}`,
+  );
+
+  // And the quiet turns stay quiet for the pair, not just for one of them.
+  const quiet = selectSkillsForInjection(enabled, QUIET_TURNS[0]!, budget, withShell);
+  record(
+    '(h) an ordinary coding turn still pays ZERO for either built-in skill',
+    quiet.skills.length === 0 && quiet.tokensUsed === 0,
+    `turn=${JSON.stringify(QUIET_TURNS[0])}; injected=${quiet.skills.length}; used=${quiet.tokensUsed}`,
   );
 }
 
@@ -481,11 +806,13 @@ function main(): boolean {
   checkAssetsAreVerbatim();
   checkSeeding();
   checkActivation();
+  checkSecondBundle();
   checkTriggerGating();
+  checkUploadTriggersAndBudget();
   checkToolRefSpellings();
   checkEngineSource();
 
-  console.log('\n=== SPIKE-HARNESS-SEED — the built-in Confluence bundle and its switch ===\n');
+  console.log('\n=== SPIKE-HARNESS-SEED — the built-in Confluence bundles and their switches ===\n');
   let allPass = true;
   for (const c of checks) {
     const tag = c.pass ? 'PASS' : 'FAIL';

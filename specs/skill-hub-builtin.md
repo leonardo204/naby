@@ -2,16 +2,16 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 type: design
-version: 0.6.1
+version: 0.7.0
 status: active
-scope: 사내 표준 MCP(skill-hub, mcp-atlassian, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. cic 프리셋은 내장 하네스 번들(confluence-context 스킬 + confluence-researcher 서브에이전트)의 스위치도 겸한다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
+scope: 사내 표준 MCP(skill-hub, mcp-atlassian, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를, atlassian은 confluence-upload 스킬을 켠다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone]
 updated: 2026-08-12
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 
-> 상태: 설계 확정(2026-08-12, 0.6.0에서 §2.7을 가산 — cic 프리셋과 내장 하네스 번들. 자격값 저장이 곧 번들의 스위치이고, 사용자가 손으로 끈 것은 이기지 않는다. 0.6.1에서 내장 스킬을 트리거 게이팅으로 바꿈 — 1722토큰짜리 문서가 항상-켜짐이면 매 턴 예산의 86%를 먹는다). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
+> 상태: 설계 확정(2026-08-12, 0.6.0에서 §2.7을 가산 — cic 프리셋과 내장 하네스 번들. 자격값 저장이 곧 번들의 스위치이고, 사용자가 손으로 끈 것은 이기지 않는다. 0.6.1에서 내장 스킬을 트리거 게이팅으로 바꿈 — 1722토큰짜리 문서가 항상-켜짐이면 매 턴 예산의 86%를 먹는다. 0.7.0에서 두 번째 번들 `confluence-upload`를 atlassian 프리셋에 붙이고, 번들 단위로 규칙을 일반화했다). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
 
 ## 1. 배경과 원칙
 
@@ -98,14 +98,56 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 
 **원문에서 고친 것.** 두 `.md`는 원문 그대로 두되, naby 안에서 사실이 아닌 부분만 최소로 고쳤다 — 스킬의 설치 도우미가 말하던 `.mcp.json`·`${CIC_HOST}:49820`·healthz 3중 검증은 naby에 없는 절차이므로 System MCP 프리셋 기준 2중 검증으로 바꾸고, 기록 위치 `.claude/confluence.yml`을 `.naby/confluence.yml`로, rating 도구 표기에 naby의 `cic__submit_feedback`을 병기했다. 서브에이전트 `.md`는 무수정이다.
 
+### 2.7.1 두 번째 번들 — atlassian과 `confluence-upload` (0.7.0에서 추가)
+
+**무엇이 늘었나.** skill-hub의 `confluence-upload` 스킬을 세 번째 내장 아티팩트로 싣는다(`src/runtime/harness-assets/skills/confluence-upload/SKILL.md`). 이 스킬은 confUploader 저장소의 로컬 CLI(`build/bin/confupload-cli`)를 셸로 호출해 마크다운을 Confluence 페이지로 올린다 — Markdown을 Storage Format으로, mermaid 블록을 Macro Pack ADF로 변환하는 일이 본체다. 적재 경로는 §2.7 그대로다: 원문 `.md`를 트리에 두고 생성기가 `generated.ts`에 상수로 굳히며, 스파이크가 바이트 단위로 대조한다.
+
+**스위치는 cic가 아니라 atlassian이다.** 이 CLI가 요구하는 값은 `CONFLUENCE_BASE_URL`·`CONFLUENCE_EMAIL`·`CONFLUENCE_API_TOKEN` 셋이고, 이는 atlassian 프리셋이 이미 받는 `CONFLUENCE_URL`·`CONFLUENCE_USERNAME`·`CONFLUENCE_API_TOKEN`과 같은 가족이다. atlassian을 설정한 사용자는 정의상 쓰기 가능한 Confluence 계정과 토큰을 가진 사람이고, cic만 가진 사용자는 **읽기 색인**만 가진 사람이라 페이지를 만들 수단이 없다. 그래서 쓰기 스킬의 옵트인 신호는 atlassian 자격값이다.
+
+주의할 것 하나 — **naby는 저장된 값을 스킬에 넘기지 않는다.** 그 값은 mcp-atlassian stdio 프로세스의 `env`로만 가고, `run_command`는 앱 자신의 환경을 물려받는다. 프리셋은 "이 사용자에게 Confluence 접근권이 있다"는 증거일 뿐 자격값 전달 통로가 아니며, 스킬 본문도 그렇게 말한다.
+
+**규칙을 번들 단위로 일반화한다.** `BUILTIN_HARNESS_BUNDLES`에 `atlassian: ['confluence-upload']` 한 줄이 늘고, 역방향 조회 `bundleOwning(name)`이 표에서 **계산**된다(두 벌을 손으로 맞추지 않는다). 프리셋은 `harnessBundle`을 선언할 뿐이고 `systemMcp.set/remove`는 프리셋별 분기를 여전히 갖지 않는다. 번들 둘은 서로 겹치지 않으며, 한 자격값의 전환은 자기 번들 항목만 움직인다. cic 번들의 동작은 이 변경으로 달라지지 않는다.
+
+**시드 시점 활성화 — 스위치가 닿지 못하는 구멍.** 전환은 자격값을 **저장하거나 제거할 때** 일어난다. 그런데 atlassian 프리셋은 0.2.0부터 있었고 이 스킬은 지금 온다. 이미 설정을 마친 사용자는 다시 저장할 이유가 없으므로 스위치는 영원히 울리지 않고, 행은 꺼진 채로 남는다 — 아무도 켜라고 알려주지 않는 기능이 된다. 그래서 부팅 시드가 `activeBundles`를 받는다.
+
+- 셸의 `configuredHarnessBundles(store)`가 레지스트리를 순회해 **설정된 프리셋의 번들 id**를 모으고, `getStore()`의 시드 호출이 그것을 넘긴다. "이 프리셋이 설정돼 있는가"는 레지스트리를 가진 모듈이 답한다 — 런타임은 설정도 MCP 등록부도 읽지 않는다는 §2.7의 성질을 유지한다.
+- 해당 번들 항목은 `enabled`로 도착하고, `harness.builtin.<name>.autoStatus`도 `enabled`로 기록된다. 도착 시점에 행과 기록이 일치하므로 "사용자가 이후에 손댔는가"는 그대로 판정된다 — 시드로 켜진 항목을 사람이 끄면 재저장에도 꺼진 채다.
+- **이 가지는 없는 행에만 닿는다.** 이미 있는 행은 그 위의 `findRow` 검사에서 `kept`로 빠지므로, 부팅이 사용자가 끈 것을 되켜는 뒷문이 될 수 없다.
+- cic는 이 파라미터로 달라지지 않는다. cic 프리셋과 cic 행은 같은 릴리스(0.6.0)에서 함께 왔으므로 "자격값은 있는데 행이 없는" 설치가 존재할 수 없고, 시드는 언제나 `kept`로 끝난다. 그래서 호출부는 프리셋별 예외 없이 **설정된 번들 전부**를 넘긴다.
+
+**트리거.** 매칭은 대소문자 무시 부분 문자열이므로 낱말 선택이 곧 발동 정책이다. 최종 목록은 `confluence, 컨플루언스, 컨플, confupload, atlassian.net`이다.
+
+- `컨플`은 `컨플루언스`의 부분집합이면서 "컨플에 올려줘" 같은 준말도 잡는다. `confupload`는 CLI·저장소 이름이라 오발동이 사실상 없다. `atlassian.net`은 사용자가 부모 페이지 URL을 붙여넣은 턴을 잡는다 — 제품명을 한 번도 말하지 않는 가장 흔한 업로드 요청이다.
+- **`업로드`/`upload`는 넣지 않았다.** 코퍼스로 재봤다: 코딩 에이전트의 평범한 턴 8개(파일 업로드 API, `s3 uploadFile` 실패, 이미지 업로드 컴포넌트, multipart upload 리뷰, 리팩터링, 테스트 실패, 변수 이름 바꾸기, 사내 위키 검색) 중 **4개**가 그 두 낱말만으로 발동한다. 발동 대가는 잘못된 행동이 아니라 1106토큰이지만, 그 예산이 애초에 이 결정의 이유다. 최종 목록으로는 8개 중 0개가 발동한다.
+- **`위키`/`wiki`도 넣지 않았다.** 그 낱말이 붙는 문장은 대개 조사 요청("사내 위키에서 찾아줘")이라 `confluence-context`의 몫이고, 업로드 스킬까지 끌어오면 조사 턴이 쓰기 문서를 이고 간다.
+
+**예산 — 원문은 그대로는 실릴 수 없었다.** skill-hub 원문(265줄)의 주입 블록은 **2585토큰**이고, 당시 턴당 스킬 예산은 2000이었다. `selectSkillsForInjection`은 한 스킬의 비용이 남은 예산을 넘으면 그 스킬을 **통째로 버리고 센다**(`droppedForBudget`) — 즉 원문 그대로 실었다면 매칭되는 모든 턴에서 버려지는 **영원히 주입 불가한 죽은 행**이 된다. 그래서 압축이 선행 조건이었고, naby 전용 본문은 **1106토큰**이다(57% 감축).
+
+**예산을 2000에서 3000으로 올린다.** 두 내장 스킬은 `confluence`·`컨플루언스`를 **둘 다** 트리거로 갖는다 — 둘 다 Confluence에 관한 것이니 당연하고, 피할 방법도 없다. 합은 1722+1106=**2828**이라 2000에는 들어가지 않는다. 그런데 `skill-inject`의 순위는 스코프 → 최신순일 뿐 **적합도 신호가 없어서**, 어느 쪽이 살아남는지는 요청 내용이 아니라 시드 순서가 정한다. 실측 결과 200회 시드 전부에서 `confluence-context`가 이겼다 — 즉 "이 md 컨플루언스에 올려줘" 턴이 조사 스킬만 받고 업로드 스킬을 잃는다. 그 상태의 모델은 mcp-atlassian의 페이지 생성으로 손을 뻗고, 표와 mermaid가 조용히 깨진 페이지가 남는다. **예산은 할당량이 아니라 상한**이므로 올려도 매칭이 적은 턴에서는 한 토큰도 더 쓰지 않는다. 추가분은 Confluence를 지명한 턴에서만 쓰이고, 그 턴이 바로 둘 다 필요한 턴이다.
+
+**스킬은 도구를 요구한다.** `confluence-upload`의 frontmatter는 `tools: run_command`를 선언한다 — `confluence-context`가 `toolRefs`를 갖지 않는 것과 반대이며, 이유도 반대다. 이 스킬은 CLI를 **실행**해서 일을 하므로, 셸이 없는 턴(프로젝트가 열리지 않은 세션에는 `run_command` 실행기가 등록되지 않는다)에 1106토큰짜리 실행 안내를 넘기는 것은 낭비다. `skill-inject`는 그런 턴에서 이 스킬을 붙잡고 **센다**(`excludedForTools`).
+
+**원문에서 고친 것(전부).** naby 안에서 참이 아닌 문장만 고쳤고, 나머지 감축은 위의 예산 때문이다.
+
+1. `AskUserQuestion` — 원문은 토큰 수집(§토큰 처리)과 모드 결정(§Step 3)에서 그 도구를 지시한다. naby는 SDK의 그 도구를 **의도적으로 거부한다**(`NATIVE_ASK_USER_QUESTION_TOOL`, 체크인 원장이 비는 것을 막기 위해서다). 답변 본문으로 직접 묻고, 되돌리기 어려운 선택은 `naby_checkin`으로 물어 원장에 남기도록 바꿨다.
+2. "Claude Code의 `Bash` 도구는 셸 상태가 호출 간 유지되지 않는다" — naby의 도구는 `run_command`이고, 매 호출 새 셸을 띄우므로 상태가 유지되지 않는다는 **결론은 같지만 이름이 틀렸다**. 도구 이름을 고치고, 같은 이유로 `cd`도 이어지지 않는다는 사실을 더했다.
+3. 작업 디렉터리 — 원문은 "다른 디렉터리면 사용자에게 `cd /path/to/confUploader`를 안내하고 중단"한다. naby에서 cwd는 **열린 프로젝트로 고정**되고 사용자가 셸에서 옮길 수 있는 것이 아니다. confUploader를 프로젝트로 열든지, 한 호출 안에서 `cd … && …`로 묶든지 둘 중 하나로 바꿨다.
+4. 자격값 출처 — 원문은 "셸 env에 없으면" 사용자에게 받으라고 한다. naby의 `run_command`는 앱 환경을 물려받으므로 그 값이 있을 이유가 거의 없고, **설정의 atlassian 프리셋에 같은 값이 있어도 이 셸에는 실리지 않는다**는 사실을 명시했다.
+5. 실행 한계 — naby에만 있는 두 제약을 더했다. `run_command`의 기본 타임아웃은 60초(최대 600초)라 파일이 여러 개면 `--delay-ms` 때문에 쉽게 넘고, 명령 출력은 3만 자에서 잘리므로 `--dry-run-emit-body`는 파일로 받아야 한다.
+6. `## Reference` 절 — 원문은 `../README.md` 같은 **스킬 폴더 상대 경로**를 가리킨다. naby의 스킬은 파일이 아니라 행이라 그 경로가 존재하지 않으므로 절을 삭제했다.
+7. frontmatter `allowed-tools: Bash, Read, AskUserQuestion` → naby의 이름으로 바꾸고(`run_command`), 생성기가 파싱하는 `tools:` 키를 함께 두어 위의 도구 게이팅을 켰다.
+
+압축으로 **덜어낸 것**(내용 손실을 명시한다): mcp-atlassian 비교표 7행(라우팅 규칙은 frontmatter `description`에 남아 있고, `description`은 주입 블록에 실리지 않아 예산을 쓰지 않는다), 모드 표 6행 → 산문 한 문단, 선택 플래그 10개 → 자주 쓰는 6개 + `--help` 안내, 예제 3개 → 실행 예 1개, JSON Lines 예시 3줄 → 필드 목록 한 줄, Troubleshooting 표 10행 → 5행(구버전 바이너리가 원인인 3행을 한 행으로 합쳤다), Security notes 4줄 → 자격값 절의 2문장, Anti-patterns 4줄 → 실패 절의 2행. **줄이지 않은 것**: mermaid 안정 문법 규칙과 자동 교정의 한계, 표 셀 `|` 이스케이프, 참조 링크·평문 URL 변환 — `--help`로 대체되지 않고 문서를 **쓸 때** 필요한 지식이라 이 스킬의 실제 값어치다.
+
 ## 3. 검증 계획
 
 - 자동 활성화(§2.5, 0.5.0) — 스파이크 `spike:harness`에 게이트 불변식 7 검사를 넣는다(신규 naby 홈 행은 enabled·enabled 전용 목록에 보임, 플래그 없으면 disabled, 벤더는 disabled, 사용자가 끈 행은 재스캔에도 꺼진 채, 묘비·신뢰 순서 불변). 셸에서는 임포터가 **어떤 아티팩트에 플래그를 다는지**(요청 수준)와 라우트 설치 플로우(파일 등장 → 목록 → 클릭 없이 enabled 목록에 보임, 킬 스위치 끄면 disabled)를 검증한다.
 - 셸 vitest — 레지스트리 조립(정규화·Bearer 중복 방지·URL 덮어쓰기·Atlassian env 조립·uvx 해석 실패 거부), `systemMcp.set/test/remove` 액션(필수 필드 누락 거부, 응답에 secret 미포함 — set/test/remove/GET 전 경로 직렬화 검사), 상태 판정, 일반 목록의 프리셋 필터.
 - cic 프리셋(§2.7) — 셸 vitest에 토큰 없으면 거절, 토큰 하나로 HTTP 엔트리 조립, `Bearer` 한 번만, URL 덮어쓰기, **응답에 토큰이 실리지 않음**(비밀 필드가 하나뿐이라 `readNonSecretFields`가 빈 객체), 서버 이름이 `cic`임을 넣는다. 상태 판정 테스트는 하드코딩 대신 레지스트리를 순회하도록 바꾼다 — 네 번째 프리셋이 이 케이스를 자동으로 받는다. 테스트의 토큰은 항상 자리표시 문자열이다.
 - 내장 번들(§2.7) — 스파이크 `spike:harness-seed`가 (a) `generated.ts`와 `.md` 원문의 바이트 일치, (b) 시드는 disabled·재부팅 무동작·편집분 미덮어쓰기·삭제분 미부활, (c) cic 저장 → 활성, 제거 → 비활성, **사용자가 끈 것은 재저장·재연결에도 꺼진 채**, 묘비 미부활, (d) `mcp__cic__*` → `cic__*` 매칭과 그 밖의 도구 차단, (e) Agent SDK 경로의 `mcp__nabytools__cic__*` 재수식, (f) 트리거 게이팅(시드 행이 `triggers`를 갖는다, "cic에서 배포 정책 찾아줘"·"그 서비스 ADR 어디 있어" 류는 매칭되고 "이 함수 리팩터링해줘" 류는 매칭되지 않는다, 무관한 턴의 스킬 예산 소모가 0이다)을 검사한다. 셸 vitest는 같은 전환을 실제 스토어로 다시 돌리고, `restrictToolset`의 세 철자 처리를 따로 검증한다.
+- 두 번째 번들(§2.7.1) — 같은 스파이크에 (g)와 (h)를 더한다. (g)는 번들 둘이 겹치지 않고 모든 아티팩트가 정확히 한 번들에 속한다는 것, atlassian 저장/제거가 자기 항목만 움직이고 cic 항목은 건드리지 않는다는 것, `activeBundles`로 시드하면 켜진 채 도착하고 설정되지 않은 번들은 꺼진 채 온다는 것, 그렇게 켜진 항목을 사람이 끄면 재저장에도 꺼진 채라는 것, 인자를 주지 않으면 예전 그대로라는 것을 본다. (h)는 트리거 코퍼스(업로드 요청 5개 전부 매칭, 미끼 8개 전부 비매칭, `업로드`/`upload`를 넣으면 미끼 4개가 매칭)와 예산(단독 1106 ≤ 예산, 두 스킬 합 2828이 실제 셸 예산 안에 들어감, 2000에서는 하나가 버려짐, `run_command`가 없는 턴은 `excludedForTools`로 집계)을 본다. **예산 숫자는 셸 소스에서 읽는다** — 상수를 다시 적으면 셸에서 낮춰도 여기서는 통과한다. 셸 vitest는 같은 전환을 실제 스토어로 다시 돌리고, `configuredHarnessBundles`가 레지스트리를 순회한다는 것을 따로 본다.
 - 회귀 — 셸 전체, 타입체크 양 트리, `build:app`.
-- 미검증 — 실제 서버와의 라이브 연결(자격값 필요), 온보딩 시각 렌더, 패키징본에서의 uvx 경로 해석, **실제 모델이 스킬 발동 판단을 옳게 하는지**(프롬프트 품질은 스파이크의 대상이 아니다).
+- 미검증 — 실제 서버와의 라이브 연결(자격값 필요), 온보딩 시각 렌더, 패키징본에서의 uvx 경로 해석, **실제 모델이 스킬 발동 판단을 옳게 하는지**(프롬프트 품질은 스파이크의 대상이 아니다). `confupload-cli`의 실제 동작도 미검증이다 — naby는 그 저장소를 갖고 있지 않고, 스킬 본문의 CLI 계약(플래그·JSON Lines·종료코드)은 skill-hub 원문을 그대로 믿는다.
 
 ## 4. 미결정
 
