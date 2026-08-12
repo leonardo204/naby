@@ -35,6 +35,7 @@
     "spike:p15": "tsx src/spikes/spike-p15-memory.ts",
     "spike:golden": "tsx src/spikes/spike-p15-golden.ts",
     "spike:harness": "tsx src/spikes/spike-harness.ts",
+    "spike:harness-seed": "tsx src/spikes/spike-harness-seed.ts",
     "spike:pin-order": "tsx src/spikes/spike-pin-order.ts",
     "spike:skill": "tsx src/spikes/spike-skill-inject.ts",
     "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",

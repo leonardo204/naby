@@ -52,6 +52,102 @@ export const MAX_DELEGATION_DEPTH = 2;
  *  its own work. */
 export const DELEGATE_TASK_MAX = 4000;
 
+// ---------------------------------------------------------------------------
+// `toolRefs` -> actual tool names. ONE answer, for both engines.
+// ---------------------------------------------------------------------------
+//
+// A SUBAGENT FILE NAMES ITS TOOLS IN A SPELLING NABY DOES NOT USE.
+//
+// Claude Code writes an MCP tool as `mcp__<server>__<tool>`, and every
+// `agents/*.md` in the ecosystem — the ones a user imports, and naby's own
+// built-in `confluence-researcher` — declares `tools:` that way. naby names the
+// same tool `<server>__<tool>` (mcp.ts `qualifiedToolName`): the `mcp__` prefix is
+// added by the Agent SDK on the way out and stripped on the way back in, so it is
+// never part of a name inside this process.
+//
+// Compared literally, the two spellings intersect to NOTHING — and the failure is
+// the quiet kind. The subagent still runs, still answers, and reports that it could
+// not do the one thing it exists for, with no error anywhere to explain why. So a
+// ref is MATCHED against the turn's real tool names, here, in the runtime, because
+// BOTH engines need the answer and two copies of it would drift:
+//
+//   * the AI-SDK path (`naby_delegate` -> `restrictToolset` in the shell) filters
+//     the parent's toolset by these names;
+//   * the Agent SDK path re-exports naby's tools inside its own in-process MCP
+//     server, so it must then RE-QUALIFY the matches into that server's namespace.
+//
+// Accepted forms, in both spellings:
+//
+//   `mcp__cic__find_docs`  / `cic__find_docs`  one tool
+//   `mcp__cic`                                 every tool of one server
+//   `Read`                                     anything else, matched literally
+//
+// The `mcp__` prefix is only recognised with its `__` separator, so a tool whose
+// own name begins with those letters is never cut.
+
+/** A parsed `toolRefs` list: exact names plus whole-server prefixes. */
+export type ToolAllowList = {
+  /** Names to match exactly, already in naby's `<server>__<tool>` spelling. */
+  names: Set<string>;
+  /** `<server>__` prefixes from a two-segment `mcp__<server>` ref. */
+  serverPrefixes: string[];
+};
+
+export function parseToolRefs(refs: readonly string[]): ToolAllowList {
+  const names = new Set<string>();
+  const serverPrefixes: string[] = [];
+  for (const raw of refs) {
+    const ref = raw.trim();
+    if (!ref) continue;
+    if (!ref.startsWith('mcp__')) {
+      names.add(ref);
+      continue;
+    }
+    const rest = ref.slice('mcp__'.length);
+    if (!rest) continue;
+    if (rest.includes('__')) names.add(rest);
+    else serverPrefixes.push(`${rest}__`);
+  }
+  return { names, serverPrefixes };
+}
+
+/** Whether a REAL tool name (naby spelling) is permitted by a parsed allow-list. */
+export function toolRefsAllow(allow: ToolAllowList, toolName: string): boolean {
+  if (allow.names.has(toolName)) return true;
+  return allow.serverPrefixes.some((p) => toolName.startsWith(p));
+}
+
+/**
+ * Split a `toolRefs` list against the tools a turn actually has.
+ *
+ * `matched` are real names (naby spelling) the subagent may use. `unmatched` are
+ * refs that named nothing this turn — passed through by the Agent SDK path because
+ * they are how a spec names an SDK BUILT-IN (`Read`, `Grep`), which naby's toolset
+ * does not contain and must not swallow.
+ */
+export function resolveToolRefs(
+  refs: readonly string[],
+  toolNames: readonly string[],
+): { matched: string[]; unmatched: string[] } {
+  const allow = parseToolRefs(refs);
+  const matched = toolNames.filter((n) => toolRefsAllow(allow, n));
+  const claimed = new Set(matched);
+  const unmatched: string[] = [];
+  for (const raw of refs) {
+    const ref = raw.trim();
+    if (!ref) continue;
+    const bare = ref.startsWith('mcp__') ? ref.slice('mcp__'.length) : ref;
+    if (claimed.has(bare)) continue;
+    // A whole-server ref that DID match something is satisfied; one that matched
+    // nothing is still reported, so a caller can pass it on rather than drop it.
+    if (!ref.startsWith('mcp__') || !bare.includes('__')) {
+      if (matched.some((m) => m.startsWith(`${bare}__`))) continue;
+    }
+    unmatched.push(ref);
+  }
+  return { matched, unmatched };
+}
+
 /** The result of a nested run, as the shell reports it. */
 export interface DelegationResult {
   ok: boolean;

@@ -72,8 +72,13 @@ import type {
   RuntimeMessage,
   SubagentAttribution,
   ToolCall,
+  ToolSchema,
   Usage,
 } from '../runtime/engine.js';
+// How a subagent's `tools:` list matches the turn's real tools. In the RUNTIME
+// because both engines need one answer: the AI-SDK path filters with it
+// (`restrictToolset`), this one filters and then re-qualifies (`sdkAgentTools`).
+import { resolveToolRefs } from '../runtime/delegate.js';
 // The account → environment rule (claude-multi-account §5.1). Imported from the
 // PURE half of the account registry, which knows nothing about the CLI or this
 // engine: `engines/claude-accounts.ts` would import `claude-login.ts`, which
@@ -299,6 +304,45 @@ export const NATIVE_SLASH_COMMAND_TOOL = 'SlashCommand';
 type SdkMcpServer = ReturnType<AgentSdk['createSdkMcpServer']>;
 
 /**
+ * A SUBAGENT'S `tools:` LIST, TRANSLATED INTO THE NAMES THIS BACKEND USES.
+ *
+ * Three spellings meet here, and getting it wrong is silent.
+ *
+ *   what a spec file says     `mcp__cic__find_docs`   (Claude Code's spelling)
+ *   what naby calls it         `cic__find_docs`        (mcp.ts qualifiedToolName)
+ *   what the SDK sees          `mcp__nabytools__cic__find_docs`
+ *
+ * The third line is the one that surprises. naby does not hand its MCP servers to
+ * the SDK; it re-exports EVERY tool it has through ONE in-process server
+ * (`nabytools`, so the gate sees every call), which means the backend's name for a
+ * cic tool carries naby's server name in the middle. Passing a spec's `tools:`
+ * through verbatim therefore restricts the subagent to names that exist nowhere,
+ * and the SDK's answer to "you may use these tools" — none of which are real — is
+ * a subagent with no tools at all. It still runs and still answers; it just cannot
+ * do the thing it was delegated. That failure has no error message anywhere, which
+ * is why the translation is done explicitly and asserted in the spike.
+ *
+ * MATCHING IS THE RUNTIME'S (`resolveToolRefs`), shared with the AI-SDK path's
+ * `restrictToolset`, so a subagent is narrowed identically whichever engine runs.
+ * Only the RE-QUALIFICATION is this engine's business, because only this engine
+ * has a server to qualify into.
+ *
+ * A ref that matches nothing this turn is passed through UNCHANGED: that is how a
+ * spec names an SDK built-in (`Read`, `Grep`), which naby's toolset does not
+ * contain and must not swallow.
+ */
+export function sdkAgentTools(
+  toolRefs: readonly string[],
+  toolSchemas: readonly ToolSchema[],
+): string[] {
+  const { matched, unmatched } = resolveToolRefs(
+    toolRefs,
+    toolSchemas.map((t) => t.name),
+  );
+  return [...matched.map((n) => `mcp__${MCP_SERVER_NAME}__${n}`), ...unmatched];
+}
+
+/**
  * The options object handed to `query()` — built HERE, as a pure function, and
  * exported.
  *
@@ -464,7 +508,9 @@ export function buildQueryOptions(args: {
                 description: s.description ?? `The ${s.name} subagent.`,
                 prompt: s.systemPrompt,
                 ...(s.model ? { model: s.model } : {}),
-                ...(s.toolRefs && s.toolRefs.length > 0 ? { tools: s.toolRefs } : {}),
+                ...(s.toolRefs && s.toolRefs.length > 0
+                  ? { tools: sdkAgentTools(s.toolRefs, input.toolSchemas) }
+                  : {}),
               },
             ]),
           ),
