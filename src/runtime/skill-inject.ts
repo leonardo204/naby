@@ -27,6 +27,38 @@
 // Its token budget is a SEPARATE parameter from memory's (impl step 4): the two
 // blocks assemble side by side under distinct section headers, each capped on its
 // own. This keeps each invariant local and the accounting simple.
+//
+// -- EXPLICIT NAMING (`explicitNames`) ---------------------------------------
+//
+// Everything above is AUTOMATIC relevance: the turn's words happen to contain a
+// trigger, or the skill is always-on. `explicitNames` is the other case — the
+// user wrote the row's name into the sentence ("…를 /plan-review 스킬로 해봐"),
+// which is not a hint to be ranked but an instruction. Three consequences, and
+// they are the whole feature:
+//
+//   * TRIGGER-INDEPENDENT. A named row participates even when no trigger of its
+//     matches. Someone who typed the name has already answered the question
+//     triggers exist to guess at.
+//   * FIRST IN THE BUDGET. Named rows are ranked ahead of everything automatic,
+//     so a turn crowded with always-on skills cannot push out the one the user
+//     asked for by name. The cap itself is still HARD — a named row bigger than
+//     the whole budget is dropped and counted like anything else, because a
+//     silent overrun is worse than a counted omission.
+//   * ANY KIND, not just skills. The composer's "/" palette is UNIFIED: command,
+//     skill and subagent rows sit in one list, and a command row carries no glyph
+//     at all, so the user cannot tell which kind they picked. A rule that worked
+//     for skills and silently did nothing for commands would be a new invisible
+//     failure of exactly the kind this feature fixes. So a NAMED row of any kind
+//     contributes its kind-appropriate body (`harnessBody`), the same mapping the
+//     shell's line-led dispatcher uses. Non-skill rows still participate ONLY
+//     when named — they have no triggers, so "no triggers" must not be read as
+//     "always-on" for them.
+//
+// What explicit naming does NOT override: `status:'enabled'` (a disabled row
+// stays inert — it is disabled), the tool gate (a named tool-bearing skill whose
+// tools are absent is still excluded and counted, since half-running it is the
+// risk the gate exists for), and the budget ceiling. A name nobody registered
+// matches nothing and changes nothing — no warning, no expansion.
 
 import { DEFAULT_USER_ID, estimateTokens } from './memory-inject.js';
 import type { HarnessItem, HarnessScope, Store } from './store/store.js';
@@ -52,6 +84,12 @@ export type SkillInjectionQuery = {
    *  Omitted ⇒ no tool is considered available ⇒ every tool-bearing skill is
    *  excluded (the pre-2.5 behaviour, preserved for callers that don't pass it). */
   availableTools?: string[];
+  /** Harness rows the user NAMED in this turn's text — `/plan-review` written
+   *  inside a sentence (shell: `shared/slashTokens.ts`). See EXPLICIT NAMING at
+   *  the head of this file: a named row is relevant whatever its triggers say,
+   *  is budgeted FIRST, and may be any kind. Empty/omitted ⇒ nothing about the
+   *  turn changes. */
+  explicitNames?: string[];
 };
 
 /** What was selected for a turn. `skills` are the injected instruction-only
@@ -115,11 +153,47 @@ function rankSkills(items: readonly HarnessItem[]): HarnessItem[] {
   });
 }
 
-/** The rendered block for one skill — also the unit the budget is measured in, so
+/** The name lookup key — harness names are matched case-insensitively, because
+ * the composer lowercases what the user typed and the stored row need not be. */
+function nameKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** The set of names this turn asked for by name. Empty when nothing was named,
+ * which is the path every pre-existing caller takes. */
+export function explicitNameSet(names: readonly string[] | undefined): ReadonlySet<string> {
+  const set = new Set<string>();
+  for (const n of names ?? []) {
+    const key = nameKey(n);
+    if (key.length > 0) set.add(key);
+  }
+  return set;
+}
+
+/** Whether this row is one the turn NAMED. */
+export function isExplicitlyNamed(
+  item: HarnessItem,
+  explicit: ReadonlySet<string>,
+): boolean {
+  return explicit.size > 0 && explicit.has(nameKey(item.name));
+}
+
+/** The prompt text one harness row contributes, by kind — the same mapping the
+ * shell's line-led dispatcher uses (`ownedBody` in lib/slashCommands.ts), so a
+ * row named mid-sentence and the same row invoked at the head of a line bring
+ * the same words into the turn. For a skill this is exactly what
+ * `renderSkillBlock` always read, so the skill path is byte-for-byte unchanged. */
+export function harnessBody(item: HarnessItem): string {
+  if (item.kind === 'skill') return item.skill?.instructions ?? '';
+  if (item.kind === 'command') return item.command?.template ?? '';
+  if (item.kind === 'subagent') return item.subagent?.systemPrompt ?? '';
+  return '';
+}
+
+/** The rendered block for one row — also the unit the budget is measured in, so
  * selection and rendering can never disagree on cost. */
 export function renderSkillBlock(item: HarnessItem): string {
-  const instructions = item.skill?.instructions ?? '';
-  return `## ${item.name}\n${instructions}`;
+  return `## ${item.name}\n${harnessBody(item)}`;
 }
 
 /**
@@ -136,25 +210,53 @@ export function selectSkillsForInjection(
   userText: string,
   tokenBudget: number,
   availableTools?: ReadonlySet<string>,
+  explicitNames?: readonly string[],
 ): InjectedSkills {
   const budget = Math.max(0, Math.floor(tokenBudget));
+  const explicit = explicitNameSet(explicitNames);
 
-  // Enabled skills only, that are relevant to this turn (trigger or always-on).
-  const relevant = candidates.filter(
-    (c) =>
-      c.kind === 'skill' &&
-      c.skill !== undefined &&
-      c.status === 'enabled' &&
-      skillMatchesTurn(c, userText),
-  );
+  // Two ways in, and only two:
+  //   * NAMED — the user wrote this row's name in the turn. Any kind, whatever
+  //     its triggers say. A row with no body to contribute is not a way in: an
+  //     empty block would spend a header's worth of budget to say nothing.
+  //   * AUTOMATIC — a skill (only a skill: a command has no triggers, so the
+  //     always-on branch of `skillMatchesTurn` would make every one of them fire
+  //     on every turn) that is relevant by trigger or is always-on.
+  // Both require `enabled`; explicit naming does not resurrect a disabled row.
+  const relevant = candidates.filter((c) => {
+    if (c.status !== 'enabled') return false;
+    if (isExplicitlyNamed(c, explicit)) return harnessBody(c).length > 0;
+    return c.kind === 'skill' && c.skill !== undefined && skillMatchesTurn(c, userText);
+  });
 
   // A tool-bearing skill participates only when its tools are all present this
   // turn; otherwise it is held back and counted so the omission is observable
-  // (impl §6 "no silent half-working skills").
+  // (impl §6 "no silent half-working skills"). Naming it does NOT waive this —
+  // half-running against absent tools is the risk, whoever asked for it.
   const participates = (c: HarnessItem) => skillToolsSatisfied(c, availableTools);
   const excludedForTools = relevant.filter((c) => !participates(c)).length;
 
-  const ranked = rankSkills(relevant.filter(participates));
+  // NAMED ROWS LEAD, in the order they were named, so the budget below spends on
+  // what the user asked for before it spends on what merely matched. Everything
+  // else keeps the established precedence order.
+  const participating = relevant.filter(participates);
+  const namedOrder = new Map<string, number>();
+  for (const n of explicitNames ?? []) {
+    const key = nameKey(n);
+    if (key.length > 0 && !namedOrder.has(key)) namedOrder.set(key, namedOrder.size);
+  }
+  const named = participating
+    .filter((c) => isExplicitlyNamed(c, explicit))
+    .sort((a, b) => {
+      const order =
+        (namedOrder.get(nameKey(a.name)) ?? 0) - (namedOrder.get(nameKey(b.name)) ?? 0);
+      // Same name in two scopes: the more specific one first, as everywhere else.
+      return order !== 0 ? order : SCOPE_RANK[a.scope] - SCOPE_RANK[b.scope];
+    });
+  const ranked = [
+    ...named,
+    ...rankSkills(participating.filter((c) => !isExplicitlyNamed(c, explicit))),
+  ];
 
   const skills: HarnessItem[] = [];
   let tokensUsed = 0;
@@ -185,21 +287,31 @@ export function gatherSkillCandidates(
   query: SkillInjectionQuery,
   opts?: { userId?: string; orgId?: string },
 ): HarnessItem[] {
+  const explicit = explicitNameSet(query.explicitNames);
+  // WITH NOTHING NAMED this is the exact query it always was — skills only, asked
+  // of the store. A named row may be a command or a subagent, so that turn (and
+  // only that turn) has to see the other kinds; they are then narrowed to the
+  // names actually asked for, so nothing else about the selection changes.
+  const listScope = (scope: HarnessScope, scopeKey: string): HarnessItem[] => {
+    if (explicit.size === 0) {
+      return store.listHarness(scope, scopeKey, { kind: 'skill', status: 'enabled' });
+    }
+    return store
+      .listHarness(scope, scopeKey, { status: 'enabled' })
+      .filter((item) => item.kind === 'skill' || isExplicitlyNamed(item, explicit));
+  };
+
   const out: HarnessItem[] = [];
   // project scope (only when the session is projected)
   if (query.cwd) {
-    out.push(
-      ...store.listHarness('project', query.cwd, { kind: 'skill', status: 'enabled' }),
-    );
+    out.push(...listScope('project', query.cwd));
   }
   // user scope (a constant scopeKey on a single-user machine)
   const userId = opts?.userId ?? DEFAULT_USER_ID;
-  out.push(...store.listHarness('user', userId, { kind: 'skill', status: 'enabled' }));
+  out.push(...listScope('user', userId));
   // org scope (only when an org id is supplied)
   if (opts?.orgId) {
-    out.push(
-      ...store.listHarness('org', opts.orgId, { kind: 'skill', status: 'enabled' }),
-    );
+    out.push(...listScope('org', opts.orgId));
   }
   return out;
 }
@@ -218,6 +330,7 @@ export function retrieveSkillsForInjection(
     query.userText,
     query.tokenBudget,
     query.availableTools ? new Set(query.availableTools) : undefined,
+    query.explicitNames,
   );
 }
 

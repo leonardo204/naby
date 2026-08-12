@@ -166,6 +166,13 @@ export type RunTurnOptions = {
     /** Bare names of every tool this turn can run — a tool-bearing skill injects
      *  only when all its toolRefs are here, else it is excluded + counted (2.5). */
     availableTools?: string[];
+    /** Harness rows the user NAMED in this turn's words (`/plan-review` written
+     *  inside a sentence). A named row is relevant whatever its triggers say and
+     *  is budgeted FIRST — see EXPLICIT NAMING in skill-inject.ts. The caller
+     *  supplies it because only the caller has the user's raw text: by the time
+     *  `userText` reaches here it may be an autonomy continuation prompt or an
+     *  `@agent` task string. */
+    explicitNames?: string[];
   };
   /** Called once with what was injected (skills, tokensUsed, droppedForBudget,
    * excludedForTools) so the caller can log/inspect the per-turn skill selection.
@@ -334,6 +341,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       ...(opts.skillInjection.availableTools !== undefined
         ? { availableTools: opts.skillInjection.availableTools }
+        : {}),
+      // The rows this turn asked for BY NAME. Passed through untouched (and only
+      // when non-empty, so a turn that named nothing takes the byte-for-byte
+      // path it always did).
+      ...(opts.skillInjection.explicitNames !== undefined &&
+      opts.skillInjection.explicitNames.length > 0
+        ? { explicitNames: opts.skillInjection.explicitNames }
         : {}),
     };
     const skillOpts: { userId?: string; orgId?: string } = {};

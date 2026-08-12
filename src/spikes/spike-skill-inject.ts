@@ -24,6 +24,22 @@
 //   (f) DRIVER PARITY — (a)/(c)/(e) hold identically on MemoryStore and
 //       SqliteStore.
 //
+// EXPLICIT NAMING (`explicitNames`) adds the case where the user does not leave
+// relevance to be guessed at — they write the row's name into the sentence
+// ("…를 /plan-review 스킬로 해봐"):
+//
+//   (g) NAMED BEATS TRIGGERS — a named skill injects even though nothing it
+//       declares as a trigger appears in the turn text.
+//   (h) NAMED IS FIRST IN THE BUDGET — with room for one block and a crowd of
+//       always-on skills competing, the named one is what gets in.
+//   (i) ANY KIND — a named COMMAND row injects (the "/" palette is unified, so a
+//       rule that worked only for skills would silently fail on half the list),
+//       while an unnamed command still never injects on its own.
+//   (j) AN UNKNOWN NAME IS A NO-OP — `/nosuchthing` yields a turn byte-for-byte
+//       identical to one that named nothing.
+//   (k) NAMING DOES NOT WAIVE THE GATES — a disabled row stays out; a named
+//       tool-bearing skill whose tools are absent is still excluded and counted.
+//
 // NO NETWORK, NO KEYS. Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
 import { MockEngine } from '../engines/mock-engine.js';
@@ -90,7 +106,7 @@ function makeTurnKit() {
 async function systemAfterTurn(
   store: Store,
   userText: string,
-  cfg?: { system?: string; skillBudget?: number },
+  cfg?: { system?: string; skillBudget?: number; named?: string[] },
 ): Promise<string | undefined> {
   const { toolSchemas, executors, gate } = makeTurnKit();
   const sid = store.createSession('provider-a', 'skill-turn').sessionId;
@@ -106,7 +122,13 @@ async function systemAfterTurn(
     executors,
     gate,
     ...(cfg?.skillBudget !== undefined
-      ? { skillInjection: { tokenBudget: cfg.skillBudget, userId: USER } }
+      ? {
+          skillInjection: {
+            tokenBudget: cfg.skillBudget,
+            userId: USER,
+            ...(cfg.named ? { explicitNames: cfg.named } : {}),
+          },
+        }
       : {}),
   });
   return engine.diagnostics.system;
@@ -294,6 +316,196 @@ async function checkNoop(checks: Check[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// (g)…(k) EXPLICIT NAMING — the user wrote the row's name into the sentence
+// ---------------------------------------------------------------------------
+
+/** A user-authored command row — the kind that has no triggers at all and can
+ *  therefore only ever be reached by being named. */
+function commandReq(name: string, template: string): HarnessImportRequest {
+  return {
+    item: {
+      scope: 'user',
+      scopeKey: USER,
+      kind: 'command',
+      name,
+      description: `command ${name}`,
+      provenance: { source: 'user' },
+      command: { template },
+    },
+    requestedStatus: 'enabled',
+  };
+}
+
+async function checkExplicitNaming(checks: Check[]): Promise<void> {
+  const store = new MemoryStore();
+  // A skill whose trigger will NOT fire on the turn text below.
+  store.putHarnessItem(
+    skillReq('plan-review', 'NAMED-SKILL-BODY: review the plan before acting.', {
+      triggers: ['a-very-specific-trigger'],
+    }),
+  );
+  // A command row: no triggers, so nothing but a name can reach it.
+  store.putHarnessItem(commandReq('ship', 'NAMED-COMMAND-BODY: cut the release.'));
+  // A tool-bearing skill — naming it must NOT waive the tool gate.
+  store.putHarnessItem(
+    skillReq('websearch', 'NAMED-TOOL-BODY: search then cite.', {
+      toolRefs: ['web_search'],
+    }),
+  );
+  // A disabled row — naming it must NOT resurrect it.
+  store.putHarnessItem(
+    skillReq('offrow', 'NAMED-DISABLED-BODY: should never appear.', {
+      status: 'disabled',
+    }),
+  );
+
+  const turn = 'find the repurposing service and research the editing tool';
+
+  // The control: the same turn, naming nothing. Nothing here is always-on, so
+  // this is the pre-feature turn.
+  const unnamed = await systemAfterTurn(store, turn, {
+    system: 'BASE-SYSTEM',
+    skillBudget: 500,
+  });
+
+  // (g) a named skill injects although its trigger did not fire.
+  const namedSkill = await systemAfterTurn(store, turn, {
+    system: 'BASE-SYSTEM',
+    skillBudget: 500,
+    named: ['plan-review'],
+  });
+  const namedBeatsTriggers =
+    typeof namedSkill === 'string' &&
+    namedSkill.includes('BASE-SYSTEM') &&
+    namedSkill.includes('NAMED-SKILL-BODY') &&
+    unnamed === 'BASE-SYSTEM'; // and it was NOT there without the name
+  record(
+    checks,
+    '(g) a NAMED skill injects even though its trigger does not fire; the same turn without the name injects nothing',
+    namedBeatsTriggers,
+    `named=${JSON.stringify(namedSkill)}; unnamed=${JSON.stringify(unnamed)}`,
+  );
+
+  // (i) any kind — a named COMMAND injects; an unnamed one never does.
+  const namedCommand = await systemAfterTurn(store, turn, {
+    system: 'BASE-SYSTEM',
+    skillBudget: 500,
+    named: ['ship'],
+  });
+  const commandNamed =
+    typeof namedCommand === 'string' &&
+    namedCommand.includes('NAMED-COMMAND-BODY') &&
+    unnamed === 'BASE-SYSTEM';
+  record(
+    checks,
+    '(i) a NAMED command row injects (the "/" palette is unified); an unnamed command never injects on its own',
+    commandNamed,
+    `named=${JSON.stringify(namedCommand)}; unnamed=${JSON.stringify(unnamed)}`,
+  );
+
+  // (j) a name nobody registered does nothing at all.
+  const unknownName = await systemAfterTurn(store, turn, {
+    system: 'BASE-SYSTEM',
+    skillBudget: 500,
+    named: ['nosuchthing'],
+  });
+  record(
+    checks,
+    '(j) an UNKNOWN name is a byte-for-byte no-op — no warning, no expansion, plain text',
+    unknownName === unnamed,
+    `unknown-name=${JSON.stringify(unknownName)}; control=${JSON.stringify(unnamed)}`,
+  );
+
+  // (k) naming waives neither the enabled gate nor the tool gate.
+  const namedGated = await systemAfterTurn(store, turn, {
+    system: 'BASE-SYSTEM',
+    skillBudget: 500,
+    named: ['offrow', 'websearch'],
+  });
+  const gatedRetrieval = retrieveSkillsForInjection(
+    store,
+    { userText: turn, tokenBudget: 500, explicitNames: ['offrow', 'websearch'] },
+    { userId: USER },
+  );
+  const gatesHold =
+    typeof namedGated === 'string' &&
+    !namedGated.includes('NAMED-DISABLED-BODY') &&
+    !namedGated.includes('NAMED-TOOL-BODY') &&
+    gatedRetrieval.excludedForTools === 1;
+  record(
+    checks,
+    '(k) naming does NOT waive the gates: a disabled row stays out, a named tool-bearing skill is still excluded AND counted',
+    gatesHold,
+    `system=${JSON.stringify(namedGated)}; excludedForTools=${gatedRetrieval.excludedForTools}(want 1)`,
+  );
+
+  // …and with its tool present, that same named skill DOES inject — proving the
+  // exclusion above is the gate talking, not the naming failing.
+  const withTool = retrieveSkillsForInjection(
+    store,
+    {
+      userText: turn,
+      tokenBudget: 500,
+      explicitNames: ['websearch'],
+      availableTools: ['web_search'],
+    },
+    { userId: USER },
+  );
+  record(
+    checks,
+    '(k2) the same named tool-bearing skill injects once its tool IS available this turn',
+    withTool.skills.some((s) => s.name === 'websearch') && withTool.excludedForTools === 0,
+    `injected=${JSON.stringify(withTool.skills.map((s) => s.name))}; excludedForTools=${withTool.excludedForTools}`,
+  );
+  store.close();
+
+  // (h) budget priority — a named row outranks a crowd of always-on skills.
+  const crowded = new MemoryStore();
+  for (let i = 0; i < 6; i++) {
+    crowded.putHarnessItem(
+      skillReq(`bulk${i}`, `Skill body number ${i} padded out with some words here.`),
+    );
+  }
+  crowded.putHarnessItem(
+    skillReq('wanted', 'WANTED-BODY: the one the user asked for by name.'),
+  );
+  const candidates = crowded.listHarness('user', USER, {
+    kind: 'skill',
+    status: 'enabled',
+  });
+  const budget = 20;
+  const prioritised = selectSkillsForInjection(candidates, 'anything', budget, undefined, [
+    'wanted',
+  ]);
+  const namedFirst =
+    prioritised.skills.length > 0 &&
+    prioritised.skills[0]!.name === 'wanted' &&
+    prioritised.tokensUsed <= budget &&
+    prioritised.skills.length + prioritised.droppedForBudget === 7;
+  // The control: without the name it loses to the crowd on the same budget.
+  const unprioritised = selectSkillsForInjection(candidates, 'anything', budget);
+  record(
+    checks,
+    '(h) a NAMED skill is first in the budget — it gets in where the same skill unnamed is dropped; the cap is still hard and the accounting exact',
+    namedFirst && !unprioritised.skills.some((s) => s.name === 'wanted'),
+    `named-first=${JSON.stringify(prioritised.skills.map((s) => s.name))} tokensUsed=${prioritised.tokensUsed}(<=${budget}) dropped=${prioritised.droppedForBudget}; ` +
+      `control=${JSON.stringify(unprioritised.skills.map((s) => s.name))}`,
+  );
+
+  // The ceiling is a ceiling even for a named row: zero budget injects nothing.
+  const zeroNamed = selectSkillsForInjection(candidates, 'anything', 0, undefined, [
+    'wanted',
+  ]);
+  record(
+    checks,
+    '(h2) the budget stays a HARD ceiling for a named row too — zero budget injects nothing and counts it as dropped',
+    zeroNamed.skills.length === 0 && zeroNamed.droppedForBudget === 7,
+    `${JSON.stringify({ injected: zeroNamed.skills.length, dropped: zeroNamed.droppedForBudget })}`,
+  );
+  crowded.close();
+}
+
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<boolean> {
   const checks: Check[] = [];
@@ -313,6 +525,9 @@ async function main(): Promise<boolean> {
 
   // (d) no-op
   await checkNoop(checks);
+
+  // (g)…(k) explicit naming
+  await checkExplicitNaming(checks);
 
   console.log('\n=== SPIKE-SKILL — instruction-only skill injection (HP-03a) ===\n');
   let allPass = true;
