@@ -296,10 +296,13 @@ const updates = {
  * how a project is chosen before there is a `cwd` at all; it returns only what
  * the user picked by hand.
  *
- * The renderer FEATURE-DETECTS this (`window.naby?.fsOps`): in a plain browser
- * it is absent, "Open" and "Reveal in Finder" are not rendered at all,
- * double-click does nothing, delete falls back to the server's permanent
- * `/api/fs-op` delete, and the folder chooser falls back to `/api/pick-folder`.
+ * The renderer FEATURE-DETECTS this (`window.naby?.fsOps`): where it is absent
+ * (a plain browser tab), every operation falls back to the local server —
+ * open/reveal to `/api/fs-op`'s OS launchers, delete to the server's permanent
+ * `/api/fs-op` delete, and the folder chooser to `/api/pick-folder`. The bridge
+ * stays preferred where it is visible: `fs:trash` is recoverable where the
+ * server's `rm` is not, and main's `absWithin` check runs in a process the page
+ * cannot influence.
  */
 const fsOps = {
   /** Open the OS file manager with the item selected. */
