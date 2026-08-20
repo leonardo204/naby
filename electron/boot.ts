@@ -9,7 +9,7 @@
 // Everything SPIKE-04 asserts against is therefore constructed here, and the two
 // entries differ only in what they do afterwards.
 
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, screen, shell } from 'electron';
 import { existsSync, mkdirSync } from 'node:fs';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
@@ -22,6 +22,14 @@ import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
 import { installReloadGuard } from './reload-guard.js';
 import { ProviderProfileStore } from './providers.js';
 import { createUpdater, type Updater } from './updater.js';
+import {
+  installWindowStatePersistence,
+  MIN_WINDOW_SIZE,
+  readWindowStateFile,
+  resolveWindowStart,
+  windowStateFilePath,
+  type Bounds,
+} from './windowState.js';
 // TYPE-ONLY. The runtime bundle is loaded lazily through a computed URL (see
 // `openStore`) so esbuild leaves it alone and the app loads the real
 // `dist/naby-runtime.mjs` at run time instead of inlining ai@7 into the main
@@ -440,27 +448,52 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
 
 export function createMainWindow(
   bootResult: BootResult,
-  opts: { show?: boolean; packaged?: boolean } = {},
+  opts: { show?: boolean; packaged?: boolean; persistWindowState?: boolean } = {},
 ): BrowserWindow {
   const preloadPath = join(dirname(fileURLToPath(import.meta.url)), 'preload.cjs');
 
+  // OPT-IN, AND DEFAULTING TO OFF ON PURPOSE. Three spike entries share this
+  // function (spike-entry, spike-f104-entry, spike-f110-entry) and two of them
+  // run against the developer's REAL naby home, so a window state that saved
+  // itself by default would let `npm run spike:f110` overwrite the geometry of
+  // the app the developer actually uses — with a headless, never-shown window at
+  // that. Only `main.ts` asks for persistence; a future entry that forgets gets
+  // the harmless behaviour rather than the destructive one. (The file also lives
+  // under `nabyHomeDir()`, so a spike that sets NABY_HOME — spike-04 does — is
+  // isolated a second time.)
+  const persist = opts.persistWindowState ?? false;
+
+  // The saved rectangle is validated against the displays connected RIGHT NOW;
+  // see resolveWindowStart. Primary first, which is the order it expects.
+  const workAreas: Bounds[] = persist
+    ? (() => {
+        const primary = screen.getPrimaryDisplay();
+        return [
+          primary.workArea,
+          ...screen.getAllDisplays().filter((d) => d.id !== primary.id).map((d) => d.workArea),
+        ];
+      })()
+    : [];
+  const start = resolveWindowStart(
+    persist ? readWindowStateFile(windowStateFilePath()) : undefined,
+    workAreas,
+  );
+
   const win = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    // A FLOOR, not a preference. Dragged narrow enough the desktop UI does not
-    // merely look cramped, it changes identity: `public/boot.js` redirects any
-    // top-level viewport matching `(max-width: 767px)` to the mobile route `/m`,
-    // so a window the user shrank past that point would swap the whole shell out
-    // from under them — and the only way back is the /m "use desktop" escape
-    // hatch. 960 keeps the top-level viewport ~200px clear of that breakpoint
-    // even after the window frame is subtracted, and clears the Settings modal's
-    // own floor as well (880px panel + the 2rem mx-4 gutters = 912).
-    //
-    // 640 tall is the height at which the three-panel layout and the sidebar
-    // still show a usable amount of each panel; below it the chat composer and
-    // the panel headers eat the whole window.
-    minWidth: 960,
-    minHeight: 640,
+    width: start.size.width,
+    height: start.size.height,
+    // Omitted entirely when there is no display information, which is the one
+    // case where Electron's own centring beats anything we could compute.
+    ...(start.position ?? {}),
+    // A FLOOR, not a preference — the full reasoning, and the reason the numbers
+    // live in one place, is on MIN_WINDOW_SIZE in windowState.ts. The restore
+    // clamp reads the same constant.
+    minWidth: MIN_WINDOW_SIZE.width,
+    minHeight: MIN_WINDOW_SIZE.height,
+    // Full screen is applied at construction so the window never flashes at its
+    // normal size first. The bounds above stay the window's NORMAL bounds, so
+    // leaving full screen lands back on the size the user actually chose.
+    fullscreen: start.fullScreen,
     show: opts.show ?? true,
     backgroundColor: '#111111',
     // WINDOWS/LINUX ONLY, and deliberately NOT `Menu.setApplicationMenu(null)`.
@@ -499,6 +532,21 @@ export function createMainWindow(
       ],
     },
   });
+
+  // MAXIMIZED IS RESTORED BY MAXIMIZING, never by opening at screen-sized
+  // bounds: the window keeps the normal bounds it was constructed with, so
+  // "restore down" has somewhere to go.
+  if (start.maximized) win.maximize();
+
+  if (persist) {
+    installWindowStatePersistence(win);
+    console.log(
+      `[window] ${start.source === 'saved' ? 'restored' : 'default'} geometry ` +
+        `${start.size.width}x${start.size.height}` +
+        `${start.position ? `+${start.position.x}+${start.position.y}` : ''}` +
+        `${start.maximized ? ' maximized' : ''}${start.fullScreen ? ' fullscreen' : ''} — ${start.reason}`,
+    );
+  }
 
   // `autoHideMenuBar` alone still paints the bar until the first Alt toggle on
   // some Windows builds; this starts it hidden. Guarded to non-darwin so the

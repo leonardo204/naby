@@ -292,7 +292,10 @@ async function start(): Promise<void> {
 
 function openWindow(): void {
   if (!bootResult) return;
-  const win = createMainWindow(bootResult);
+  // The PRODUCTION entry is the only caller that remembers the window's size and
+  // position; see the `persistWindowState` note in createMainWindow for why the
+  // spike entries must not.
+  const win = createMainWindow(bootResult, { persistWindowState: true });
   mainWindow = win;
 
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {

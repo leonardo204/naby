@@ -41,6 +41,7 @@
     "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",
     "spike:devmode": "tsx src/spikes/spike-devmode.ts",
     "spike:reload-guard": "tsx src/spikes/spike-reload-guard.ts",
+    "spike:window-state": "tsx src/spikes/spike-window-state.ts",
     "spike:net": "npm run build:electron && tsx src/spikes/spike-net-timeout.ts",
     "spike:sdk-resolve": "npm run build:runtime && tsx src/spikes/spike-sdk-resolve.ts",
     "spike:add-mcp": "npm run build:runtime && tsx src/spikes/spike-add-mcp.ts",
