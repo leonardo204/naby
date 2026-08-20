@@ -533,9 +533,78 @@ export function createMainWindow(
     },
   });
 
+  // THE CONSTRUCTOR'S SIZE IS NOT HONOURED ACROSS DISPLAYS, so it is applied
+  // AGAIN here — and this is the whole reason a restored window came back the
+  // wrong size in v1.24.0.
+  //
+  // Electron constrains `width`/`height` against the PRIMARY display's work
+  // area, and it does so BEFORE `x`/`y` move the window to the display it
+  // actually belongs on. Measured on the reporter's machine (primary work area
+  // 1512x949; the window's own display 2560x1410):
+  //
+  //     new BrowserWindow({ x: 1914, y: -366, width: 1909, height: 1215, … })
+  //       → getBounds() = { x: 1914, y: -366, width: 1512, height: 949 }
+  //
+  // The POSITION survives and the SIZE is silently cut to the primary panel.
+  // Every window bigger than the primary display therefore reopened shrunk,
+  // which is what "it does not remember my size" was. Re-applying the whole
+  // rectangle after construction resolves it against the display the position
+  // already selected, and it sticks (re-read after a second, and after a
+  // maximize/unmaximize round trip — see `npm run spike:window-runtime`, which
+  // is the only place this can be proven: it is Electron's behaviour, not ours,
+  // so no pure function can observe it).
+  //
+  // The constructor arguments stay as they are on purpose: they are the right
+  // first approximation, so the common single-display case never flashes at one
+  // size and then jumps to another — there, this setBounds asks for the bounds
+  // the window already has.
+  //
+  // THIS APPLIES `start`, IT DOES NOT SECOND-GUESS IT. resolveWindowStart has
+  // already enforced the MIN_WINDOW_SIZE floor and the containment rule against
+  // the connected work areas; recomputing either here would be the second copy
+  // that drifts (the same argument as MIN_WINDOW_SIZE's own comment). setBounds
+  // still passes through the window's own min-size floor, which is that same
+  // constant, so the two cannot disagree.
+  //
+  // ALWAYS, NOT ONLY FOR `source === 'saved'`. The default rectangle is centred
+  // on the primary work area and so is normally immune — but not always: on a
+  // work area smaller than the floor, `centredDefaultBounds` deliberately
+  // returns a rectangle LARGER than the display and overhanging it, which is
+  // exactly the shape the clamp eats. One unconditional path is also one path
+  // to reason about, and it costs a no-op call on every ordinary launch.
+  //
+  // NOT WHEN `start.position` IS null: that is the "no displays reported" path,
+  // where we deliberately name no position and let the OS place the window.
+  // Applying a size alone there would fight the placement we just deferred.
+  const restored = start.position ? { ...start.position, ...start.size } : undefined;
+
+  if (restored && !start.fullScreen) {
+    win.setBounds(restored);
+  } else if (restored) {
+    // A WINDOW CREATED FULL SCREEN HAS NO BOUNDS TO SET — it covers the screen,
+    // and setBounds during full screen is either fought by the OS's full-screen
+    // frame or discarded outright. What must survive is the NORMAL rectangle the
+    // window drops back to, which is where the clamped constructor size would
+    // otherwise be waiting. So the same rectangle is applied on the first exit
+    // from full screen instead, and only the first: after that the user's own
+    // resizes own the geometry.
+    //
+    // Registered BEFORE installWindowStatePersistence below, so on that event
+    // this listener runs first and the state the persistence layer then captures
+    // is the corrected one rather than the clamped one it would have read.
+    win.once('leave-full-screen', () => {
+      if (!win.isDestroyed()) win.setBounds(restored);
+    });
+  }
+
   // MAXIMIZED IS RESTORED BY MAXIMIZING, never by opening at screen-sized
   // bounds: the window keeps the normal bounds it was constructed with, so
   // "restore down" has somewhere to go.
+  //
+  // STRICTLY AFTER THE setBounds ABOVE. maximize() freezes whatever the window's
+  // normal bounds are at that moment as the size "restore down" returns to; run
+  // it first and the user would un-maximize into the primary display's clamped
+  // rectangle, i.e. the bug would survive in the one state that hides it longest.
   if (start.maximized) win.maximize();
 
   if (persist) {

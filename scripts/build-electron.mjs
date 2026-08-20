@@ -134,6 +134,16 @@ await Promise.all([
     entryPoints: [resolve(root, 'electron/spike-f110-entry.ts')],
     outfile: resolve(outdir, 'spike-f110-entry.mjs'),
   }),
+  // THE WINDOW-GEOMETRY REGRESSION NET. Its own entry because it is the one
+  // spike that opts into window-state persistence — it must write a
+  // `window-state.json` to exercise the restore path — and that opt-in has to
+  // stay out of every other entry's reach. It refuses to run outside the
+  // throwaway NABY_HOME its driver hands it.
+  build({
+    ...esm,
+    entryPoints: [resolve(root, 'electron/spike-window-entry.ts')],
+    outfile: resolve(outdir, 'spike-window-entry.mjs'),
+  }),
   // F1-09 verification harness. Its own entry rather than a flag on main.mjs:
   // the production entry must not carry a test mode that could be switched on.
   build({
@@ -162,5 +172,5 @@ await Promise.all([
 ]);
 
 console.log(
-  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, updater-probe.mjs, chatgpt-oauth.mjs, preload.cjs}',
+  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, spike-window-entry.mjs, updater-probe.mjs, chatgpt-oauth.mjs, preload.cjs}',
 );

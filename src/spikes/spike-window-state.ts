@@ -25,13 +25,26 @@
 // real Electron launch would add is a window nobody can watch and a display
 // layout nobody can change from a test.
 //
-// WHAT IS LEFT UNPROVEN BY CONSTRUCTION, stated rather than hidden: that
-// Electron's `getNormalBounds()` really reports the pre-maximize rectangle, and
-// that `maximize()` on a window constructed with those bounds really restores
-// down to them. Those are Electron's documented contracts. What IS proven is
-// that our code asks for the right one, wires the events it says it wires, and
-// that the production entry — and only the production entry — turns persistence
-// on (assertion (i), read off the real sources).
+// WHAT IS LEFT UNPROVEN BY CONSTRUCTION, AND WHERE IT IS COVERED INSTEAD.
+// Everything here is arithmetic over plain objects, so ELECTRON'S OWN RUNTIME
+// BEHAVIOUR is outside this file by design — and that is precisely where v1.24.0
+// broke. A constructor `width`/`height` is constrained against the PRIMARY
+// display's work area BEFORE `x`/`y` move the window onto the display it belongs
+// on, so every window saved larger than the primary panel reopened shrunk to it.
+// THIS SPIKE REPORTED 43/43 PASS THE ENTIRE TIME, and it was not wrong: every
+// function it tests was correct. A green run here means the decisions are right,
+// never that the window obeys them.
+//
+// `npm run spike:window-runtime` is the other half — the same production
+// `createMainWindow` driven inside a REAL Electron main process, asserting the
+// bounds the window actually ends up with. It also settles the two contracts
+// this header used to take on trust (that `getNormalBounds()` reports the
+// pre-maximize rectangle, and that un-maximizing lands back on it), and it
+// reports INCONCLUSIVE rather than PASS on a machine whose display layout cannot
+// stage the clamp. What IS proven here is that our code asks for the right
+// rectangle, wires the events it says it wires, applies that rectangle in the
+// right order (assertion (k)), and that only the production entry turns
+// persistence on (assertion (j), read off the real sources).
 //
 // It proves:
 //
@@ -54,14 +67,18 @@
 //   (i) DEBOUNCE. A drag's worth of events costs one write; close flushes; an
 //       unchanged state is not rewritten. Driven through the real
 //       `installWindowStatePersistence` wiring with a fake window and fake timers.
-//   (j) IT IS ACTUALLY WIRED: main.ts opts in, the three spike entries do not,
-//       and the window's own minWidth/minHeight come from the same constant the
-//       clamp uses.
+//   (j) IT IS ACTUALLY WIRED: main.ts opts in, no spike entry that runs against
+//       the developer's real home does, and the window's own minWidth/minHeight
+//       come from the same constant the clamp uses.
+//   (k) THE RESTORED RECTANGLE IS APPLIED AFTER CONSTRUCTION, and before
+//       maximize() — the ordering the v1.24.0 fix depends on. Source-level, so
+//       a refactor that drops or reorders it fails here even on a laptop that
+//       cannot run the Electron-hosted check conclusively.
 //
 // NO ELECTRON, NO NETWORK, NO KEYS, NO DB, and no write outside a temp
 // directory. Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -661,17 +678,45 @@ function main(): void {
       'main.ts: createMainWindow(bootResult, { persistWindowState: true })',
     );
 
-    // THE CLOBBER GUARD. These three run against the developer's real ~/.naby
-    // (only spike-04 overrides NABY_HOME), so any of them opting in would let a
+    // THE CLOBBER GUARD. Spike entries run against the developer's real ~/.naby
+    // unless their driver overrides NABY_HOME, so one opting in would let a
     // headless test window overwrite the geometry of the app in daily use.
-    const entries = ['spike-entry.ts', 'spike-f104-entry.ts', 'spike-f110-entry.ts'];
+    //
+    // ENUMERATED FROM DISK, not from a list written down once: a new entry added
+    // later is exactly the case a hardcoded list stops seeing. Precisely ONE
+    // entry is allowed to opt in — the Electron-hosted geometry spike, which has
+    // to write a state file to exercise the restore path at all — and its licence
+    // is conditional on the two isolations asserted immediately below.
+    const PERSISTING_ENTRY = 'spike-window-entry.ts';
+    const entries = readdirSync(join(REPO, 'electron'))
+      .filter((f) => f.startsWith('spike-') && f.endsWith('.ts'))
+      .sort();
     const optedIn = entries.filter((f) =>
       /persistWindowState/.test(readFileSync(join(REPO, 'electron', f), 'utf8')),
     );
+    const rogue = optedIn.filter((f) => f !== PERSISTING_ENTRY);
     record(
-      '(j) NO spike entry opts in — a spike cannot overwrite the real window geometry',
-      optedIn.length === 0,
-      optedIn.length === 0 ? entries.join(', ') : `OPTED IN: ${optedIn.join(', ')}`,
+      '(j) NO spike entry opts into persistence except the sandboxed geometry one',
+      rogue.length === 0,
+      rogue.length === 0
+        ? `checked ${entries.join(', ')} — only ${PERSISTING_ENTRY} opts in`
+        : `OPTED IN WITHOUT A SANDBOX: ${rogue.join(', ')}`,
+    );
+
+    // The licence, in two independent parts: the driver hands the child a
+    // throwaway NABY_HOME, and the child REFUSES TO RUN without one. Either
+    // alone would be a single point of failure over live user data.
+    const geomEntry = readFileSync(join(REPO, 'electron', PERSISTING_ENTRY), 'utf8');
+    const geomDriver = readFileSync(join(REPO, 'src', 'spikes', 'spike-window-runtime.ts'), 'utf8');
+    record(
+      "(j) …and that one is sandboxed twice: its driver sets a temp NABY_HOME and the entry refuses any other",
+      /NABY_HOME: SANDBOX/.test(geomDriver) &&
+        /tmpdir\(\)/.test(geomDriver) &&
+        /naby-window-spike-/.test(geomDriver) &&
+        /naby-window-spike-/.test(geomEntry) &&
+        /refusing to run/.test(geomEntry),
+      'spike-window-runtime.ts: NABY_HOME = tmpdir()/naby-window-spike-* · ' +
+        'spike-window-entry.ts: refuses to run outside it',
     );
 
     // Second line of defence: the file follows the naby home, so a spike that
@@ -690,6 +735,60 @@ function main(): void {
       if (previous === undefined) delete process.env.NABY_HOME;
       else process.env.NABY_HOME = previous;
     }
+  }
+
+  // -- (k) the geometry is applied AFTER construction, and in the right order --
+  //
+  // THE v1.24.0 DEFECT, guarded at source level. Electron clamps the
+  // constructor's size against the PRIMARY display's work area before x/y move
+  // the window elsewhere, so the resolved rectangle has to be applied again once
+  // the window exists. Whether that WORKS is Electron's answer to give and
+  // `npm run spike:window-runtime` is where it is asked; what belongs here is
+  // the part that is ours — that the call is present, that it carries `start`'s
+  // own numbers rather than a recomputed second opinion, and that it happens
+  // before maximize() freezes the normal bounds.
+  {
+    const bootSrc = readFileSync(join(REPO, 'electron', 'boot.ts'), 'utf8');
+    const applyAt = bootSrc.indexOf('win.setBounds(restored)');
+    const maximizeAt = bootSrc.indexOf('if (start.maximized) win.maximize();');
+    record(
+      '(k) the resolved rectangle is applied again AFTER construction (the constructor size is clamped to the primary display)',
+      applyAt !== -1 &&
+        /const restored = start\.position \? \{ \.\.\.start\.position, \.\.\.start\.size \} : undefined;/.test(
+          bootSrc,
+        ),
+      applyAt !== -1
+        ? 'boot.ts: const restored = { ...start.position, ...start.size }; win.setBounds(restored)'
+        : 'boot.ts: NO post-construction setBounds — a saved size larger than the primary display will be clamped',
+    );
+    record(
+      '(k) …strictly BEFORE maximize(), so "restore down" returns to the user\'s size and not the clamped one',
+      applyAt !== -1 && maximizeAt !== -1 && applyAt < maximizeAt,
+      `setBounds at ${applyAt}, maximize() at ${maximizeAt} in boot.ts`,
+    );
+    // Read off the IMPORT LIST and the CALL SITES, not the whole file: the
+    // reasoning above names `centredDefaultBounds` in prose, and an assertion
+    // that a comment can break is an assertion nobody will keep.
+    // `[^}]*` rather than a lazy `[\s\S]*?`: the lazy form starts at the FIRST
+    // import in the file and swallows every one of them up to this closing brace.
+    const imported = /import \{([^}]*)\} from '\.\/windowState\.js';/.exec(bootSrc)?.[1] ?? '';
+    const geometryFns = ['fitIntoWorkArea', 'centredDefaultBounds', 'visibleFraction', 'findHomeWorkArea', 'intersectionArea'];
+    const borrowed = geometryFns.filter(
+      (fn) => new RegExp(`\\b${fn}\\b`).test(imported) || new RegExp(`\\b${fn}\\(`).test(bootSrc),
+    );
+    record(
+      '(k) …and it applies resolveWindowStart\'s answer rather than recomputing one (no second copy to drift)',
+      borrowed.length === 0 && /\bresolveWindowStart\(/.test(bootSrc),
+      borrowed.length === 0
+        ? `boot.ts imports {${imported.replace(/\s+/g, ' ').trim()}} — resolveWindowStart is the only decision it makes`
+        : `boot.ts reaches for the geometry primitives directly: ${borrowed.join(', ')}`,
+    );
+    record(
+      '(k) a window created FULL SCREEN defers the same rectangle to its first leave-full-screen',
+      /win\.once\('leave-full-screen', \(\) => \{[\s\S]{0,160}win\.setBounds\(restored\);/.test(bootSrc) &&
+        /if \(restored && !start\.fullScreen\)/.test(bootSrc),
+      "boot.ts: setBounds is skipped while full screen and applied once on leave-full-screen (a full-screen window has no bounds to set, but the NORMAL bounds underneath it still must be the user's)",
+    );
   }
 
   const failed = checks.filter((c) => !c.pass);
