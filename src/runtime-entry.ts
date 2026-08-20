@@ -36,6 +36,7 @@ export type {
   ToolCall,
   ToolOutput,
   ToolSchema,
+  TurnStats,
   Usage,
   VoicePort,
   VoiceRenderRequest,

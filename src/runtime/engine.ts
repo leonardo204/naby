@@ -149,6 +149,26 @@ export type RuntimeImage = {
   data: string;
 };
 
+/**
+ * How the TURN that produced a row went, measured by whoever ran it.
+ *
+ * Both numbers come from ONE clock reading at the turn's end, so they can never
+ * disagree with each other. `durationMs` is authoritative: the client must not
+ * recompute it from timestamps, because the browser's clock and the runner's are
+ * different clocks and the stream can arrive late.
+ *
+ * Written onto the LAST assistant row of a turn (see Store.stampTurnEnd), which
+ * is the row the transcript view renders the turn's closing line under. Optional
+ * and additive: every row written before this existed simply lacks it, and a
+ * reader that finds it absent shows nothing rather than a zero.
+ */
+export type TurnStats = {
+  /** Wall-clock length of the turn, in ms. */
+  durationMs: number;
+  /** When the turn ENDED (epoch ms) — not when its bubble was created. */
+  endedAt: number;
+};
+
 export type RuntimeMessage =
   | {
       role: 'user' | 'assistant';
@@ -156,6 +176,10 @@ export type RuntimeMessage =
       toolCalls?: ToolCall[];
       /** Images on a USER turn (multimodal). Absent on assistant/tool. */
       images?: RuntimeImage[];
+      /** ASSISTANT rows only, and only the last one of a turn. Descriptive: no
+       *  provider payload is built from it (providers map role/content/toolCalls
+       *  field by field), so it round-trips as inert JSON. */
+      turn?: TurnStats;
     }
   | {
       role: 'tool';

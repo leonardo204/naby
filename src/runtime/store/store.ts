@@ -20,7 +20,7 @@
 // explicitly "the LAST provider used — a hint, not a constraint": it records
 // what answered last, and switching it mid-session changes nothing else.
 
-import type { RollingSummary, RuntimeMessage } from '../engine.js';
+import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
 
 // ---------------------------------------------------------------------------
 // Session index (contract §6)
@@ -1130,6 +1130,23 @@ export interface Store {
 
   /** The session's full transcript, in append order. */
   getMessages(sessionId: string): RuntimeMessage[];
+
+  /**
+   * Record how the just-finished turn went, on the LAST assistant row of the
+   * session.
+   *
+   * A WRITE-BACK, not an append, and the only one in this interface. It exists
+   * because the measurement is not known until after the rows are written: the
+   * runtime appends each text run and each tool call as it happens, and the
+   * turn's length is only a number once the turn is over. Appending a row for it
+   * instead would mint a message that says nothing — `RuntimeMessage` has a
+   * closed three-variant contract and every row is replayed to a provider.
+   *
+   * Idempotent and last-writer-wins: calling it twice leaves the second reading.
+   * Returns false and writes NOTHING when the session has no assistant row yet
+   * (a turn that failed preflight), so a caller may call it unconditionally.
+   */
+  stampTurnEnd(sessionId: string, turn: TurnStats): boolean;
 
   // -- memory --------------------------------------------------------------
 

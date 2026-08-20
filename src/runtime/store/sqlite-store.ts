@@ -45,7 +45,7 @@ import { sameMemoryValue } from './store.js';
 // memory-hygiene, so the SQL that raises strength and the predicate that reads it
 // can never disagree about the cap.
 import { STRENGTH_CAP } from '../memory-hygiene.js';
-import type { RollingSummary, RuntimeMessage } from '../engine.js';
+import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
 import type {
   Agent,
   AgentInput,
@@ -1360,6 +1360,31 @@ export class SqliteStore implements Store {
       .prepare('SELECT payload FROM messages WHERE session_id = ? ORDER BY seq ASC')
       .all(sessionId) as { payload: string }[];
     return rows.map((r) => JSON.parse(r.payload) as RuntimeMessage);
+  }
+
+  stampTurnEnd(sessionId: string, turn: TurnStats): boolean {
+    this.assertOpen();
+    // NO SCHEMA CHANGE, so no migration: `payload` is the RuntimeMessage as
+    // JSON, and this adds one key to it. Rows written before this existed keep
+    // parsing exactly as they did, with `turn` simply absent.
+    const row = this.db
+      .prepare(
+        "SELECT seq, payload FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY seq DESC LIMIT 1",
+      )
+      .get(sessionId) as { seq: number; payload: string } | undefined;
+    if (!row) return false;
+    let msg: RuntimeMessage;
+    try {
+      msg = JSON.parse(row.payload) as RuntimeMessage;
+    } catch {
+      // An unreadable row is a transcript problem, not a reason to fail a turn
+      // that has already succeeded.
+      return false;
+    }
+    this.db
+      .prepare('UPDATE messages SET payload = ? WHERE session_id = ? AND seq = ?')
+      .run(JSON.stringify({ ...msg, turn }), sessionId, row.seq);
+    return true;
   }
 
   // -- memory --------------------------------------------------------------

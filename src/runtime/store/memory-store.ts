@@ -23,7 +23,7 @@ import { memoryMatchesSearch, sameMemoryValue } from './store.js';
 // The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model, so
 // the two drivers cannot cap rehearsal at different numbers.
 import { memoryStrength, STRENGTH_CAP } from '../memory-hygiene.js';
-import type { RollingSummary, RuntimeMessage } from '../engine.js';
+import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
 import type {
   Agent,
   AgentInput,
@@ -293,6 +293,19 @@ export class MemoryStore implements Store {
 
   getMessages(sessionId: string): RuntimeMessage[] {
     return [...this.state(sessionId).messages];
+  }
+
+  stampTurnEnd(sessionId: string, turn: TurnStats): boolean {
+    const messages = this.state(sessionId).messages;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (!msg || msg.role !== 'assistant') continue;
+      // Replaced, not mutated in place: `getMessages` hands out the row objects
+      // themselves, so mutating one would rewrite a list a caller already holds.
+      messages[i] = { ...msg, turn };
+      return true;
+    }
+    return false;
   }
 
   // -- memory --------------------------------------------------------------
