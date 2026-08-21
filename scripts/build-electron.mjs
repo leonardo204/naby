@@ -144,6 +144,15 @@ await Promise.all([
     entryPoints: [resolve(root, 'electron/spike-window-entry.ts')],
     outfile: resolve(outdir, 'spike-window-entry.mjs'),
   }),
+  // THE POWER SPIKE — the only place `powerSaveBlocker` and `powerMonitor` are
+  // exercised for real. Its own entry for the usual reason: it takes a real
+  // (short-lived) suspension assertion on the machine running it, and that is
+  // not something the production entry may be talked into doing on demand.
+  build({
+    ...esm,
+    entryPoints: [resolve(root, 'electron/spike-power-entry.ts')],
+    outfile: resolve(outdir, 'spike-power-entry.mjs'),
+  }),
   // F1-09 verification harness. Its own entry rather than a flag on main.mjs:
   // the production entry must not carry a test mode that could be switched on.
   build({
@@ -172,5 +181,5 @@ await Promise.all([
 ]);
 
 console.log(
-  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, spike-window-entry.mjs, updater-probe.mjs, chatgpt-oauth.mjs, preload.cjs}',
+  'electron: dist/electron/{main.mjs, spike-entry.mjs, spike-f104-entry.mjs, spike-f110-entry.mjs, spike-window-entry.mjs, spike-power-entry.mjs, updater-probe.mjs, chatgpt-oauth.mjs, preload.cjs}',
 );

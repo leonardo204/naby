@@ -21,6 +21,7 @@ import { registerIpcHandlers } from './ipc.js';
 import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
 import { installReloadGuard } from './reload-guard.js';
 import { ProviderProfileStore } from './providers.js';
+import { installTelegramPower } from './telegram-power.js';
 import { createUpdater, type Updater } from './updater.js';
 import {
   installWindowStatePersistence,
@@ -348,6 +349,19 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     log,
   });
 
+  // -- Telegram stays awake (electron/telegram-power.ts) ---------------------
+  //
+  // Installed HERE, immediately after the background services that own the
+  // listener, and torn down in `shutdown()` below. Two effects, both scoped to
+  // the listener actually running: a `prevent-app-suspension` power-save blocker
+  // (the App Nap opt-out, which is what keeps the bot answering with the screen
+  // locked or the screensaver up), and a kick on `resume`/`unlock-screen` so a
+  // machine coming back does not wait out a wall clock plus a back-off first.
+  //
+  // Never fatal, and never unconditional: with Telegram off there is no loop, so
+  // no blocker is ever taken and the machine sleeps exactly as it does today.
+  const telegramPower = installTelegramPower(server.services.telegramControl, log);
+
   // -- store ---------------------------------------------------------------
   //
   // KNOWN GAP, stated rather than hidden: this closes OUR handle. The shell's
@@ -396,6 +410,10 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
       // webContents that is already on its way out.
       updater.dispose();
       disposeIpc();
+      // Before the server closes: this releases the power-save blocker, and a
+      // blocker still held while the process winds down would keep the machine
+      // awake with nothing left listening.
+      telegramPower.dispose();
       try {
         store?.close();
         if (store) log('[store] closed');

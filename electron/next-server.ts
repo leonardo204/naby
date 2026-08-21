@@ -68,6 +68,7 @@ import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { createGuard, type Guard } from './hardening.js';
+import type { TelegramChatControl } from './telegram-power.js';
 
 // ---------------------------------------------------------------------------
 // Minimal structural types for the Next entry point.
@@ -113,6 +114,18 @@ export type BackgroundServices = {
   scheduledTasks: BackgroundServiceStatus;
   /** Telegram two-way chat: the always-on getUpdates loop (no-op when off). */
   telegramChat: BackgroundServiceStatus;
+  /**
+   * The listener's control surface, off the SAME module instance the loop runs
+   * in. Handed out rather than re-imported by whoever needs it: there must be
+   * exactly one bridge in this process (two getUpdates loops on one bot token is
+   * a 409 that breaks both), so the single specifier imported below is the only
+   * one, and `electron/telegram-power.ts` receives these instead of resolving
+   * the bundle a second time.
+   *
+   * Absent when the bundle failed to load or predates these exports — every
+   * consumer treats that as "no power management", never as an error.
+   */
+  telegramControl?: TelegramChatControl;
 };
 
 type NextApp = {
@@ -248,13 +261,25 @@ async function startBackgroundServices(opts: {
   // -- Telegram two-way chat -------------------------------------------------
   try {
     const url = pathToFileURL(join(shellDir, 'dist', 'telegramChat.mjs')).href;
-    const mod = (await import(url)) as { startTelegramChat?: () => void };
+    const mod = (await import(url)) as { startTelegramChat?: () => void } & TelegramChatControl;
     if (typeof mod.startTelegramChat !== 'function') {
       throw new Error(`${url} exports no \`startTelegramChat\``);
     }
     // Never throws by contract, and is a no-op when Telegram is off or
     // unconfigured — it logs which of the two it was.
     mod.startTelegramChat();
+    // The wake/observe pair, off THIS module instance — see the field comment on
+    // `telegramControl`. Picked apart rather than passed whole so an older shell
+    // build missing one of them degrades to "that half is unavailable" instead
+    // of to a partially-wired power handle.
+    services.telegramControl = {
+      ...(typeof mod.wakeTelegramChat === 'function'
+        ? { wakeTelegramChat: mod.wakeTelegramChat }
+        : {}),
+      ...(typeof mod.observeTelegramChat === 'function'
+        ? { observeTelegramChat: mod.observeTelegramChat }
+        : {}),
+    };
     services.telegramChat = 'started';
   } catch (err) {
     log(`[services] telegram chat failed to start: ${String(err)} — continuing`);
