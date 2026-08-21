@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
 import { applyDevModeToEnv } from './devmode.js';
 import { installApplicationMenu } from './menu.js';
+import { installRunsFinishedReset } from './notifications.js';
 
 // ---------------------------------------------------------------------------
 // Identity — must run before anything reads `userData`
@@ -274,6 +275,13 @@ async function start(): Promise<void> {
     app.exit(1);
     return;
   }
+
+  // At most ONE "runs finished" banner is ever live, and it carries a running
+  // count of how many runs it stands for. This arms the signal that says the
+  // user has actually SEEN it — the window coming to the front — which is the
+  // only thing that sets that count back to zero (notifications.ts). Installed
+  // before the first window opens so the very first focus already counts.
+  installRunsFinishedReset();
 
   openWindow();
 

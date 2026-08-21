@@ -611,6 +611,10 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     if (!isNotifyKind(kind)) {
       return fail('INTERNAL', 'unknown notification kind');
     }
+    // ONE CALL PER FINISHED RUN, and no count on the wire. Main TALLIES these
+    // calls and shows a single replaceable banner carrying the total, so the
+    // renderer still supplies nothing but a kind, a locale and one bounded
+    // label — it cannot author a sentence, and it cannot inflate a number.
     const shown = showNotification({
       kind,
       locale: asNotifyLocale(locale),
@@ -619,6 +623,9 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
       // name on it.
       label: sanitizeLabel(label),
     });
+    // `shown` now means ACCEPTED: the platform has notifications and this run was
+    // counted. The draw itself is debounced by a few hundred milliseconds so a
+    // burst becomes one banner rather than one redraw per run.
     return ok({ shown });
   });
 

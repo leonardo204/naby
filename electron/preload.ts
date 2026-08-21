@@ -361,8 +361,14 @@ const fsOps = {
 // FEATURE-DETECTED by the renderer (`window.naby?.notifications`): in a plain
 // browser it is absent and the app falls back to its badge, exactly as before.
 const notifications = {
-  /** Show one catalogue message. Resolves `{shown}` — false when the OS refused
-   *  (notifications off, no daemon, permission denied), never a rejection. */
+  /** Report ONE finished run. Call it once per run: main keeps the tally and
+   *  shows a single banner that REPLACES its predecessor and says how many runs
+   *  it stands for, so a phone conversation held over Telegram no longer greets
+   *  the user with ten identical banners at unlock. Passing a count from here
+   *  instead would be the renderer authoring the sentence.
+   *
+   *  Resolves `{shown}` — false when the OS refused (notifications off, no
+   *  daemon, permission denied), never a rejection. */
   sessionDone: (input: { locale?: 'en' | 'ko'; label?: string }): Promise<Result<{ shown: boolean }>> =>
     ipcRenderer.invoke('notify:show', {
       kind: 'session-done',
