@@ -283,6 +283,30 @@ const updates = {
 };
 
 /**
+ * The "what changed" popup's two facts.
+ *
+ * SEPARATE FROM `updates` even though both concern versions, because they
+ * answer opposite questions: `updates` is about a version the user does not
+ * have yet, this is about the one they just got. Folding the watermark into the
+ * update status would also put a WRITE on a status object that is pushed to
+ * every window.
+ *
+ * `currentVersion` is naby's `app.getVersion()`. The shell's `/api/version`
+ * reports the cockpit package's version, which is a different number — a
+ * renderer that used it would compare the wrong two things.
+ */
+const whatsNew = {
+  /** `{currentVersion, lastSeenVersion}`. `lastSeenVersion` is null on a fresh
+   *  install, and on any file this installation cannot read. */
+  get: (): Promise<Result<{ currentVersion: string; lastSeenVersion: string | null }>> =>
+    ipcRenderer.invoke('whats-new:get'),
+
+  /** Record a version as announced. Idempotent; last write wins. */
+  markSeen: (version: string): Promise<Result<void>> =>
+    ipcRenderer.invoke('whats-new:seen', version),
+};
+
+/**
  * The file operations the web shell cannot do for itself: three for the chat
  * file browser's rows and right-click menu, plus the folder chooser that
  * "add/open a project" starts from.
@@ -394,6 +418,9 @@ contextBridge.exposeInMainWorld('naby', {
   onboarding,
   /** F1-09 — auto-update status and controls. */
   updates,
+  /** The "what changed" watermark: naby's own version, and the last one this
+   *  installation was told about. */
+  whatsNew,
   /** The dev-mode door, for testing dev-only providers in the real artifact. */
   devMode,
   /** CO-05 — DEV-ONLY ChatGPT subscription sign-in. `available:false` unless the

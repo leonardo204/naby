@@ -21,6 +21,7 @@ import { registerIpcHandlers } from './ipc.js';
 import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
 import { installReloadGuard } from './reload-guard.js';
 import { ProviderProfileStore } from './providers.js';
+import { WhatsNewStore } from './whats-new.js';
 import { installTelegramPower } from './telegram-power.js';
 import { createUpdater, type Updater } from './updater.js';
 import {
@@ -287,6 +288,9 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     log(`[credentials] WARNING insecure backend "${security.backend}": ${security.warning ?? ''}`);
   }
   const profiles = new ProviderProfileStore({ userDataDir });
+  // The "what changed" watermark — one string beside providers.json. See
+  // electron/whats-new.ts for why it cannot live in the renderer.
+  const whatsNew = new WhatsNewStore({ userDataDir });
 
   // The engine reads keys through this bridge. It is an IN-PROCESS function
   // table, not IPC: the Next server (and therefore the shell's naby engine)
@@ -395,6 +399,7 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     allowedOrigin: server.origin,
     loadRuntime,
     updater,
+    whatsNew,
     // CO-05, DEV-ONLY. The IPC channels gate on `isChatgptOauthEnabled()` before
     // ever calling this, so passing it unconditionally is safe — with the seal
     // closed the loader is never invoked.

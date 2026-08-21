@@ -28,6 +28,7 @@
 // "Attempted to register a second handler".
 
 import {
+  app,
   BrowserWindow,
   dialog,
   ipcMain,
@@ -42,6 +43,7 @@ import type { CredentialVault } from './credentials.js';
 import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
 import type { Updater, UpdateStatus } from './updater.js';
+import type { WhatsNewStore } from './whats-new.js';
 import { isDevModeAvailable, isDevModeUnlocked, lockDevMode, unlockDevMode } from './devmode.js';
 import {
   asNotifyLocale,
@@ -136,6 +138,26 @@ export const CHANNELS = [
   'update:check',
   'update:install',
   'update:open-releases',
+  // -- "what changed" popup ------------------------------------------------
+  //
+  // The first-launch-after-an-update notes. TWO channels and no more, because
+  // the CONTENT is not here: the changelog is compiled into the renderer bundle
+  // (shell .../releaseNotes.ts), so this pair carries only the two facts the
+  // renderer cannot know on its own.
+  //
+  //   whats-new:get  — {currentVersion, lastSeenVersion}. `currentVersion` is
+  //                    `app.getVersion()`, which is the NABY version; the
+  //                    shell's own /api/version answers the cockpit package's
+  //                    version and is a different number entirely.
+  //                    `lastSeenVersion` is null on a fresh install.
+  //   whats-new:seen — record a version as announced. Idempotent, last write
+  //                    wins.
+  //
+  // WHY THE WATERMARK IS NOT IN THE RENDERER: the embedded server binds
+  // `listen(0)`, so the renderer origin changes every launch and localStorage
+  // is empty on every restart. See electron/whats-new.ts.
+  'whats-new:get',
+  'whats-new:seen',
   // -- CO-05 ChatGPT subscription-OAuth (DEV-ONLY, flag-sealed) -------------
   //
   // The renderer face of the dev sign-in. All three are INERT unless the dev
@@ -247,6 +269,13 @@ export type IpcDeps = {
    * than failing, which is the same shape the renderer already has to handle.
    */
   updater?: Updater;
+  /**
+   * The "what changed" watermark. Optional for the same reason `updater` is —
+   * a harness may register IPC without one — and the absent case is inert
+   * rather than an error: `lastSeenVersion` answers null, which the renderer
+   * reads as a fresh install and therefore shows nothing.
+   */
+  whatsNew?: WhatsNewStore;
   /**
    * CO-05, DEV-ONLY. Loads the flag-sealed Electron ChatGPT-OAuth module through
    * a computed dynamic import (electron/boot.ts). Optional so the spike harness
@@ -480,6 +509,31 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     return ok(undefined as void);
   });
 
+  // -- "what changed" ------------------------------------------------------
+  //
+  // No decision is made here on purpose. Whether an upgrade happened, which
+  // entries fall in the range, and whether a missing watermark means a fresh
+  // install are all pure functions in the renderer (releaseNotesOps.ts), where
+  // they are unit-tested; main answers two facts and stores one string.
+
+  handle('whats-new:get', () =>
+    ok({
+      currentVersion: safeAppVersion(),
+      lastSeenVersion: deps.whatsNew?.lastSeenVersion() ?? null,
+    }),
+  );
+
+  handle('whats-new:seen', (payload) => {
+    // The renderer names the version it is acknowledging rather than main
+    // assuming `currentVersion`: dismissing is the acknowledgement of what was
+    // ON SCREEN, and the two would differ if the app ever updated underneath an
+    // open window.
+    const version = typeof payload === 'string' ? payload : '';
+    if (!version) return fail('INTERNAL', 'a version string is required');
+    deps.whatsNew?.record(version);
+    return ok(undefined as void);
+  });
+
   // FORCED DEV MODE (see electron/devmode.ts). `status` is safe to expose: it
   // reveals whether this build HAS a door and whether it is open, never the key
   // or its hash. `unlock` returns only a boolean — a wrong key is
@@ -648,6 +702,20 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     unsubscribe?.();
     for (const channel of CHANNELS) ipcMain.removeHandler(channel);
   };
+}
+
+/**
+ * `app.getVersion()` throws outside an Electron app context, and this module is
+ * imported by harnesses that have none. Same guarded accessor as updater.ts;
+ * `0.0.0` is unparseable-as-an-upgrade from anything real, so a harness reading
+ * it shows no notes rather than all of them.
+ */
+function safeAppVersion(): string {
+  try {
+    return app.getVersion();
+  } catch {
+    return '0.0.0';
+  }
 }
 
 // ---------------------------------------------------------------------------
