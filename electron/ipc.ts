@@ -512,14 +512,22 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
   // -- "what changed" ------------------------------------------------------
   //
   // No decision is made here on purpose. Whether an upgrade happened, which
-  // entries fall in the range, and whether a missing watermark means a fresh
-  // install are all pure functions in the renderer (releaseNotesOps.ts), where
-  // they are unit-tested; main answers two facts and stores one string.
+  // entries fall in the range, and what a missing watermark means are all pure
+  // functions in the renderer (releaseNotesOps.ts), where they are unit-tested;
+  // main answers FACTS and stores one string.
+  //
+  // `freshInstall` is the third fact, and it is here because it is not a
+  // judgement the renderer could make: it is the state of the disk before this
+  // launch touched it, latched at boot (electron/boot.ts). Without it the
+  // renderer had to guess from the missing watermark, and it guessed "brand-new
+  // user" for every existing installation on the first launch after an update.
 
   handle('whats-new:get', () =>
     ok({
       currentVersion: safeAppVersion(),
       lastSeenVersion: deps.whatsNew?.lastSeenVersion() ?? null,
+      // No store wired up (a spike boot) reads as fresh — the silent answer.
+      freshInstall: deps.whatsNew?.isFreshInstall() ?? true,
     }),
   );
 

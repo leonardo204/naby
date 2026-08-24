@@ -21,7 +21,7 @@ import { registerIpcHandlers } from './ipc.js';
 import { startEmbeddedNextServer, type EmbeddedServer } from './next-server.js';
 import { installReloadGuard } from './reload-guard.js';
 import { ProviderProfileStore } from './providers.js';
-import { WhatsNewStore } from './whats-new.js';
+import { looksLikeFreshInstall, WhatsNewStore } from './whats-new.js';
 import { installTelegramPower } from './telegram-power.js';
 import { createUpdater, type Updater } from './updater.js';
 import {
@@ -288,9 +288,29 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
     log(`[credentials] WARNING insecure backend "${security.backend}": ${security.warning ?? ''}`);
   }
   const profiles = new ProviderProfileStore({ userDataDir });
-  // The "what changed" watermark — one string beside providers.json. See
-  // electron/whats-new.ts for why it cannot live in the renderer.
-  const whatsNew = new WhatsNewStore({ userDataDir });
+
+  // -- "what changed" ------------------------------------------------------
+  //
+  // The watermark — one string beside providers.json. See electron/whats-new.ts
+  // for why it cannot live in the renderer.
+  //
+  // THE FRESHNESS LATCH IS TAKEN HERE, AND THE POSITION IS LOAD-BEARING. Every
+  // path below is a file this very launch is about to create: the vault on the
+  // first stored key, providers.json on the first profile or skip, app.db when
+  // the embedded server opens the store (a few lines down), the window state on
+  // the first resize. Reading them AFTER any of that would report a brand-new
+  // installation as an old one and hand a new user a changelog — the mirror
+  // image of the bug this signal exists to fix. Constructing the stores does no
+  // IO, so their `filePath`s are safe to read now, and taking the names from
+  // the stores themselves means this cannot drift from where the files are.
+  const freshInstall = looksLikeFreshInstall([
+    profiles.filePath,
+    vault.filePath,
+    windowStateFilePath(nabyHome),
+    dbPath,
+  ]);
+  const whatsNew = new WhatsNewStore({ userDataDir, freshInstall });
+  log(`[whats-new] freshInstall=${String(freshInstall)} watermark=${String(whatsNew.lastSeenVersion())}`);
 
   // The engine reads keys through this bridge. It is an IN-PROCESS function
   // table, not IPC: the Next server (and therefore the shell's naby engine)

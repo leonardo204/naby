@@ -4,10 +4,10 @@
 // channels and the preload surface that carry it.
 //
 // WHAT IS UNDER TEST, and why it is worth a spike at all. The DECISIONS — does
-// this count as an upgrade, which entries fall in the gap, is this a fresh
-// install — are pure functions in the shell and are covered by vitest
-// (releaseNotesOps.test.ts, 40 assertions). What vitest cannot reach is the one
-// thing the whole feature rests on:
+// this count as an upgrade, which entries fall in the gap, what a missing
+// watermark means — are pure functions in the shell and are covered by vitest
+// (releaseNotesOps.test.ts). What vitest cannot reach is what those decisions
+// are made OF: two facts about this machine's disk.
 //
 //   THE WATERMARK MUST SURVIVE A RESTART.
 //
@@ -24,6 +24,14 @@
 // So the store is a file in userData, and the assertions below are about the
 // file: a second instance is a restart, and it has to see what the first wrote.
 //
+//   AND A MISSING WATERMARK IS NOT A NEW USER.
+//
+// The second fact, added after the popup shipped and never fired. Every
+// installation that predates the watermark has none either, so "no watermark"
+// meant "brand-new user" and the launch after an update — the only launch this
+// feature is for — was silent for everyone who already had the app. Section
+// (d2) proves the distinction the renderer is now handed instead of guessing.
+//
 // WHAT IS NOT PROVEN HERE. That the renderer calls these channels in the right
 // order — that is asserted against the source in whatsNewWiring.test.ts — and
 // that Electron's `app.getVersion()` reports the naby version in a packaged
@@ -34,7 +42,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from 'no
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WhatsNewStore } from '../../electron/whats-new.js';
+import { looksLikeFreshInstall, WhatsNewStore } from '../../electron/whats-new.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 const checks: Check[] = [];
@@ -126,6 +134,71 @@ function main(): void {
     'record("") is a no-op; 1.26.0 is still on file',
   );
 
+  // -- (d2) a missing watermark is not the same as a new user ---------------
+  //
+  // THE SECOND FACT, and the one the feature was broken without. An
+  // installation that existed before the watermark did has no watermark either,
+  // so the renderer could not tell it from a brand-new one — and chose silence,
+  // for every existing user, on the exact launch the popup exists for.
+  // `looksLikeFreshInstall` is that distinction, and it is a question about
+  // files, which is why it is proven here rather than in vitest.
+  const freshDir = mkdtempSync(join(tmpdir(), 'naby-whats-new-fresh-'));
+  const oldDir = mkdtempSync(join(tmpdir(), 'naby-whats-new-existing-'));
+  const evidenceOf = (dir: string): string[] => [
+    join(dir, 'providers.json'),
+    join(dir, 'naby', 'credentials.json'),
+    join(dir, 'window-state.json'),
+    join(dir, 'app.db'),
+  ];
+  record(
+    '(d2) an untouched userData dir is a FRESH install — nothing is announced to a new user',
+    looksLikeFreshInstall(evidenceOf(freshDir)) === true,
+    `${freshDir} holds none of: providers.json, credentials.json, window-state.json, app.db`,
+  );
+  // One piece of evidence is enough, and each is tested on its own: an existing
+  // user may have any subset of them.
+  for (const rel of ['providers.json', 'window-state.json', 'app.db']) {
+    const dir = mkdtempSync(join(tmpdir(), 'naby-whats-new-one-'));
+    writeFileSync(join(dir, rel), '{}', 'utf8');
+    record(
+      `(d2) ${rel} alone proves the app has run here before`,
+      looksLikeFreshInstall(evidenceOf(dir)) === false,
+      `${rel} exists → not a fresh install → the running version IS announced`,
+    );
+    rmSync(dir, { recursive: true, force: true });
+  }
+  writeFileSync(join(oldDir, 'providers.json'), '{"version":1,"profiles":[]}', 'utf8');
+  record(
+    '(d2) an existing installation with NO watermark still reads as existing',
+    looksLikeFreshInstall(evidenceOf(oldDir)) === false &&
+      new WhatsNewStore({ userDataDir: oldDir, freshInstall: false }).lastSeenVersion() === null,
+    'the two facts are independent: no watermark, and yet demonstrably not new',
+  );
+  record(
+    '(d2) the watermark file is NOT evidence of itself',
+    (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'naby-whats-new-self-'));
+      const store = new WhatsNewStore({ userDataDir: dir });
+      store.record('1.26.0');
+      const fresh = looksLikeFreshInstall(evidenceOf(dir));
+      rmSync(dir, { recursive: true, force: true });
+      return fresh === true;
+    })(),
+    'whats-new.json is the question, not the answer — counting it would restore the original bug',
+  );
+  record(
+    '(d2) the latch is carried on the store, so the renderer gets both facts from one call',
+    new WhatsNewStore({ userDataDir: freshDir, freshInstall: true }).isFreshInstall() === true &&
+      new WhatsNewStore({ userDataDir: oldDir, freshInstall: false }).isFreshInstall() === false &&
+      new WhatsNewStore({ userDataDir: oldDir }).isFreshInstall() === true,
+    'an unstated latch defaults to fresh — the silent answer',
+  );
+  record(
+    '(d2) an unreadable path counts as absent rather than throwing on the startup path',
+    looksLikeFreshInstall(['\0not-a-path']) === true,
+    'a failing existsSync leans towards silence, not towards announcing',
+  );
+
   // -- (e) the channels and the bridge exist --------------------------------
   //
   // Source assertions: the renderer's only route to this store is the preload
@@ -143,8 +216,27 @@ function main(): void {
   }
   record(
     '(e) the store is constructed at boot and handed to the IPC layer',
-    /new WhatsNewStore\(\{ userDataDir \}\)/.test(boot) && /\bwhatsNew,/.test(boot),
-    'electron/boot.ts: new WhatsNewStore({ userDataDir }) → registerIpcHandlers({ …, whatsNew })',
+    /new WhatsNewStore\(\{ userDataDir, freshInstall \}\)/.test(boot) && /\bwhatsNew,/.test(boot),
+    'electron/boot.ts: new WhatsNewStore({ userDataDir, freshInstall }) → registerIpcHandlers({ …, whatsNew })',
+  );
+  record(
+    '(e) the freshness latch is taken BEFORE the files it looks at can be written',
+    (() => {
+      const latch = boot.indexOf('looksLikeFreshInstall([');
+      // Every one of these creates or opens one of the paths the latch reads.
+      const writers = [
+        boot.indexOf('await startEmbeddedNextServer('),
+        boot.indexOf('new mod.SqliteStore('),
+        boot.indexOf('installWindowStatePersistence('),
+      ];
+      return latch > 0 && writers.every((at) => at > latch);
+    })(),
+    'asked after the server opens app.db, a brand-new install would read as an old one',
+  );
+  record(
+    '(e) main answers the third fact, and makes no decision with it',
+    /freshInstall: deps\.whatsNew\?\.isFreshInstall\(\) \?\? true/.test(ipc),
+    'whats-new:get returns {currentVersion, lastSeenVersion, freshInstall}; the renderer decides',
   );
   record(
     '(e) the renderer sees exactly two functions — a read and a write, no channel name',
@@ -169,6 +261,8 @@ function main(): void {
 
   rmSync(userDataDir, { recursive: true, force: true });
   rmSync(brokenDir, { recursive: true, force: true });
+  rmSync(freshDir, { recursive: true, force: true });
+  rmSync(oldDir, { recursive: true, force: true });
 
   const failed = checks.filter((c) => !c.pass);
   for (const c of checks) {

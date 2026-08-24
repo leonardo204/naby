@@ -21,9 +21,17 @@
 // keeping it out of the store means the popup cannot be broken by a store
 // migration and needs none of its own.
 //
-// EVERY READ FAILS SOFT. A missing file is a fresh install, and so is a corrupt
-// one: both answer `null`, the renderer records the current version silently,
-// and nothing is shown. A startup path that can throw is not worth a changelog.
+// EVERY READ FAILS SOFT. A missing file is no watermark, and so is a corrupt
+// one: both answer `null`. A startup path that can throw is not worth a
+// changelog.
+//
+// A MISSING WATERMARK IS NOT THE SAME AS A NEW USER, which is the bug this file
+// grew a second answer for. Every installation that existed before the popup
+// shipped has no watermark either, and reading that as "brand-new user" made
+// the first launch after an update — the one launch the whole feature is for —
+// the one launch that said nothing. `looksLikeFreshInstall` below is the fact
+// that separates them, and it is a fact about the DISK, which only the main
+// process can see.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -36,11 +44,60 @@ type WhatsNewFile = {
   seenAt?: number;
 };
 
+/**
+ * Has this installation NEVER run before?
+ *
+ * Answered from the state files earlier launches leave behind — the caller
+ * names them (`electron/boot.ts` passes the real `filePath` of each store, so
+ * this cannot drift from where those files actually live). ANY of them existing
+ * means the app has run here before; none existing means this is the first
+ * launch of a new installation, which is the only case that must stay silent.
+ *
+ * TWO THINGS MAKE THIS CORRECT, and both are easy to lose:
+ *
+ *   1. IT MUST BE LATCHED, not asked later. Every path handed in is a file THIS
+ *      launch will create within seconds — the vault on the first key, app.db
+ *      when the embedded server opens the store, the window state on the first
+ *      move. Asked after boot it would answer "not fresh" on a brand-new
+ *      installation's first launch, which is exactly the answer that would put
+ *      a changelog in a new user's face.
+ *   2. THE WATERMARK FILE IS NOT EVIDENCE. Its absence is the question being
+ *      asked; including it would make the answer "yes, fresh" every time and
+ *      restore the original bug.
+ *
+ * A path that cannot be tested (permissions, a disappearing volume) counts as
+ * absent: the failure then leans towards silence, not towards announcing.
+ */
+export function looksLikeFreshInstall(priorStatePaths: readonly string[]): boolean {
+  return !priorStatePaths.some((path) => {
+    try {
+      return existsSync(path);
+    } catch {
+      return false;
+    }
+  });
+}
+
 export class WhatsNewStore {
   readonly filePath: string;
 
-  constructor(opts: { userDataDir: string; fileName?: string }) {
+  readonly #freshInstall: boolean;
+
+  constructor(opts: { userDataDir: string; fileName?: string; freshInstall?: boolean }) {
     this.filePath = join(opts.userDataDir, opts.fileName ?? 'whats-new.json');
+    // Conservative default, matching the renderer's: an unstated answer means
+    // "treat it as a new installation", i.e. say nothing.
+    this.#freshInstall = opts.freshInstall ?? true;
+  }
+
+  /**
+   * The latched answer to "has this installation ever run before", as decided
+   * at boot. Stored beside the watermark because the renderer needs BOTH facts
+   * to make one decision, and a caller that could get one without the other
+   * would eventually get exactly one of them.
+   */
+  isFreshInstall(): boolean {
+    return this.#freshInstall;
   }
 
   /**

@@ -283,7 +283,7 @@ const updates = {
 };
 
 /**
- * The "what changed" popup's two facts.
+ * The "what changed" popup's three facts.
  *
  * SEPARATE FROM `updates` even though both concern versions, because they
  * answer opposite questions: `updates` is about a version the user does not
@@ -296,10 +296,18 @@ const updates = {
  * renderer that used it would compare the wrong two things.
  */
 const whatsNew = {
-  /** `{currentVersion, lastSeenVersion}`. `lastSeenVersion` is null on a fresh
-   *  install, and on any file this installation cannot read. */
-  get: (): Promise<Result<{ currentVersion: string; lastSeenVersion: string | null }>> =>
-    ipcRenderer.invoke('whats-new:get'),
+  /**
+   * `{currentVersion, lastSeenVersion, freshInstall}`.
+   *
+   * `lastSeenVersion` is null when nothing has been recorded — a brand-new
+   * installation, an installation older than the watermark itself, or a file
+   * that could not be read. `freshInstall` is what tells the first of those
+   * three from the other two: it is latched in main at boot, before this launch
+   * can create any of the state it is derived from.
+   */
+  get: (): Promise<
+    Result<{ currentVersion: string; lastSeenVersion: string | null; freshInstall: boolean }>
+  > => ipcRenderer.invoke('whats-new:get'),
 
   /** Record a version as announced. Idempotent; last write wins. */
   markSeen: (version: string): Promise<Result<void>> =>
