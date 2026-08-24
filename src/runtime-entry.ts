@@ -486,11 +486,55 @@ export {
   // A live subscription cannot be driven into `allowed_warning` on demand, so a
   // captured fixture is the ONLY way this is ever exercised (rateLimit.test.ts).
   describeRateLimit,
+  // "How much of the plan is left", asked BEFORE a turn instead of waited for.
+  // The counterpart to `describeRateLimit`, not a replacement: that one carries
+  // the throttling STATUS the backend pushes mid-turn, this one carries the
+  // utilization of both windows on demand. See subscription-usage.ts.
+  probeClaudeUsage,
   MODEL_PROBE_TIMEOUT_MS,
   MODEL_PROBE_RETRY_TIMEOUT_MS,
+  USAGE_PROBE_TIMEOUT_MS,
+  USAGE_PROBE_RETRY_TIMEOUT_MS,
   type ClaudeEngineDiagnostics,
   type ClaudeModelInfo,
 } from './engines/claude-agent-sdk-engine.js';
+
+// The plan-usage shapes, the two parsers and the merge — all pure, all taking
+// `unknown`. Exported so the shell asserts them against captured fixtures: the
+// SDK method behind one source is flagged experimental by its own name, and
+// neither source can be driven to a chosen percentage on demand.
+export {
+  isoToUnixSeconds,
+  leastRemainingWindow,
+  mergeSubscriptionUsage,
+  parseHudUsage,
+  parseSdkUsage,
+  usagePercent,
+  SUBSCRIPTION_USAGE_TTL_MS,
+  SUBSCRIPTION_USAGE_MAX_STALE_MS,
+  type SubscriptionUsage,
+  type SubscriptionUsageSource,
+  type SubscriptionUsageWindow,
+} from './runtime/subscription-usage.js';
+
+// The SECOND usage source and — the load-bearing part — the guard that refuses to
+// merge it across two different Claude accounts. Reads no credential and makes no
+// network call; the header of that module records the authorised exception and
+// explains why it did not have to be spent.
+export {
+  claudeIdentityPath,
+  defaultClaudeConfigDir,
+  nabyClaudeConfigDir,
+  readClaudeCliUsage,
+  readClaudeIdentity,
+  readClaudeIdentityFrom,
+  sameClaudeAccount,
+  CLAUDE_IDENTITY_FILE,
+  HUD_CACHE_FILE,
+  type ClaudeAccountIdentity,
+  type ClaudeCliUsageReading,
+  type ClaudeCliUsageReason,
+} from './engines/claude-hud-usage.js';
 
 // Whether the LOCAL Claude sign-in the dev engine runs on actually exists and
 // is usable. Separate from `isClaudeAgentSdkAvailable` on purpose: that asks

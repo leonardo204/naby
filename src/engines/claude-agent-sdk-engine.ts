@@ -84,6 +84,14 @@ import { resolveToolRefs } from '../runtime/delegate.js';
 // engine: `engines/claude-accounts.ts` would import `claude-login.ts`, which
 // imports THIS module, and the cycle would run through the engine's own graph.
 import { claudeAccountEnvFor } from '../runtime/claude-accounts.js';
+// The plan-usage shapes and their parser. In the RUNTIME, and taking `unknown`,
+// for the reason stated at the head of that file: the SDK call it parses is
+// flagged experimental by its own name, so the parse must be a pure function over
+// captured fixtures rather than something only a live subscription can exercise.
+import {
+  parseSdkUsage,
+  type SubscriptionUsage,
+} from '../runtime/subscription-usage.js';
 
 // What may be echoed out of a harness message. Both are the "rule 1" guard in
 // regex form: a LABEL is a short type name we are willing to render, an ID is an
@@ -747,6 +755,150 @@ async function probeOnce(opts?: {
     ac.abort();
     // Close the generator so the SDK tears its CLI down now rather than whenever
     // it notices the abort. Best-effort: a throw here would mask the result.
+    try {
+      await query?.return?.();
+    } catch {
+      /* already finished */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// "How much of the subscription is left" — asked, rather than waited for
+// (specs/claude-multi-account.md §3.3, §4)
+//
+// SAME TRICK AS THE MODEL PROBE ABOVE, AND FOR THE SAME REASON. `query()`
+// connects and initializes before it processes any prompt, so this hands it an
+// AsyncIterable prompt that never yields: the CLI comes up, answers the control
+// request, and is torn down. No message is sent, nothing is billed, no session is
+// written, and — this is the point of the whole exercise — the answer is
+// available BEFORE the user has run a turn. The `rate_limit_event` path cannot do
+// that: it is a push that arrives mid-turn and describes one window.
+//
+// WHY THIS IS THE PRIMARY SOURCE. It goes through the session naby itself
+// authenticated, which means it is correct FOR THE ACCOUNT THIS APP IS USING by
+// construction — including when that is one of several isolated accounts under
+// `CLAUDE_CONFIG_DIR`. No file on disk can make that claim about itself.
+//
+// BEST-EFFORT BY CONTRACT, AND THE CONTRACT IS WRITTEN IN THE METHOD'S NAME. See
+// `probeClaudeUsage` for the list of ways this returns null; all of them render
+// as no chip at all.
+// ---------------------------------------------------------------------------
+
+/**
+ * How long to wait for the usage answer, first try and retry.
+ *
+ * The same two-timeout shape as the model probe, for the same measured reason
+ * (see `MODEL_PROBE_TIMEOUT_MS`): a warm CLI answers in about a second, a cold
+ * spawn can take twenty, and roughly every other attempt gets stuck behind the
+ * previous CLI's teardown and never answers. Nothing waits on this — it fills a
+ * status chip in the background — so the first attempt is short and the retry is
+ * the generous one.
+ */
+export const USAGE_PROBE_TIMEOUT_MS = 10_000;
+export const USAGE_PROBE_RETRY_TIMEOUT_MS = 45_000;
+
+/**
+ * The experimental control method, named once.
+ *
+ * ITS NAME IS THE SPECIFICATION, so it is written down here rather than inlined:
+ * the vendor is saying, in the identifier itself, that this may change shape or
+ * disappear in any release without notice. Everything downstream is built for
+ * that — the call is `typeof === 'function'`-checked before it is made, the
+ * response is parsed from `unknown` by a pure function that assumes nothing, and
+ * every failure is `null`. When the API is stabilised this constant is the one
+ * line that changes.
+ */
+const SDK_USAGE_METHOD = 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET';
+
+/**
+ * Ask the local sign-in how much of its plan is left, retrying ONCE.
+ *
+ * Returns `null` — never a zero, never a partial guess — for EVERY failure there
+ * is, and the display's rule is that null means no chip:
+ *
+ *   * the Agent SDK does not resolve on this machine;
+ *   * the CLI does not start, or does not answer inside the timeout;
+ *   * the method is absent, because the SDK was bumped and it was renamed or
+ *     removed (this is the one the method's own name warns about);
+ *   * the call throws;
+ *   * the account is not on a plan — `rate_limits_available: false`, which the
+ *     vendor documents for API-key, Bedrock and Vertex sessions and which is a
+ *     real answer meaning "no plan windows exist here", not an error;
+ *   * the response parses but carries no readable window.
+ *
+ * `accountId` names WHICH subscription to ask about (claude-multi-account §5.1),
+ * as an opaque id — never a path. Undefined means the single sign-in this
+ * computer has, and then the CLI inherits `process.env` exactly as every existing
+ * install already behaves.
+ */
+export async function probeClaudeUsage(opts?: {
+  accountId?: string;
+  cwd?: string;
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+}): Promise<SubscriptionUsage | null> {
+  const first = await probeUsageOnce(opts);
+  if (first) return first;
+  await new Promise((r) => setTimeout(r, PROBE_RETRY_DELAY_MS));
+  return probeUsageOnce({ ...opts, timeoutMs: opts?.timeoutMs ?? USAGE_PROBE_RETRY_TIMEOUT_MS });
+}
+
+async function probeUsageOnce(opts?: {
+  accountId?: string;
+  cwd?: string;
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+}): Promise<SubscriptionUsage | null> {
+  let sdk: AgentSdk;
+  try {
+    sdk = await loadAgentSdk();
+  } catch {
+    return null;
+  }
+  // The account's namespace, built by the same rule the turn path uses. Absent
+  // means absent: with no account chosen, `env` is not set at all and the child
+  // inherits the process environment — byte-for-byte the single-account
+  // behaviour. See `buildQueryOptions` for why passing a copy unconditionally
+  // would not be equivalent.
+  const accountEnv = opts?.accountId
+    ? claudeAccountEnvFor(opts.accountId, opts.env ?? process.env)
+    : undefined;
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), opts?.timeoutMs ?? USAGE_PROBE_TIMEOUT_MS);
+  // Aborting is not closing. `.return()` in the finally is what actually lets the
+  // child go, so two probes in a row both answer — see `probeOnce` for the
+  // measurement that established this.
+  let query: { return?: (v?: unknown) => Promise<unknown> } | undefined;
+  try {
+    const idlePrompt = (async function* () {
+      await new Promise<void>((resolve) => {
+        if (ac.signal.aborted) return resolve();
+        ac.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+    })();
+    const q = sdk.query({
+      prompt: idlePrompt as never,
+      options: {
+        abortController: ac,
+        ...(accountEnv ? { env: accountEnv } : {}),
+        ...(opts?.cwd ? { cwd: opts.cwd } : {}),
+      } as never,
+    }) as unknown as Record<string, unknown>;
+    query = q as { return?: (v?: unknown) => Promise<unknown> };
+    const method = q[SDK_USAGE_METHOD];
+    // THE GUARD THE METHOD'S NAME ASKS FOR. An SDK bump that renames or drops it
+    // lands here as "no chip", not as a TypeError inside a status bar.
+    if (typeof method !== 'function') return null;
+    const raw = await (method as () => Promise<unknown>).call(q);
+    // Everything about the shape is decided by a pure function over `unknown`,
+    // in the runtime, under test. Nothing is interpreted here.
+    return parseSdkUsage(raw);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+    ac.abort();
     try {
       await query?.return?.();
     } catch {

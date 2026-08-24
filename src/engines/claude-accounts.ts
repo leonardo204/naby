@@ -11,6 +11,33 @@
 // find the binary, no second timeout policy, and no code anywhere in naby that
 // reads or writes a credential (§2.1).
 //
+// THAT LAST CLAUSE STILL HOLDS, AND ONE THING NOW READS `~/.claude` ANYWAY — so
+// it is recorded here, next to the invariant, rather than left for a later reader
+// to discover and file as a bug.
+//
+// The plan-usage display (`engines/claude-hud-usage.ts`) takes a second reading
+// of the account's 5-hour and 7-day limits from `~/.claude/.hud_cache`, which is
+// Claude Code's own status-line cache, and merges it with the Agent SDK's usage
+// query by keeping whichever reports less headroom. An explicit exception to the
+// rule above was authorised for that feature, permitting the credential file and
+// the OAuth usage endpoint if they were needed.
+//
+// THEY WERE NOT NEEDED, AND THE EXCEPTION WAS NOT SPENT. `.hud_cache` is a plain
+// JSON cache of the same endpoint's own response — same field names, same 0-100
+// scale — and carries no token, so the chosen implementation reads NO credential
+// and makes NO network call. `.credentials.json` is still never opened, the
+// Keychain is still never queried, and "naby has no code that could read a
+// secret" is still literally true.
+//
+// What DID change is narrower and worth naming precisely: naby now reads two
+// NON-SECRET artifacts of a directory it does not own — that cache, and
+// `.claude.json`, which is Claude Code's identity file (`accountUuid`,
+// `emailAddress`) and not its credential file. The identity read exists solely to
+// enforce the guard that matters here: `~/.claude` may be a DIFFERENT
+// subscription from the isolated account naby is running as, and a merged reading
+// across two accounts describes neither. See that module's header for the guard
+// and for why a refusal is the default.
+//
 // THE PURE HALF LIVES IN `runtime/claude-accounts.ts` — paths, ids, the
 // environment rule, the stored list. This module is the half that spawns.
 //
