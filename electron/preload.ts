@@ -351,6 +351,22 @@ const fsOps = {
     ipcRenderer.invoke('fs:trash', target),
 
   /**
+   * Begin an OS drag carrying these files, so they can be dropped into Finder,
+   * Explorer, or any other application that takes files.
+   *
+   * MUST BE CALLED FROM `dragstart`, and it REPLACES the HTML drag rather than
+   * accompanying it: once the OS takes the gesture, no in-page drop target sees
+   * it. That is why the tree asks for this only when a modifier says the user
+   * meant to go outside — the same drag cannot serve both.
+   *
+   * A LIST, because the tree can drag a multi-selection. Project-relative like
+   * its siblings: main joins and contains every path before the OS sees it, and
+   * refuses the whole drag if any one of them escapes.
+   */
+  startDrag: (target: { cwd: string; rels: string[] }): Promise<Result<void>> =>
+    ipcRenderer.invoke('fs:startDrag', target),
+
+  /**
    * The OS folder chooser behind "add/open a project" — resolves to the chosen
    * POSIX path, or `null` when the user cancels.
    *

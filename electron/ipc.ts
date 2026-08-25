@@ -32,6 +32,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  nativeImage,
   shell,
   webContents,
   type IpcMainInvokeEvent,
@@ -212,6 +213,14 @@ export const CHANNELS = [
   'fs:reveal',
   'fs:open',
   'fs:trash',
+  // fs:startDrag — begin an OS drag carrying these files, so they can be dropped
+  // into Finder/Explorer or any other application.
+  //
+  // It READS NOTHING. `startDrag` hands the OS a list of paths and the OS does
+  // the rest; nothing comes back but a Result saying whether the drag began.
+  // The same `absWithin` check as its siblings runs on every path, so a payload
+  // that escapes the project never reaches the drag.
+  'fs:startDrag',
   // fs:pickFolder — the OS folder chooser behind "add/open a project".
   //
   // The odd one out of this group: it takes no `{cwd, rel}`, because there is
@@ -597,6 +606,48 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     return ok(undefined as void);
   });
 
+  handle('fs:startDrag', async (payload, event) => {
+    // A LIST, not one path: the tree can drag a multi-selection, and starting a
+    // separate drag per file is not a thing the OS offers.
+    const { cwd, rels } = asObject(payload);
+    if (!Array.isArray(rels) || rels.length === 0) {
+      return fail('INTERNAL', 'refused: nothing to drag');
+    }
+    const files: string[] = [];
+    for (const rel of rels) {
+      const abs = absWithin({ cwd, rel });
+      // ALL OR NOTHING. Dragging four of five files because one escaped would be
+      // a silent partial answer, and the user would not know which was dropped.
+      if (!abs) return fail('INTERNAL', 'refused: that path is outside the project');
+      files.push(abs);
+    }
+
+    // THE ICON IS MANDATORY — `startDrag` throws on an empty one, which would
+    // take down the drag rather than degrade it. The real file icon is asked for
+    // first because that is what the user expects under the cursor; a 1×1
+    // transparent image stands in when the OS has none (a missing file, a type
+    // it does not know), and an invisible drag image is still a working drag.
+    let icon = nativeImage.createEmpty();
+    try {
+      icon = await app.getFileIcon(files[0]!, { size: 'normal' });
+    } catch {
+      /* fall through to the placeholder below */
+    }
+    if (icon.isEmpty()) {
+      icon = nativeImage.createFromDataURL(TRANSPARENT_PIXEL_PNG);
+    }
+
+    // `file` IS REQUIRED even when dragging several; `files` is the optional
+    // multi-item list beside it, and Electron reads the list when it is present.
+    // Passing only `files` type-errors and, worse, drags nothing on some
+    // platforms — so the first path is always given as `file` too.
+    //
+    // `startDrag` is synchronous and throws rather than returning a Result; the
+    // wrapper above turns that into a failed Result the renderer can report.
+    event.sender.startDrag({ file: files[0]!, files, icon });
+    return ok(undefined as void);
+  });
+
   handle('fs:open', async (payload) => {
     const abs = absWithin(payload);
     if (!abs) return fail('INTERNAL', 'refused: that path is outside the project');
@@ -773,6 +824,12 @@ function asObject(payload: unknown): Record<string, unknown> {
  * `resolve` collapses any `..` BEFORE the comparison, so the check cannot be
  * walked around by a `rel` that climbs and comes back.
  */
+/** A 1×1 fully transparent PNG. Stands in when the OS has no icon for the file
+ *  — `startDrag` throws on an empty icon, and an invisible drag image is still a
+ *  working drag, where a thrown error is not a drag at all. */
+const TRANSPARENT_PIXEL_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
 function absWithin(payload: unknown): string | null {
   const { cwd, rel } = asObject(payload);
   if (typeof cwd !== 'string' || !cwd || !isAbsolute(cwd)) return null;
