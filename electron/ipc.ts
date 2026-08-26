@@ -45,6 +45,7 @@ import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
 import type { Updater, UpdateStatus } from './updater.js';
 import type { WhatsNewStore } from './whats-new.js';
+import { nabyVersion } from './app-version.js';
 import { isDevModeAvailable, isDevModeUnlocked, lockDevMode, unlockDevMode } from './devmode.js';
 import {
   asNotifyLocale,
@@ -765,16 +766,17 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
 
 /**
  * `app.getVersion()` throws outside an Electron app context, and this module is
- * imported by harnesses that have none. Same guarded accessor as updater.ts;
- * `0.0.0` is unparseable-as-an-upgrade from anything real, so a harness reading
- * it shows no notes rather than all of them.
+ * imported by harnesses that have none.
+ *
+ * IT NO LONGER CALLS `app.getVersion()` DIRECTLY. Electron falls back to the
+ * EXECUTABLE's version when it cannot find the app's package.json, and the dev
+ * launcher hands it a file rather than a directory — so development reported
+ * naby's version as Electron's, `43.1.1`, and stamped that onto the persisted
+ * what's-new watermark, where no real release could ever outrank it. See
+ * electron/app-version.ts.
  */
 function safeAppVersion(): string {
-  try {
-    return app.getVersion();
-  } catch {
-    return '0.0.0';
-  }
+  return nabyVersion();
 }
 
 // ---------------------------------------------------------------------------

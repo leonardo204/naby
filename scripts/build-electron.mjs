@@ -31,7 +31,7 @@
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { loadEnv } from './load-env.mjs';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -87,6 +87,12 @@ const esmBanner = {
 // door is visible and unopenable. Trimming both ends of the pipe (see the same
 // tolerance in electron/devmode.ts) removes that whole failure mode.
 loadEnv();
+/** Read from package.json at BUILD time — the one place the version is stated,
+ *  so a baked-in constant cannot drift from what electron-builder ships. */
+const appVersion = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
+
 const devModeKey = (process.env.FORCE_DEVMODE_KEY ?? '').trim();
 const devModeHash = devModeKey ? createHash('sha256').update(devModeKey, 'utf8').digest('hex') : '';
 console.log(
@@ -97,7 +103,20 @@ console.log(
 
 /** Node 22 is Electron 43's floor; nothing here needs to go lower. */
 const shared = {
-  define: { __NABY_DEVMODE_HASH__: JSON.stringify(devModeHash) },
+  define: {
+    __NABY_DEVMODE_HASH__: JSON.stringify(devModeHash),
+    // THE APP'S OWN VERSION, BAKED IN, because `app.getVersion()` cannot be
+    // trusted to give it. Electron falls back to the version of the EXECUTABLE
+    // when it cannot find the app's package.json, and `electron:dev` launches a
+    // FILE (`electron dist/electron/main.mjs`) rather than a directory — so in
+    // development every caller was told naby's version was Electron's.
+    //
+    // That was not merely cosmetic: the what's-new watermark is written to disk
+    // in a userData directory the dev run and the packaged app SHARE, so one dev
+    // launch stamped `43.1.1` there and no real release could ever be newer
+    // than it again. The popup went silent permanently.
+    __NABY_APP_VERSION__: JSON.stringify(appVersion),
+  },
   bundle: true,
   platform: 'node',
   target: 'node22',

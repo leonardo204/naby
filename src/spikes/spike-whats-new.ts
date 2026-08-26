@@ -246,9 +246,15 @@ function main(): void {
     'preload.ts exposes naby.whatsNew = { get, markSeen }',
   );
   record(
-    '(e) the running version comes from app.getVersion(), through a guarded accessor',
-    /function safeAppVersion\(\)/.test(ipc) && /currentVersion: safeAppVersion\(\)/.test(ipc),
-    'the shell /api/version answers the COCKPIT package version — a different number entirely',
+    '(e) the running version comes from NABY, not from Electron',
+    /function safeAppVersion\(\)/.test(ipc) &&
+      /currentVersion: safeAppVersion\(\)/.test(ipc) &&
+      /return nabyVersion\(\);/.test(ipc) &&
+      !/function safeAppVersion\(\)[\s\S]{0,200}?app\.getVersion\(\)/.test(ipc),
+    'safeAppVersion reads the baked constant (electron/app-version.ts). It used to call ' +
+      'app.getVersion() directly, which returns the EXECUTABLE\'s version when Electron ' +
+      'cannot find the app package.json — the dev launcher hands it a file, so it did. ' +
+      'The shell /api/version is a different number again (the cockpit package).',
   );
 
   // -- (f) nothing touched the real profile ---------------------------------
@@ -260,6 +266,51 @@ function main(): void {
   );
 
   rmSync(userDataDir, { recursive: true, force: true });
+  // ── THE VERSION THE WATERMARK IS WRITTEN WITH ───────────────────────────
+  //
+  // The number that reaches this file matters more than the file does, and it
+  // was wrong for a year of dev runs. `app.getVersion()` falls back to the
+  // version of the EXECUTABLE when Electron cannot find the app's package.json,
+  // and `electron:dev` launches a FILE (`electron dist/electron/main.mjs`) —
+  // so development reported naby's version as Electron's own `43.x`, and stamped
+  // it into the userData directory the PACKAGED app shares. No real release
+  // could ever be newer, and the popup went silent for good.
+  //
+  // Checked against the BUILD OUTPUT rather than the source: the constant is
+  // injected by esbuild, so reading `electron/app-version.ts` would only prove
+  // the intention. This proves the artifact.
+  const pkgVersion = (JSON.parse(read('package.json')) as { version: string }).version;
+  const built = existsSync(join(HERE, 'dist/electron/main.mjs'))
+    ? read('dist/electron/main.mjs')
+    : null;
+  if (built === null) {
+    record(
+      'the app version is baked into the build',
+      false,
+      'dist/electron/main.mjs is missing — run `npm run build:electron` first',
+    );
+  } else {
+    record(
+      'the app version is baked into the build',
+      built.includes(JSON.stringify(pkgVersion)),
+      `package.json says ${pkgVersion}; main.mjs ${
+        built.includes(JSON.stringify(pkgVersion)) ? 'carries it' : 'DOES NOT carry it'
+      }`,
+    );
+    // The specific poisoning that happened. Electron's version must not be what
+    // a caller receives — and it is a whole major ahead of anything naby will
+    // ship, so believing it is permanent.
+    const electronVersion = (
+      JSON.parse(read('package.json')) as { devDependencies?: Record<string, string> }
+    ).devDependencies?.electron;
+    record(
+      'the build does not hand out Electron’s version as naby’s',
+      Number(pkgVersion.split('.')[0]) < 40,
+      `naby ${pkgVersion} vs electron ${String(electronVersion)} — the changelog repair in ` +
+        'releaseNotesOps tells them apart by major, so naby must stay well below it',
+    );
+  }
+
   rmSync(brokenDir, { recursive: true, force: true });
   rmSync(freshDir, { recursive: true, force: true });
   rmSync(oldDir, { recursive: true, force: true });
