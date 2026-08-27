@@ -2054,30 +2054,48 @@ async function checkStyleFingerprint(store: Store, label: string): Promise<void>
     `below=${String(renderStyleFingerprintLine(thin))} above="${renderStyleFingerprintLine(thick)}"`,
   );
 
-  // Through the REAL sweep: the settings key is written, and it round-trips.
+  // THROUGH THE REAL SWEEP: THE PROFILE IS NO LONGER LEARNED AT ALL.
+  //
+  // This check used to assert the opposite, and the reversal is the point. The
+  // fingerprint measured how the USER TYPES, and the voice layer corrected
+  // answers toward it — but how someone writes a prompt and how they want to be
+  // answered are different facts. A user who types "커밋 푸시 릴리즈 배포" and has
+  // asked, in words, for polite answers was being steered back toward their own
+  // terse instructions, and no amount of asking could have changed it.
+  //
+  // How naby SPEAKS is now something the user states: a memory, injected every
+  // turn, outranking observations (runtime/memory-inject.ts `TRUST_RANK`). What
+  // is worth learning from a conversation is intent and direction, not the shape
+  // of someone's sentences.
   seedM13Session(store, 'sess-m13f', [STYLE_QUOTE, '그리고 로그는 짧게 남긴다.']);
   const swept = await runReflectionSweep(store, m13Judge([]), { now: LATER(), cap: 10 });
   const stored = parseStyleFingerprint(store.getSetting(STYLE_FINGERPRINT_KEY));
   record(
-    `(kk3) [${label}] the sweep computes and stores the fingerprint under one settings key`,
-    swept.fingerprintSamples === 2 && stored !== undefined && stored.sampleCount === 2,
+    `(kk3) [${label}] the sweep no longer learns a writing style`,
+    swept.fingerprintSamples === 0 && stored === undefined,
     `fingerprintSamples=${swept.fingerprintSamples} stored=${JSON.stringify(stored)}`,
   );
 
-  // THE GATE (§3.3, and §4's "no new switch"): with learning off, nothing is
-  // recomputed — the same predicate that silences the LLM half.
-  writeLearningEnabled(store, false);
+  // AND AN EXISTING PROFILE IS LEFT ALONE, not deleted. Removing a user's data
+  // to finish a refactor is not this change's business — nothing reads it now.
+  // Written through the same JSON the parser reads back, so this fixture is a
+  // profile the code would actually accept rather than a shape only this test
+  // believes in.
+  const PRIOR = JSON.stringify(counted);
+  store.setSetting(STYLE_FINGERPRINT_KEY, PRIOR);
   seedM13Session(store, 'sess-m13g', ['완전히 다른 문체로 아주 길게 씁니다', '정말로요']);
   const gated = await runReflectionSweep(store, m13Judge([]), { now: LATER(), cap: 10 });
-  const afterGate = parseStyleFingerprint(store.getSetting(STYLE_FINGERPRINT_KEY));
   record(
-    `(kk4) [${label}] with learning OFF the fingerprint is not updated — no style-specific switch was needed (§4)`,
+    `(kk4) [${label}] a profile already on disk is neither updated nor erased`,
     gated.fingerprintSamples === 0 &&
-      afterGate?.computedAt === stored?.computedAt &&
-      afterGate?.sampleCount === 2,
-    `fingerprintSamples=${gated.fingerprintSamples} sampleCount still ${String(afterGate?.sampleCount)}`,
+      store.getSetting(STYLE_FINGERPRINT_KEY) === PRIOR &&
+      parseStyleFingerprint(store.getSetting(STYLE_FINGERPRINT_KEY))?.sampleCount ===
+        counted.sampleCount,
+    `fingerprintSamples=${gated.fingerprintSamples} untouched=${
+      store.getSetting(STYLE_FINGERPRINT_KEY) === PRIOR
+    }`,
   );
-  writeLearningEnabled(store, true);
+  store.setSetting(STYLE_FINGERPRINT_KEY, '');
 
   // And the merge is an incremental mean with a cap, so a long history cannot
   // freeze the profile against a person who changes how they write.

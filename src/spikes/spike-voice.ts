@@ -181,15 +181,25 @@ function checkLanguage(): void {
 }
 
 function checkEndings(): void {
-  // Same content, same language, polite endings — the family this fingerprint says
-  // the user does not use.
+  // A POLITE ANSWER TO A TERSE WRITER IS NOT A DEVIATION ANY MORE, and this is
+  // the check that used to say it was.
+  //
+  // The fingerprint is built from what the USER TYPES. This one prefers plain
+  // `~다`; the answer below is polite `~요`. The layer used to call that a
+  // deviation and rewrite the answer toward the user's own keystrokes — which is
+  // exactly backwards for someone who types "커밋 푸시 릴리즈 배포" and has asked,
+  // in words, to be answered politely.
+  //
+  // How naby SPEAKS is something the user states, not something naby measures.
+  // Stated preferences are memories, injected every turn, and they now outrank
+  // observations (memory-inject.ts `TRUST_RANK`).
   const polite =
     '세션 스토어는 런타임에 두는 게 좋아요. 프로바이더를 바꿔도 남아야 하니까요. 셸은 HTTP 액션만 맡아요.';
   const verdict = detect(polite, KOREAN_USER, FORMAL_SHORT);
   record(
-    '(c) endings deviation: a polite answer to a plain-~다 writer',
-    verdict === 'endings',
-    `verdict = ${verdict} (fingerprint prefers formal ${FORMAL_SHORT.endings.formal})`,
+    '(c) a register the fingerprint does not match is LEFT ALONE',
+    verdict === undefined,
+    `verdict = ${verdict} (fingerprint prefers formal ${FORMAL_SHORT.endings.formal}; answer is polite)`,
   );
 
   const withoutFingerprint = detect(polite, KOREAN_USER);
@@ -214,11 +224,14 @@ function checkLength(): void {
     '런타임의 검증은 스파이크로 하는 식으로 두 트리의 책임이 갈린다. ' +
     '이 규칙을 지키면 프로바이더를 바꾸는 작업이 스토어의 스키마를 건드리지 않고 끝나며 셸을 새로 쓰더라도 ' +
     '데이터와 정책은 그대로 남기 때문에 두 트리를 따로 검증하는 비용이 회수된다.';
+  // LENGTH IS NOT JUDGED EITHER, for the same reason as the register above: how
+  // long the user's own sentences run says nothing about how long an ANSWER
+  // should be. A one-line instruction can deserve six paragraphs back.
   const verdict = detect(long, KOREAN_USER, FORMAL_SHORT);
   record(
-    '(d) length deviation: sentences several times the fingerprint average',
-    verdict === 'length',
-    `verdict = ${verdict} (fingerprint avg ${FORMAL_SHORT.avgSentenceChars} chars)`,
+    '(d) an answer far longer than the user writes is LEFT ALONE',
+    verdict === undefined,
+    `verdict = ${verdict} (fingerprint avg ${FORMAL_SHORT.avgSentenceChars} chars; answer is many times that)`,
   );
 }
 

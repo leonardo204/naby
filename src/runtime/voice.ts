@@ -653,38 +653,30 @@ export function detectVoiceDeviation(input: {
   const fingerprint = usableFingerprint(input.fingerprint);
   if (!fingerprint) return undefined;
 
-  // PROSE SENTENCES ONLY, and enough of them: a heading, a bullet and a table row
-  // are not written in a register and have no characteristic length.
-  const sentences = proseSentences(splitSentences(prose));
-  if (sentences.length < MIN_SENTENCES_FOR_SHAPE) return undefined;
-
-  // -- endings ---------------------------------------------------------------
+  // -- ENDINGS AND LENGTH ARE NO LONGER JUDGED, and the reason is not that they
+  // stopped working. They worked, on the wrong target.
   //
-  // KOREAN ANSWERS ONLY. The three families are a Korean phenomenon: every English
-  // sentence classifies as `fragment`, so an unguarded comparison would report
-  // "wrong ending" for every English answer a Korean-writing user ever gets —
-  // including the ones they asked for in English. The language rule above is where
-  // an answer in the wrong language is caught; this rule only asks how a Korean
-  // answer sounds.
-  if (answerKorean === true) {
-    const preferred = preferredEnding(fingerprint);
-    const dominant = dominantEnding(sentences);
-    if (preferred && dominant && preferred !== dominant) return 'endings';
-  }
-
-  // -- length ----------------------------------------------------------------
-  if (fingerprint.avgSentenceChars > 0) {
-    const total = sentences.reduce((sum, s) => sum + s.length, 0);
-    const average = total / sentences.length;
-    if (average > 0) {
-      const factor = Math.max(
-        average / fingerprint.avgSentenceChars,
-        fingerprint.avgSentenceChars / average,
-      );
-      if (factor >= VOICE_LENGTH_FACTOR) return 'length';
-    }
-  }
-
+  // The fingerprint is built from what the USER TYPES, and the layer corrected
+  // answers toward it. But how someone writes a prompt and how they want to be
+  // answered are different facts. This machine's own fingerprint reads
+  // `formal 47% · fragment 43% · polite 10%` — the shape of terse instructions
+  // like "커밋 푸시 릴리즈 배포" — while the person typing them had asked, in
+  // words, to be answered politely. The layer was faithfully steering away from
+  // what they had asked for, because an observation of their keystrokes outranked
+  // their instruction.
+  //
+  // A preference for how naby SPEAKS is something the user states, not something
+  // naby measures. Stated preferences live in memory, are injected every turn,
+  // and now outrank observations (memory-inject.ts `TRUST_RANK`). Nothing about
+  // this needs a fingerprint.
+  //
+  // LANGUAGE STAYS, above, and is a different kind of claim: it is not a register
+  // this layer inferred from a sample, it is which language the user just wrote
+  // in — read from THIS turn, correct with no history at all.
+  //
+  // The fingerprint is left on disk untouched. It is simply no longer consulted
+  // for these two, and `VoiceDeviation` keeps both names so a stored statistic
+  // written before this still parses.
   return undefined;
 }
 
