@@ -268,8 +268,12 @@ async function main(): Promise<void> {
   );
   record(
     checks,
-    '(b2) the tool told the model it is a proposal, not a live fact',
-    toolResults(h1.events).some((t) => /PROPOSAL/.test(t) && /confirm/i.test(t)),
+    '(b2) the tool told the model it is a proposal, and that a USER decides',
+    // Matched on the two facts rather than on one word: the wording moved when
+    // the agreement became an offer in the transcript instead of an errand to a
+    // settings screen, and a spike that pins a phrase fails on an edit that
+    // changes nothing it was there to protect.
+    toolResults(h1.events).some((t) => /PROPOSAL/.test(t) && /\b(user|agree)/i.test(t)),
     `tool results: ${JSON.stringify(toolResults(h1.events).map((t) => t.slice(0, 70)))}`,
   );
 

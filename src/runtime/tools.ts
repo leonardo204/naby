@@ -509,8 +509,9 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
       return {
         content:
           `Noted "${normalizedKey}" in ${scope} memory as a PROPOSAL. It is not in use yet — ` +
-          'memory only shapes future answers after the user confirms it in Settings → Agents → ' +
-          'memory review. Do not call this again for the same fact, and do not tell the user it is ' +
+          'memory only shapes future answers after the USER agrees to it. The app offers them ' +
+          'that agreement on this very tool call, so do not send them to a settings screen to ' +
+          'find it. Do not call this again for the same fact, and do not tell the user it is ' +
           'already being applied.',
         data: { id: saved.id, key: saved.key, scope: saved.scope, status: saved.status },
       };
