@@ -631,6 +631,11 @@ export class MemoryStore implements Store {
     const now = Date.now();
     item.status = 'confirmed';
     item.updatedAt = now;
+    // AND THE TRUST TIER, the same promotion the SQL driver makes and for the
+    // same reason `editMemory` gives: confirming without editing is the user
+    // saying the claim is right as written, which is what the `user` tier means.
+    // A row they vouched for must be able to outrank one nobody said.
+    item.provenance = { ...item.provenance, source: 'user' };
     // P3-M10 §2.1: a confirm IS an access — a person just read the row and said
     // yes. Stamped in the same step as the status, exactly as the SQL driver
     // does it in one UPDATE.

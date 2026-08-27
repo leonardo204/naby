@@ -457,6 +457,53 @@ async function checkInjection(checks: Check[]): Promise<void> {
     `order=${JSON.stringify(bothSaid.items.map((i) => i.key))}`,
   );
 
+  // -- SAYING YES IS SAYING IT ---------------------------------------------
+  //
+  // A capture from conversation is written `artifact` — naby cannot tell an
+  // instruction the user gave from a fact it inferred, and letting the model
+  // grade its own writes is the failure this codebase already fixed once in the
+  // voice layer. So the grade is decided by a PERSON, at confirm time.
+  //
+  // Before this, confirming changed only the status. The user could read
+  // "answer in Korean", agree to it, and still lose to `artifact`-tier text a
+  // model had inferred from a project's code — agreeing changed nothing they
+  // could see, and asking again could not have helped.
+  const proposalId = store.putMemory({
+    scope: 'user',
+    scopeKey: 'local',
+    type: 'semantic',
+    key: 'answer-tone',
+    value: '공손한 존댓말로 답한다',
+    provenance: { source: 'artifact', basis: 'learned from this conversation' },
+    confidence: 0.5,
+    requestedStatus: 'proposed',
+  }).id;
+
+  const beforeConfirm = store.getMemoryById(proposalId);
+  store.confirmMemory(proposalId);
+  const afterConfirm = store.getMemoryById(proposalId);
+  record(
+    checks,
+    '(f4) confirming a proposal promotes it to the tier of things the user said',
+    beforeConfirm?.provenance.source === 'artifact' &&
+      afterConfirm?.provenance.source === 'user' &&
+      afterConfirm?.status === 'confirmed',
+    `source ${String(beforeConfirm?.provenance.source)} -> ${String(afterConfirm?.provenance.source)}, status=${String(afterConfirm?.status)}`,
+  );
+
+  // ...and the promotion is what actually changes the answer: the same row now
+  // outranks the project-scoped observation it used to lose to.
+  const nowOutranks = selectMemoryForInjection(
+    [observed({ id: 'm-rival', key: 'rival-observation' }), afterConfirm!],
+    ROOMY,
+  );
+  record(
+    checks,
+    '(f5) and the promotion is what changes the answer — it now outranks the observation',
+    nowOutranks.items[0]?.key === 'answer-tone',
+    `order=${JSON.stringify(nowOutranks.items.map((i) => i.key))}`,
+  );
+
   // sanity: pure selection empty is a clean zero
   const empty = selectMemoryForInjection([], 100);
   record(

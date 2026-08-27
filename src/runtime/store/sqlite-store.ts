@@ -1848,10 +1848,27 @@ export class SqliteStore implements Store {
     // P3-M10: the same statement stamps ACCESS. A person just looked at this row
     // and said yes to it — recording that in a second UPDATE would be two writes
     // for one act, and one of them could fail alone.
+    //
+    // AND IT PROMOTES THE TRUST TIER, for the same reason `editMemory` does. That
+    // method's own argument is that "the user typing the sentence themselves is
+    // exactly what the `user` trust tier means" — and confirming without editing
+    // is the same act with fewer keystrokes: the person read the claim and said
+    // it was right. A row they vouched for must be able to outrank one nobody
+    // said (memory-inject.ts `TRUST_RANK`).
+    //
+    // Without this the vouching went nowhere. A user who asked to be answered in
+    // Korean, and confirmed that memory, still lost to `artifact`-tier text a
+    // model had inferred from a project's code — so agreeing changed nothing they
+    // could see, and asking again could not have helped either.
+    //
+    // `prov_source` ONLY. Status, corroboration and the rest of the provenance
+    // are untouched: this records who now stands behind the claim, not a new
+    // claim.
     const now = Date.now();
     this.db
       .prepare(
-        `UPDATE memory_items SET status = 'confirmed', updated_at = ?, last_injected_at = ?
+        `UPDATE memory_items SET status = 'confirmed', prov_source = 'user',
+            updated_at = ?, last_injected_at = ?
           WHERE id = ? AND status = 'proposed'`,
       )
       .run(now, now, id);

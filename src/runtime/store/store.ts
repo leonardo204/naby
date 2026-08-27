@@ -1250,6 +1250,12 @@ export interface Store {
   /** Confirm a proposed item — the ONLY path external-origin memory becomes
    * confirmed (§4 invariant 1). No-op if already confirmed or absent.
    *
+   * IT ALSO PROMOTES `provenance.source` TO `'user'`, for the reason `editMemory`
+   * states: a person reading the claim and saying it is right is exactly what the
+   * `user` trust tier means, whether or not they changed a word. Without it the
+   * vouching went nowhere — a confirmed instruction still lost to `artifact`-tier
+   * text a model had inferred (memory-inject.ts `TRUST_RANK`).
+   *
    * P3-M10: a confirm also STAMPS ACCESS (§2.1). A person just read this row and
    * said yes to it, which is the strongest "still live" signal there is — without
    * the stamp a memory could be confirmed today and count as 30 days stale
