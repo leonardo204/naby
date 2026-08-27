@@ -44,11 +44,35 @@ import type {
   MemoryScope,
   MemoryType,
   Store,
+  TrustTier,
 } from './store/store.js';
 
 /** Single-user machine default (contract §8 open q): the user scopeKey is a
  * constant until multi-user rollout. Callers may override. */
 export const DEFAULT_USER_ID = 'local';
+
+/**
+ * WHO DECIDED THIS — and it comes before everything else.
+ *
+ * A memory is either something the USER SAID or something naby OBSERVED, and
+ * `TrustTier` has recorded which since the beginning. What it never did was
+ * outrank anything: precedence read the scope first, so an observation about a
+ * project beat an instruction from the person using it.
+ *
+ * That is not a tie-break detail, it is whether the user can address their own
+ * agent. The live example this was found on: `answer-language = 한국어`, said by
+ * the user, sat BELOW `default-response-language-english`, inferred by naby from
+ * a project's code — so the project's convention was quietly answering for the
+ * person who had asked for Korean.
+ *
+ * `artifact` and `external` are deliberately EQUAL. Both are things nobody said;
+ * ranking one above the other would be inventing a hierarchy among guesses.
+ */
+const TRUST_RANK: Record<TrustTier, number> = {
+  user: 0,
+  artifact: 1,
+  external: 1,
+};
 
 /** Scope precedence on ties (contract §5): session first, org last. */
 const SCOPE_RANK: Record<MemoryScope, number> = {
@@ -155,10 +179,14 @@ export function relevanceScore(queryTokens: ReadonlySet<string>, item: MemoryIte
   return overlap / Math.sqrt(memTokens.length);
 }
 
-/** The relevance-agnostic order: scope, then type priority, then most recently
- *  updated. Extracted so the ranking below can name it as its ONLY tiebreak —
- *  the Phase-1.5 order is not re-derived anywhere. */
+/** The relevance-agnostic order: WHO SAID IT, then scope, then type priority,
+ *  then most recently updated. Extracted so the ranking below can name it as its
+ *  ONLY tiebreak — the order is not re-derived anywhere. */
 function comparePrecedence(a: MemoryItem, b: MemoryItem): number {
+  // WHO SAID IT, ahead of where it applies. See TRUST_RANK.
+  const w = TRUST_RANK[a.provenance.source] - TRUST_RANK[b.provenance.source];
+  if (w !== 0) return w;
+
   const s = SCOPE_RANK[a.scope] - SCOPE_RANK[b.scope];
   if (s !== 0) return s;
   const t = TYPE_RANK[a.type] - TYPE_RANK[b.type];

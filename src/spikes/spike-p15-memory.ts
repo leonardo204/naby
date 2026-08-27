@@ -377,6 +377,86 @@ async function checkInjection(checks: Check[]): Promise<void> {
     `baseline system=${JSON.stringify(engineBaseline.diagnostics.system)}; injection-on-no-memory system=${JSON.stringify(engineInjectNoMem.diagnostics.system)}; identical=${noopIdentical}`,
   );
 
+  // -- WHO SAID IT OUTRANKS WHERE IT APPLIES --------------------------------
+  //
+  // The live case this was found on. `answer-language = 한국어` was said by the
+  // USER; `default-response-language-english` was INFERRED by naby from a
+  // project's code. Scope-first put the inference above the instruction, so the
+  // project's convention quietly answered for the person who had asked for
+  // Korean — and no amount of asking again would have changed it, because the
+  // asking landed in the lower-ranked row every time.
+  //
+  // Budgeted to ONE item so the order is what decides, not the budget.
+  const said = (over: Partial<MemoryItem>): MemoryItem =>
+    ({
+      id: 'm-said',
+      scope: 'user',
+      scopeKey: 'local',
+      type: 'semantic',
+      key: 'answer-language',
+      value: '한국어',
+      provenance: { source: 'user' },
+      confidence: 1,
+      status: 'confirmed',
+      createdAt: 1,
+      updatedAt: 1,
+      ...over,
+    }) as MemoryItem;
+  const observed = (over: Partial<MemoryItem> = {}): MemoryItem =>
+    said({
+      id: 'm-observed',
+      scope: 'project',
+      scopeKey: '/proj',
+      key: 'default-response-language-english',
+      value: 'English is the default response language',
+      provenance: { source: 'artifact' },
+      // NEWER as well as narrower-scoped, so neither recency nor scope can be
+      // what the result is really testing.
+      updatedAt: 2,
+      ...over,
+    });
+
+  // ORDER, not survival: a budget large enough for both is what makes this test
+  // the RULE rather than an arithmetic accident, and the injected block is read
+  // top-down so first is what the model weighs most.
+  const ROOMY = 500;
+  const userFirst = selectMemoryForInjection([observed(), said({})], ROOMY);
+  record(
+    checks,
+    '(f1) an instruction the USER gave outranks an observation, whatever its scope',
+    userFirst.items[0]?.key === 'answer-language',
+    `order=${JSON.stringify(userFirst.items.map((i) => i.key))} (competitor was project-scoped AND newer)`,
+  );
+
+  // ...and the old order still decides among things nobody said.
+  const bothObserved = selectMemoryForInjection(
+    [
+      observed({ id: 'm-user-scope', scope: 'user', scopeKey: 'local', key: 'wide' }),
+      observed({ id: 'm-proj-scope', key: 'narrow' }),
+    ],
+    ROOMY,
+  );
+  record(
+    checks,
+    '(f2) among observations, scope still decides — the new axis is a FIRST key, not a replacement',
+    bothObserved.items[0]?.key === 'narrow',
+    `order=${JSON.stringify(bothObserved.items.map((i) => i.key))} (project should come before user scope)`,
+  );
+
+  const bothSaid = selectMemoryForInjection(
+    [
+      said({ id: 'm-said-user', scope: 'user', scopeKey: 'local', key: 'wide' }),
+      said({ id: 'm-said-proj', scope: 'project', scopeKey: '/proj', key: 'narrow' }),
+    ],
+    ROOMY,
+  );
+  record(
+    checks,
+    '(f3) among things the user said, scope decides too — no tier is exempt from the rest of the order',
+    bothSaid.items[0]?.key === 'narrow',
+    `order=${JSON.stringify(bothSaid.items.map((i) => i.key))}`,
+  );
+
   // sanity: pure selection empty is a clean zero
   const empty = selectMemoryForInjection([], 100);
   record(
