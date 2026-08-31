@@ -533,6 +533,36 @@ export function isClaudeAgentSdkAvailable(): boolean {
 }
 
 /**
+ * The installed Agent SDK's version, or null when it does not resolve.
+ *
+ * WHY ANYONE NEEDS THIS. The model list is not ours — it comes from the CLI
+ * bundled INSIDE this package (`supportedModels`), so the names it reports are a
+ * property of the SDK version on disk. An app that shipped an older one reported
+ * "Sonnet 4.6" while a newer one called the same alias "Sonnet 5", and the answer
+ * is cached for a day: after an upgrade the picker went on naming last version's
+ * models until the TTL ran out. Stamping the cache with this string lets the
+ * upgrade itself invalidate it, which is the only signal that is actually about
+ * the thing that changed.
+ *
+ * Read from the package manifest rather than from the module, so it costs a
+ * single small file read and never loads the SDK.
+ */
+export function claudeAgentSdkVersion(): string | null {
+  const resolved = resolveClaudeAgentSdkPath();
+  if (!resolved) return null;
+  try {
+    const manifest = createRequire(pathToFileURL(resolved).href)('./package.json') as {
+      version?: unknown;
+    };
+    return typeof manifest.version === 'string' ? manifest.version : null;
+  } catch {
+    // A package without a readable manifest still runs. Answering null means the
+    // cache falls back to its TTL, which is the behaviour that existed before.
+    return null;
+  }
+}
+
+/**
  * What a caller is told when the SDK does not resolve.
  *
  * IT NO LONGER SAYS "NOT PART OF THIS APP", BECAUSE THAT STOPPED BEING TRUE.

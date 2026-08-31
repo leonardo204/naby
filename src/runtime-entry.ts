@@ -477,6 +477,10 @@ export {
   readTextDelta,
   readThinkingDelta,
   probeClaudeModels,
+  // WHICH SDK ANSWERED. The model list is the bundled CLI's, so its names move
+  // with the package version — and the shell stamps this on its model cache so
+  // an SDK upgrade invalidates it instead of waiting out a day's TTL.
+  claudeAgentSdkVersion,
   // How the run's OWN reported window is picked out of the result message's
   // `modelUsage` — exported so the selection is assertable from the shell's
   // test suite without a live SDK run (contextWindow.test.ts).
