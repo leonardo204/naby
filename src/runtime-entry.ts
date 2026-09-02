@@ -193,6 +193,8 @@ export {
   getJob,
   listJobs,
   listRunningJobs,
+  listJobRecords,
+  markLostJobs,
   killJob,
   readJobOutput,
   notifyFinished,

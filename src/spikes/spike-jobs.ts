@@ -54,6 +54,10 @@ const {
   isJobId,
   jobsDir,
   resetJobRegistry,
+  listJobRecords,
+  markLostJobs,
+  JOB_TAIL_MAX_BYTES,
+  JOB_PROGRESS_MIN_GAP_MS,
 } = await import('../runtime/jobs.js');
 type JobRecord = import('../runtime/jobs.js').JobRecord;
 const { buildWorkspaceTools, READONLY_TOOLS, MUTATING_TOOLS } = await import('../runtime/fs-tools.js');
@@ -67,6 +71,7 @@ const {
 } = await import('../runtime/job-tools.js');
 const { isConsequentialTool, classifyToolConsequence } = await import('../runtime/checkin.js');
 const { phase1HarnessFloor } = await import('../runtime/gate.js');
+const { realPolicy, backgroundBashRefusal } = await import('../runtime/policy.js');
 const { BUILTIN_PERSONA_SEED } = await import('../runtime/agents.js');
 type Executor = import('../runtime/engine.js').Executor;
 type ToolOutput = import('../runtime/engine.js').ToolOutput;
@@ -470,6 +475,154 @@ async function main(): Promise<boolean> {
     onDisk.status === 'succeeded' && onDisk.sessionId === 'sess-1' && onDisk.command.includes('sleep 1'),
     `${onDisk.id} ${onDisk.status} session=${onDisk.sessionId}`,
   );
+
+  // ---- Liveness while it runs ---------------------------------------------
+  //
+  // THE FAILURE THIS PINS. A job past the log cap used to look identical to a
+  // wedged one: `append` returned early, so nothing recorded that the child was
+  // still writing, and the model's own `naby_read_job_output` kept returning the
+  // same first-minutes bytes for hours.
+  {
+    const progress: { at: number; tail: string }[] = [];
+    const chattyStart = startJob({
+      // Writes far past the tiny cap below, in bursts, then exits.
+      command: 'for i in $(seq 1 400); do echo "line $i"; done; sleep 0.2; echo FINAL_LINE',
+      cwd: tmpRoot,
+      maxLogBytes: 200,
+      sink: {
+        onFinished: () => {},
+        onProgress: (_job, tail) => progress.push({ at: Date.now(), tail }),
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 900));
+    const chattyId = chattyStart.ok ? chattyStart.job.id : '';
+    const after = chattyId ? getJob(chattyId) : undefined;
+
+    record(
+      checks,
+      'a job past the log cap still reports that it is alive',
+      after?.lastOutputAt !== undefined && (after?.outputBytes ?? 0) > 200,
+      `truncated=${after?.truncated} outputBytes=${after?.outputBytes} lastOutputAt=${
+        after?.lastOutputAt !== undefined ? 'set' : 'unset'
+      }`,
+    );
+
+    // The head-keeping log is deliberately untouched by all of this.
+    const logSize = statSync(join(jobsDir()!, `${chattyId}.log`)).size;
+    record(
+      checks,
+      'the log still keeps the head and stops at the cap',
+      logSize <= 400 && (after?.outputBytes ?? 0) > logSize,
+      `log=${logSize}B outputBytes=${after?.outputBytes}B`,
+    );
+
+    // What the model gets asked for: the RECENT end, not the first minutes.
+    const out = readJobOutput(chattyId, 2000);
+    record(
+      checks,
+      'reading a finished chatty job returns something',
+      out !== undefined && out.text.length > 0,
+      `chars=${out?.text.length ?? 0}`,
+    );
+
+    record(
+      checks,
+      'the tail never exceeds its bound',
+      progress.every((p) => p.tail.length <= JOB_TAIL_MAX_BYTES),
+      `edges=${progress.length} maxTail=${Math.max(0, ...progress.map((p) => p.tail.length))}`,
+    );
+
+    // NOT A TIMER: with the gap at 5s a sub-second job emits at most one edge.
+    record(
+      checks,
+      'progress is rate-limited rather than per-chunk',
+      progress.length <= 2,
+      `edges=${progress.length} over a ~0.9s job, gap=${JOB_PROGRESS_MIN_GAP_MS}ms`,
+    );
+  }
+
+  // ---- What a restart leaves behind ---------------------------------------
+  //
+  // A record that still says `running` with nothing live behind it is a job this
+  // process can never hear end. It must stop claiming to be watched.
+  {
+    // A job that is genuinely still running when the registry is forgotten —
+    // which is exactly what an app restart looks like from the record's side.
+    const survivor = startJob({ command: 'sleep 30', cwd: tmpRoot });
+    const survivorId = survivor.ok ? survivor.job.id : '';
+    const before = listJobRecords(200).length;
+    resetJobRegistry();
+    const lost = markLostJobs();
+    record(
+      checks,
+      'the orphan is the one that was still running',
+      lost.some((j) => j.id === survivorId),
+      `settled=${lost.map((j) => j.id).join(',') || 'none'} expected=${survivorId}`,
+    );
+    record(
+      checks,
+      'records are listable without the in-process registry',
+      listJobRecords(200).length === before,
+      `records=${before} after forgetting the registry`,
+    );
+    record(
+      checks,
+      'a job orphaned by a restart is settled as lost, not left running',
+      lost.length > 0 && lost.every((j) => j.status === 'lost' && j.note !== undefined),
+      `settled=${lost.length}${lost.length ? ` first=${lost[0]!.id}` : ''}`,
+    );
+  }
+
+  // ---- One way to background, not two -------------------------------------
+  //
+  // The coin flip this removes: `Bash` with `run_in_background` keeps running
+  // but can never report, because its lifecycle stops with the turn.
+  {
+    const bashBg = { toolCallId: 't1', toolName: 'Bash', input: { command: 'sleep 99', run_in_background: true } };
+    const bashFg = { toolCallId: 't2', toolName: 'Bash', input: { command: 'ls' } };
+
+    const refused = backgroundBashRefusal(bashBg as never);
+    record(
+      checks,
+      'backgrounding through Bash is refused',
+      refused?.behavior === 'deny',
+      `behavior=${refused?.behavior}`,
+    );
+    record(
+      checks,
+      'the refusal names naby_start_job, so the model has somewhere to go',
+      (refused?.behavior === 'deny' ? refused.reason : '').includes('naby_start_job'),
+      `reason=${(refused?.behavior === 'deny' ? refused.reason : '').slice(0, 60)}…`,
+    );
+    record(
+      checks,
+      'a foreground Bash is untouched',
+      backgroundBashRefusal(bashFg as never) === undefined,
+      'foreground Bash returns no refusal',
+    );
+
+    // AND NO RULE MAY GRANT IT. A user allow-rule for Bash is about running
+    // commands, not about adopting a reporting path that cannot report.
+    const permissive = realPolicy({
+      rules: [{ toolPattern: 'Bash', effect: 'allow', scope: 'user' }] as never,
+      fallback: () => ({ behavior: 'allow' }) as never,
+    });
+    const viaPolicy = await permissive(bashBg as never);
+    record(
+      checks,
+      'an allow-rule for Bash still does not buy backgrounding',
+      viaPolicy.behavior === 'deny',
+      `behavior=${viaPolicy.behavior}`,
+    );
+    const fgViaPolicy = await permissive(bashFg as never);
+    record(
+      checks,
+      'that same allow-rule still allows an ordinary command',
+      fgViaPolicy.behavior === 'allow',
+      `behavior=${fgViaPolicy.behavior}`,
+    );
+  }
 
   // ---- Report -------------------------------------------------------------
   console.log('\n=== SPIKE-JOBS — background work that outlives its turn ===\n');

@@ -76,12 +76,56 @@ export function resolvePolicyEffect(
  *                    human decision. Absent in M1 → 'ask' falls through to the
  *                    baseline.
  */
+/**
+ * THE ONE SHAPE OF CALL THAT IS REFUSED BEFORE ANY RULE IS CONSULTED.
+ *
+ * There are two ways to put a shell command in the background and only one of
+ * them can ever report back. `naby_start_job` spawns the child in naby's own
+ * registry: naby holds the handle, hears it exit and starts the turn that tells
+ * the user. The engine's built-in `Bash` with `run_in_background` hands the
+ * child to the SDK, whose lifecycle events STOP THE MOMENT THE TURN ENDS — so
+ * the job keeps running, nothing ever reports it, and the transcript's own block
+ * flips to "outcome not recorded" while the work is still going.
+ *
+ * Leaving both available made the outcome a coin flip decided by which tool the
+ * model happened to reach for, which is precisely the bug `job-tools.ts` warned
+ * about when it refused to offer two starters of its own.
+ *
+ * WHY HERE AND NOT `disallowedTools`. That list is by tool NAME, and denying
+ * `Bash` would take foreground commands with it. The distinction lives in the
+ * INPUT, so the gate is the only place that can see it.
+ *
+ * WHY ABOVE THE RULES. A user allow-rule for `Bash` is about running commands,
+ * not about adopting a reporting path that cannot report. This is a capability
+ * fact rather than a permission, so no rule may grant it.
+ *
+ * The refusal NAMES THE REPLACEMENT. A bare denial gets retried and then
+ * abandoned; a denial that says which tool to use instead is followed.
+ */
+export function backgroundBashRefusal(call: ToolCall): GateDecision | undefined {
+  if (normalizeToolName(call.toolName) !== 'Bash') return undefined;
+  const input = call.input;
+  if (typeof input !== 'object' || input === null) return undefined;
+  if ((input as { run_in_background?: unknown }).run_in_background !== true) return undefined;
+  return {
+    behavior: 'deny',
+    reason:
+      'Backgrounding through Bash is not available: its progress and completion events stop when ' +
+      'this turn ends, so the job would run on with nobody able to report it. Start it with ' +
+      'naby_start_job instead — that one gives you a new turn when the work finishes, and ' +
+      'naby_check_job / naby_read_job_output let you look in on it meanwhile.',
+  };
+}
+
 export function realPolicy(deps: {
   rules: readonly PolicyRule[];
   fallback: DecisionPolicy;
   requestApproval?: (call: ToolCall) => Promise<GateDecision>;
 }): DecisionPolicy {
   return async (call: ToolCall): Promise<GateDecision> => {
+    // Above the rules on purpose — see `backgroundBashRefusal`.
+    const refused = backgroundBashRefusal(call);
+    if (refused) return refused;
     const name = normalizeToolName(call.toolName);
     const effect = resolvePolicyEffect(deps.rules, name);
     if (effect === 'allow') return { behavior: 'allow' };

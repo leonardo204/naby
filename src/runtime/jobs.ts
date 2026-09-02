@@ -89,6 +89,33 @@ export const JOBS_DIR_NAME = 'jobs';
  */
 export const JOB_LOG_MAX_BYTES = 1_000_000;
 
+/**
+ * How much of the RECENT output is kept, separately from the log above.
+ *
+ * THE LOG KEEPS THE HEAD AND THIS KEEPS THE TAIL, and both are right for their
+ * own reader. A person debugging a job that failed early needs the first error;
+ * a person watching a job that is still running needs the last line. One file
+ * cannot be both, and the head-keeping rule above is deliberate — so rather than
+ * weaken it, the recent end is kept here, in memory, bounded, and thrown away
+ * when the job ends.
+ *
+ * In memory and not on disk because it exists only for a job that is CURRENTLY
+ * running: once the job is over the log is the record, and a second file would
+ * be a second thing to clean up.
+ */
+export const JOB_TAIL_MAX_BYTES = 8_000;
+
+/**
+ * The floor between two progress signals.
+ *
+ * NOT A TIMER, AND THE DIFFERENCE MATTERS — this module is forbidden a standing
+ * poller (see the header). Progress rides the child's own `data` event, which
+ * the OS delivers when the child actually wrote something; this constant only
+ * decides how many of those to ignore. A job that prints nothing emits nothing,
+ * and a job that prints a thousand lines a second still signals once a window.
+ */
+export const JOB_PROGRESS_MIN_GAP_MS = 5_000;
+
 /** Default number of characters `naby_read_job_output` returns. Sized to be
  *  readable inside a turn without spending the window on one tool result. */
 export const JOB_OUTPUT_DEFAULT_CHARS = 8_000;
@@ -151,6 +178,17 @@ export interface JobRecord {
   truncated?: boolean;
   /** Absolute path of the log file, so a human can `tail -f` it. */
   logPath?: string;
+  /**
+   * WHEN THE JOB LAST WROTE ANYTHING (epoch ms).
+   *
+   * The difference between "running" and "running and alive". A job that has
+   * printed nothing for an hour may be working or may be wedged, and the reader
+   * deserves to be able to tell them apart. Absent until the first byte.
+   */
+  lastOutputAt?: number;
+  /** Total bytes the child has written, including anything past the log cap.
+   *  Keeps counting after `truncated`, so it still reads as progress. */
+  outputBytes?: number;
   /** Why a job could not start, or why it was killed. */
   note?: string;
   /** The session that started it, when a caller named one. Carried so a sink
@@ -170,6 +208,19 @@ export interface JobRecord {
  */
 export interface JobSink {
   onFinished(job: JobRecord): void;
+  /**
+   * The job is alive and has written something. OPTIONAL, and rate-limited to
+   * one call per `JOB_PROGRESS_MIN_GAP_MS` per job.
+   *
+   * WHY THIS IS NOT A SECOND `onFinished`. It carries no promise and starts no
+   * turn: an ending is news, and "still going" is a display. A consumer is
+   * expected to update something already on screen, not to speak. That is also
+   * why it may be dropped — a missed progress edge costs a stale elapsed count,
+   * while a missed ending costs the report.
+   *
+   * `tail` is the recent output, already bounded to `JOB_TAIL_MAX_BYTES`.
+   */
+  onProgress?(job: JobRecord, tail: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +346,11 @@ type LiveJob = {
   record: JobRecord;
   /** Bytes written to the log so far, so the cap is enforced without stat()ing. */
   written: number;
+  /** The recent end of the output, bounded to `JOB_TAIL_MAX_BYTES`. Unlike the
+   *  log it keeps the LAST bytes, and unlike the log it never stops growing. */
+  tail: string;
+  /** When a progress edge was last emitted, so the next one can be skipped. */
+  lastProgressAt: number;
   /** Cleared on exit, so a finished job stops holding a timer. */
   ceiling?: ReturnType<typeof setTimeout>;
   kill: (signal?: NodeJS.Signals) => void;
@@ -307,6 +363,68 @@ const live = new Map<string, LiveJob>();
 /** Every job this process is currently running. */
 export function listRunningJobs(): JobRecord[] {
   return [...live.values()].map((j) => ({ ...j.record }));
+}
+
+/**
+ * Every job record on disk, newest first — including the ones this process never
+ * started. Bounded, because a long-lived home accumulates them.
+ *
+ * WHY THE SHELL NEEDS THIS AND `listRunningJobs` IS NOT ENOUGH. The in-process
+ * registry knows only what THIS process spawned; after a restart it is empty
+ * while the records are still there, saying `running` about children that are
+ * now orphans. A reader that asked only the registry would show nothing and be
+ * wrong in the reassuring direction.
+ */
+export function listJobRecords(limit = 50): JobRecord[] {
+  const dir = jobsDir();
+  if (!dir) return [];
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const out: JobRecord[] = [];
+  for (const name of names) {
+    const id = name.slice(0, -'.json'.length);
+    if (!isJobId(id)) continue;
+    const record = resolveJobRecord(live.get(id)?.record, readRecord(dir, id));
+    if (record) out.push({ ...record });
+  }
+  out.sort((a, b) => b.startedAt - a.startedAt);
+  return out.slice(0, Math.max(1, limit));
+}
+
+/**
+ * Settle the records that an unclean shutdown left saying `running`.
+ *
+ * WHAT THIS DOES NOT DO: touch the processes. A background child is spawned
+ * detached into its own process group, so after a restart it may well still be
+ * encoding — this process simply no longer holds its handle and can never hear
+ * it end. Killing it would destroy work the user asked for; adopting it is not
+ * possible. So the honest move is to stop CLAIMING to be watching: the record is
+ * stamped `lost`, which `resolveJobRecord` already means as "it ran, and how it
+ * ended was never recorded", and the log path is left in place so a person can
+ * still read what it managed to say.
+ *
+ * Returns what it settled, so a caller can tell the user once at boot rather
+ * than leaving the discovery to whenever they next ask.
+ */
+export function markLostJobs(): JobRecord[] {
+  const dir = jobsDir();
+  if (!dir) return [];
+  const settled: JobRecord[] = [];
+  for (const record of listJobRecords(200)) {
+    if (record.status !== 'lost') continue;
+    if (live.has(record.id)) continue;
+    const next: JobRecord = {
+      ...record,
+      note: record.note ?? 'the app restarted while this job was running',
+    };
+    writeRecord(dir, next);
+    settled.push(next);
+  }
+  return settled;
 }
 
 /** Forget every live job WITHOUT killing anything. Test seam only — production
@@ -439,6 +557,8 @@ export function startJob(input: StartJobInput): StartJobResult {
   const entry: LiveJob = {
     record,
     written: header.length,
+    tail: '',
+    lastProgressAt: 0,
     settled: false,
     kill: (signal: NodeJS.Signals = 'SIGKILL') => {
       try {
@@ -453,22 +573,59 @@ export function startJob(input: StartJobInput): StartJobResult {
   writeRecord(dir, record);
 
   const append = (chunk: Buffer): void => {
-    if (entry.record.truncated) return;
-    let text = chunk.toString('utf8');
-    const room = maxLogBytes - entry.written;
-    if (room <= 0) {
-      entry.record.truncated = true;
-      return;
+    const raw = chunk.toString('utf8');
+
+    // ── LIVENESS FIRST, and deliberately BEFORE the log cap. ───────────────
+    // A job that has passed the cap is still running and still writing, and the
+    // old code returned here — which is how a two-hour encode became
+    // indistinguishable from a wedged one. These two fields are the answer to
+    // "is it alive", and they keep counting when the log has stopped.
+    entry.record.lastOutputAt = Date.now();
+    entry.record.outputBytes = (entry.record.outputBytes ?? 0) + raw.length;
+
+    // The recent end, bounded. Kept whole-string rather than by lines: a
+    // progress bar that rewrites one line with \r has no newlines at all, and
+    // slicing by line would keep nothing for exactly the job that needs it most.
+    entry.tail = (entry.tail + raw).slice(-JOB_TAIL_MAX_BYTES);
+
+    // ── THE LOG, unchanged: head-keeping, capped, stops for good. ──────────
+    if (!entry.record.truncated) {
+      let text = raw;
+      const room = maxLogBytes - entry.written;
+      if (room <= 0) {
+        entry.record.truncated = true;
+      } else {
+        if (text.length > room) {
+          text = `${text.slice(0, room)}\n\n[naby] output truncated at ${maxLogBytes} bytes.\n`;
+          entry.record.truncated = true;
+        }
+        entry.written += text.length;
+        try {
+          appendFileSync(logPath, text, 'utf8');
+        } catch {
+          // A log that cannot be written must not kill the job it is observing.
+        }
+      }
     }
-    if (text.length > room) {
-      text = `${text.slice(0, room)}\n\n[naby] output truncated at ${maxLogBytes} bytes.\n`;
-      entry.record.truncated = true;
-    }
-    entry.written += text.length;
+
+    // ── THE PROGRESS EDGE, rate-limited. ──────────────────────────────────
+    // Rides this event; adds no timer. The record is rewritten on the same beat
+    // so a reader that only has the file — another process, or this one after a
+    // restart — sees the same liveness the sink was told about.
+    const now = entry.record.lastOutputAt;
+    if (now - entry.lastProgressAt < JOB_PROGRESS_MIN_GAP_MS) return;
+    entry.lastProgressAt = now;
+    writeRecord(dir, entry.record);
+    if (!input.sink?.onProgress) return;
     try {
-      appendFileSync(logPath, text, 'utf8');
-    } catch {
-      // A log that cannot be written must not kill the job it is observing.
+      input.sink.onProgress({ ...entry.record }, entry.tail);
+    } catch (e) {
+      // Same rule as `notifyFinished`: observing must not break the observed.
+      console.warn(
+        `[jobs] the job sink threw on progress for ${entry.record.id}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
     }
   };
   child.stdout?.on('data', append);
@@ -608,6 +765,24 @@ export function readJobOutput(
   const path = logPathFor(dir, id);
   if (!existsSync(path)) return undefined;
   const want = Math.min(JOB_OUTPUT_MAX_CHARS, Math.max(200, Math.floor(maxChars)));
+
+  // A RUNNING JOB PAST THE LOG CAP IS READ FROM THE TAIL, NOT THE FILE.
+  //
+  // The file keeps the head and stops (see `JOB_LOG_MAX_BYTES`), which is right
+  // for a post-mortem and wrong for "how far along is it". Once a chatty job has
+  // passed the cap, tailing the file returns bytes from its first minutes — and
+  // returns them again on every call, so the model asking twice sees no change
+  // and reasonably concludes the job is stuck. The in-memory tail is the only
+  // thing that answers the question that was actually asked.
+  const running = live.get(id);
+  if (running && running.record.truncated && running.tail) {
+    const text = running.tail.slice(-want);
+    return {
+      text,
+      skippedBytes: Math.max(0, (running.record.outputBytes ?? text.length) - text.length),
+      totalBytes: running.record.outputBytes ?? text.length,
+    };
+  }
   let fd: number | undefined;
   try {
     const size = statSync(path).size;
