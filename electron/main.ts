@@ -21,7 +21,6 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boot, createMainWindow, type BootResult } from './boot.js';
-import { applyDevModeToEnv } from './devmode.js';
 import { installApplicationMenu } from './menu.js';
 import { installRunsFinishedReset } from './notifications.js';
 
@@ -222,26 +221,29 @@ function applyDevDockIcon(): void {
 }
 
 /**
- * DEV-ONLY: open the ChatGPT subscription-OAuth seal automatically when running
- * UNPACKAGED, so a source checkout shows the ChatGPT sign-in without the
- * developer having to export `NABY_ENABLE_CHATGPT_OAUTH=1` by hand.
+ * Open the dev-provider seal — in EVERY launch, packaged or not.
  *
- * WHY THIS IS SAFE FOR OFFICIAL BUILDS. `app.isPackaged` is true for every
- * shipped artifact, so this is a no-op there: the seal stays closed, exactly as
- * it is today. The DOUBLE SEAL is preserved too — electron-builder still
- * EXCLUDES `chatgpt-oauth.mjs` from the packaged app (electron-builder.yml), so
- * even if this flag somehow leaked on in a packaged build the OAuth module could
- * not be loaded. This only flips the RUNTIME flag, and only when unpackaged.
+ * WHAT THE SEAL IS. `NABY_ENABLE_CHATGPT_OAUTH` gates the ChatGPT
+ * subscription-OAuth provider (a ToS grey zone) and, with it, the "dev
+ * providers" as a group. It used to open automatically only when unpackaged,
+ * and a packaged build kept it shut behind a SHA-256-gated key typed into
+ * Settings → Developer mode (`electron/devmode.ts`, now gone).
  *
- * An EXPLICIT value is always respected: if the developer already exported the
- * flag (either to force it on, or to `0`/empty to keep it off), we do not touch
- * it. We only fill in the default for the common "just ran the dev app" case.
+ * WHY IT IS SIMPLY OPEN NOW (2026-09-03). This app is a single-user, in-house
+ * development tool, not a product: there is no end user the seal was
+ * protecting, and the key door was one more thing to type after every install
+ * for a build whose only user holds the key. The ToS caveat still applies and
+ * is still shown wherever the provider is offered; what changed is that "dev
+ * mode" is the app's only mode.
+ *
+ * An EXPLICIT value is always respected: whoever launched the app can still
+ * export the flag as `0`/empty to keep the provider off. We only fill in the
+ * default. Must run BEFORE boot(), which reads the seal exactly once.
  */
-function autoOpenChatgptSealInDev(): void {
-  if (app.isPackaged) return; // packaged official build stays sealed
+function openDevProviderSeal(): void {
   if ('NABY_ENABLE_CHATGPT_OAUTH' in process.env) return; // respect an explicit flag
   process.env.NABY_ENABLE_CHATGPT_OAUTH = '1';
-  console.log('[chatgpt-oauth] DEV (unpackaged): seal auto-opened — NABY_ENABLE_CHATGPT_OAUTH=1');
+  console.log('[chatgpt-oauth] dev providers enabled — NABY_ENABLE_CHATGPT_OAUTH=1 (default)');
 }
 
 async function start(): Promise<void> {
@@ -258,11 +260,7 @@ async function start(): Promise<void> {
   applyDevDockIcon();
   // Must run BEFORE boot(): boot reads `isChatgptOauthEnabled()` (which reads
   // this env var) to decide whether to install the vault-backed token source.
-  autoOpenChatgptSealInDev();
-  // A packaged build stays sealed above; this is the deliberate exception —
-  // someone who typed the build's dev-mode key gets the dev providers in the
-  // REAL artifact. Must be before boot(), which reads the seal exactly once.
-  applyDevModeToEnv();
+  openDevProviderSeal();
 
   try {
     bootResult = await boot();

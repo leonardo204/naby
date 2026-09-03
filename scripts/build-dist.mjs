@@ -25,81 +25,12 @@
 // `node scripts/build-dist.mjs --mac --publish never` works as expected.
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './load-env.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-
-// ---------------------------------------------------------------------------
-// NABY_BUNDLE_AGENT_SDK — bundle the Claude Agent SDK into a packaged build.
-// ---------------------------------------------------------------------------
-//
-// The Agent SDK ("Claude (subscription)", the local-sign-in engine) is normally
-// EXCLUDED from packaged builds by two `!shell/node_modules/@anthropic-ai/
-// claude-agent-sdk*` lines in electron-builder.yml — design §3.3 keeps its
-// non-OSS binary out of a shipped app, and §143/§167 keep claude.ai login out of
-// what END USERS get (Anthropic's third-party-login ToS).
-//
-// Setting NABY_BUNDLE_AGENT_SDK=1 produces a packaged build that INCLUDES it, so
-// the end-user Claude-subscription flow can be TESTED in a real packaged app.
-//
-//   ⚠️  OFFICIAL / PUBLIC DISTRIBUTION MUST NOT SET THIS FLAG.  ⚠️
-//   Shipping the Agent SDK to end users crosses the ToS line the spec drew.
-//   Tracked as a release task — see ref-docs/specs (backlog) / the task marker.
-//
-// Implemented by writing a temp config with the two exclusion lines removed and
-// pointing electron-builder at it, so the checked-in yml is never mutated.
-function configArgsForAgentSdkBundle() {
-  if (process.env.NABY_BUNDLE_AGENT_SDK !== '1') return null;
-  const src = join(root, 'electron-builder.yml');
-  const yml = readFileSync(src, 'utf8');
-  const kept = yml
-    .split('\n')
-    .filter((line) => !/^\s*-\s*'!shell\/node_modules\/@anthropic-ai\/claude-agent-sdk/.test(line))
-    .join('\n');
-  const tmp = join(root, '.electron-builder.bundle-agent-sdk.yml');
-  writeFileSync(tmp, kept);
-  console.warn(
-    '[build] ⚠️  NABY_BUNDLE_AGENT_SDK=1 — bundling the Claude Agent SDK into this ' +
-      'build FOR TESTING. Do NOT use this build for official/public distribution ' +
-      '(claude.ai login must not ship to end users; see the release task).',
-  );
-  return { tmp, args: ['--config', tmp] };
-}
-
-// ---------------------------------------------------------------------------
-// NABY_ENABLE_CHATGPT_OAUTH — the DEV-ONLY ChatGPT subscription-OAuth seal.
-// ---------------------------------------------------------------------------
-//
-// ChatGPT subscription-OAuth (src/providers/chatgpt-oauth.ts,
-// electron/chatgpt-oauth.ts) talks to the UNOFFICIAL ChatGPT backend — a ToS
-// grey zone, dev/test only, the same risk class as the Agent SDK. It is sealed
-// by DEFENSE IN DEPTH:
-//
-//   1. RUNTIME flag — `isChatgptOauthEnabled(NABY_ENABLE_CHATGPT_OAUTH)`. With
-//      it off (the default), `describeProviders` and `isChatgptOauthAvailable`
-//      never offer the provider and `createModel` refuses to construct it, so
-//      every code path is dead.
-//   2. BUILD absence — `electron/chatgpt-oauth.ts` is NOT an electron-builder
-//      entry point (see scripts/build-electron.mjs) and is imported by nothing
-//      in `main.ts`, so it is never compiled into a packaged app — exactly the
-//      "absent from the artifact" property the Agent SDK exclusion gives.
-//
-//   ⚠️  OFFICIAL / PUBLIC DISTRIBUTION MUST NOT SET NABY_ENABLE_CHATGPT_OAUTH. ⚠️
-//   Enabling subscription reuse in a shipped app crosses the ToS line the spec
-//   (ref-docs/specs/impl/chatgpt-oauth-dev-provider.md §2) drew. This guard makes
-//   an accidental official build with the flag set LOUD and reviewable.
-function guardChatgptOauthSeal() {
-  if (process.env.NABY_ENABLE_CHATGPT_OAUTH) {
-    console.warn(
-      '[build] ⚠️  NABY_ENABLE_CHATGPT_OAUTH is set during a dist build. The ChatGPT ' +
-        'subscription-OAuth path is DEV-ONLY and must NEVER ship to end users ' +
-        '(unofficial backend, ToS grey zone). Unset it for any official/public build.',
-    );
-  }
-}
 
 /**
  * Resolve electron-builder from node_modules/.bin rather than trusting PATH.
@@ -145,17 +76,13 @@ if (args.includes('--dir')) {
   process.env.SKIP_NOTARIZE ??= '1';
 }
 
-// Dev-only ChatGPT-OAuth seal: warn loudly if the flag leaked into a dist build.
-guardChatgptOauthSeal();
-
-// Opt-in Agent-SDK bundling (test builds only — see the note above).
-const bundle = configArgsForAgentSdkBundle();
-const finalArgs = bundle ? [...bundle.args, ...args] : args;
-const cleanup = () => {
-  if (bundle) rmSync(bundle.tmp, { force: true });
-};
-
-const child = spawn(electronBuilderBin(), finalArgs, {
+// The two dist-time seals that used to live here — `NABY_BUNDLE_AGENT_SDK`
+// (rewrite the yml to include the Agent SDK) and a warning when
+// `NABY_ENABLE_CHATGPT_OAUTH` was set during a build — are gone (2026-09-03).
+// The Agent SDK and the ChatGPT OAuth module ship in every build and main.ts
+// opens the seal on every launch: this app is a single-user dev tool, and a
+// guard against "shipping to end users" has no end users to guard.
+const child = spawn(electronBuilderBin(), args, {
   cwd: root,
   env: process.env,
   stdio: 'inherit',
@@ -163,13 +90,11 @@ const child = spawn(electronBuilderBin(), finalArgs, {
 });
 
 child.on('error', (err) => {
-  cleanup();
   console.error(`[build] failed to start electron-builder: ${err.message}`);
   process.exit(1);
 });
 
 child.on('exit', (code, signal) => {
-  cleanup();
   if (signal) {
     console.error(`[build] electron-builder terminated by ${signal}`);
     process.exit(1);

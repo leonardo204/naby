@@ -29,8 +29,6 @@
 //     the five provider adapters into the main process a second time.
 
 import { build } from 'esbuild';
-import { createHash } from 'node:crypto';
-import { loadEnv } from './load-env.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,38 +71,21 @@ const esmBanner = {
   ].join('\n'),
 };
 
-// FORCED DEV MODE — bake the HASH of the key, never the key.
-//
-// `.env` is loaded here (it is not loaded for a plain build otherwise) purely to
-// read FORCE_DEVMODE_KEY. What reaches the artifact is its SHA-256: a packaged
-// app is a zip anyone can open, so a plaintext secret compiled into it is a
-// published secret. Absent key -> empty hash -> electron/devmode.ts reports the
-// feature unavailable and the UI hides it, so an official build has no door.
-//
-// The key is TRIMMED before hashing. The value arrives from a `.env` line or a
-// CI secret, and either can pick up a trailing newline on the way in — that
-// would bake the hash of a string no user can ever type, producing a build whose
-// door is visible and unopenable. Trimming both ends of the pipe (see the same
-// tolerance in electron/devmode.ts) removes that whole failure mode.
-loadEnv();
 /** Read from package.json at BUILD time — the one place the version is stated,
  *  so a baked-in constant cannot drift from what electron-builder ships. */
 const appVersion = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 ).version;
 
-const devModeKey = (process.env.FORCE_DEVMODE_KEY ?? '').trim();
-const devModeHash = devModeKey ? createHash('sha256').update(devModeKey, 'utf8').digest('hex') : '';
-console.log(
-  devModeHash
-    ? `[build] forced dev mode: key present (${devModeKey.length} chars), hash baked in (the key itself is not)`
-    : '[build] forced dev mode: no FORCE_DEVMODE_KEY — the door is absent from this build',
-);
+// There used to be a second define here: `__NABY_DEVMODE_HASH__`, the SHA-256
+// of a build-time `FORCE_DEVMODE_KEY` that a packaged build compared a typed key
+// against before it would run the dev providers. The door is gone (2026-09-03,
+// the app is a single-user dev tool and main.ts opens the seal on every launch),
+// and with it the only reason this script loaded `.env`.
 
 /** Node 22 is Electron 43's floor; nothing here needs to go lower. */
 const shared = {
   define: {
-    __NABY_DEVMODE_HASH__: JSON.stringify(devModeHash),
     // THE APP'S OWN VERSION, BAKED IN, because `app.getVersion()` cannot be
     // trusted to give it. Electron falls back to the version of the EXECUTABLE
     // when it cannot find the app's package.json, and `electron:dev` launches a

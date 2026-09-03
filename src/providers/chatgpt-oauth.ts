@@ -2,25 +2,26 @@
 //
 // ChatGPT Subscription-OAuth — the DEV-ONLY pure core (CO-01..05).
 //
-// ⚠️  DEV / TEST ONLY — FLAG-SEALED OUT OF OFFICIAL BUILDS.  ⚠️
+// ⚠️  A ToS GREY ZONE — a dev convenience, never a product feature.  ⚠️
 //
 // This module talks to the UNOFFICIAL ChatGPT subscription backend
 // (`chatgpt.com/backend-api/codex`), the OpenAI analogue of the dev Claude
 // Agent SDK engine. It answers turns on a signed-in ChatGPT Plus/Pro
 // subscription instead of a metered API key. That backend is a ToS grey zone
 // (spec §1/§2): OpenAI has neither clearly permitted nor forbidden third-party
-// reuse of its "Sign in with ChatGPT" OAuth. So — exactly like the Agent SDK —
-// the whole path is DEV-ONLY and sealed out of any official/public build by a
-// build-time flag AND a runtime env flag (defense in depth):
+// reuse of its "Sign in with ChatGPT" OAuth.
 //
-//   * runtime seal   `isChatgptOauthEnabled(env)` — false unless
-//                    `NABY_ENABLE_CHATGPT_OAUTH` is set. `describeProviders`
-//                    and `isChatgptOauthAvailable` are gated on it, so with the
-//                    flag off the provider is never offered and every code path
-//                    below is dead.
-//   * build seal     `scripts/build-dist.mjs` (the NABY_BUNDLE_AGENT_SDK
-//                    pattern) — an official artifact must not enable it, and the
-//                    electron OAuth entry is never bundled into a shipped app.
+// THE ONE GATE that remains is the runtime seal, `isChatgptOauthEnabled(env)`:
+// false unless `NABY_ENABLE_CHATGPT_OAUTH` is truthy. `describeProviders` and
+// `isChatgptOauthAvailable` are gated on it, so with the flag off the provider
+// is never offered and every code path below is dead.
+//
+// HOW THE SEAL IS SET. This app is a single-user, in-house development tool
+// (2026-09-03), so electron/main.ts opens the seal on every launch, packaged or
+// not; an explicit `NABY_ENABLE_CHATGPT_OAUTH=0` in the environment keeps it
+// shut. The build-time seal and the key-gated "developer mode" door that used
+// to stand in front of a packaged build are gone — there is no end user they
+// were protecting.
 //
 // NOTHING HERE CLAIMS OPENAI ENDORSEMENT. It is a developer convenience with a
 // stated ToS caveat, nothing more.

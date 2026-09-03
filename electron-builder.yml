@@ -109,23 +109,19 @@ asar: true
 files:
   - dist/electron/**
   # ---------------------------------------------------------------------
-  # THE ChatGPT SUBSCRIPTION-OAUTH MODULE NOW SHIPS — KEY-GATED, NOT ABSENT
+  # THE ChatGPT SUBSCRIPTION-OAUTH MODULE SHIPS, AND IS ON BY DEFAULT
   # ---------------------------------------------------------------------
   # electron/chatgpt-oauth.ts (compiled to dist/electron/chatgpt-oauth.mjs) talks
-  # to the UNOFFICIAL ChatGPT backend — a ToS grey zone. It used to be excluded
-  # here, so the capability was ABSENT from the artifact and no flag could
-  # resurrect it.
+  # to the UNOFFICIAL ChatGPT backend — a ToS grey zone. It was excluded from
+  # the artifact at first, then shipped behind a SHA-256-gated "developer mode"
+  # key (electron/devmode.ts) so a release could be tested as the binary users
+  # get.
   #
-  # THAT PROPERTY IS DELIBERATELY TRADED AWAY, and the trade should be legible:
-  # testing a release meant rebuilding it unpackaged, which is not the binary
-  # users get, so bugs in the shipped artifact were untestable. The module is now
-  # present and reachable only behind the forced-dev-mode key
-  # (electron/devmode.ts): the door is a SHA-256 whose preimage is not in the
-  # artifact, so a user cannot open it, but a developer with the key can.
-  #
-  # The guarantee is therefore "gated by a secret nobody shipped" rather than
-  # "physically not there". Weaker, and chosen on purpose. If it ever needs to be
-  # absent again, restore this line — nothing else depends on it being present.
+  # BOTH GATES ARE GONE (2026-09-03). This app is a single-user, in-house
+  # development tool with no end users, so main.ts opens the runtime seal on
+  # every launch and the key door was deleted. What remains is the runtime flag
+  # itself — `NABY_ENABLE_CHATGPT_OAUTH=0` in the environment keeps the provider
+  # off — and the ToS caveat shown wherever it is offered.
   #
   # NOTE the asymmetry with the Agent SDK below: that is Anthropic's package, so
   # including it is a REDISTRIBUTION question, not just an access one. This file
@@ -163,17 +159,19 @@ files:
   # INSIDE app.asar, which is both a redistribution question and useless
   # (a binary inside an asar cannot be spawned).
   #
-  # IT NOW SHIPS, by explicit decision, so the Claude subscription sign-in can be
-  # exercised in the real artifact behind the forced-dev-mode key. Two things had
-  # to be true for that to mean anything, and both are:
+  # IT NOW SHIPS, by explicit decision, so the Claude subscription sign-in works
+  # in the real artifact. Two things had to be true for that to mean anything,
+  # and both are:
   #   * the packages are no longer excluded (below), and
   #   * they are asarUnpack'd, or the engine binary would be unspawnable and the
   #     inclusion would be dead weight exactly as it was the first time.
   #
   # This REVERSES design §3.3's "never in a shipped build" for these packages.
   # Unlike dist/electron/chatgpt-oauth.mjs — which is ours — this is Anthropic's
-  # package, so the artifact now redistributes it and the key gates USE, not
-  # PRESENCE. Restoring the two lines below puts it back if that changes.
+  # package, so the artifact redistributes it. The forced-dev-mode key that once
+  # gated its USE is gone too (2026-09-03): the app is a single-user dev tool,
+  # and the only remaining condition is a local Claude Code sign-in. Restoring
+  # the two exclusion lines puts the package back out if that ever changes.
   - '!shell/node_modules/@rolldown/**'
   - '!shell/node_modules/@rollup/**'
   - '!shell/node_modules/@tailwindcss/oxide*/**'

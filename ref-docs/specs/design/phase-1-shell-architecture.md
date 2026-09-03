@@ -2,11 +2,11 @@
 id: phase-1-shell-architecture
 title: Phase 1 — Desktop Shell Technical Design
 type: design
-version: 0.3.1
+version: 0.3.2
 status: draft
 scope: Technical design for the Phase 1 shell — Electron process model, embedded Next server, engine abstraction (AI SDK v7 prod / Agent SDK dev), provider adapters, secret storage, the Naby store as owner of projects/sessions, browsing-UI API re-backing, localhost hardening, packaging and update pipeline
 related: [personalized-agent-desktop-app, phase-1-desktop-shell, phase-1-contracts, phase-1-test-plan, phase-1_5-personalization-data-layer]
-updated: 2026-07-23
+updated: 2026-09-03
 ---
 
 # Phase 1 — Desktop Shell Technical Design
@@ -109,6 +109,8 @@ Set `asarUnpack: ["**/node_modules/node-pty/**"]` explicitly rather than trustin
 
 **Dev engine (`ClaudeAgentSdkEngine`)** carries the Agent SDK's native binary and would need the asar-unpack + explicit-executable-path handling described for native payloads — **but it is never packaged into a release.** In dev it runs from `node_modules` on the developer's machine (local OAuth, no bundling). If a dev build is ever packaged for internal testing, treat the Agent SDK exactly like node-pty (§3.1–3.2) and exclude it from any production `files` glob.
 
+> **REVERSED, twice.** 2026-07-28: the Agent SDK and the ChatGPT OAuth module ship in the packaged build, asarUnpack'd exactly as the node-pty paragraph prescribes, behind a SHA-256-gated "developer mode" key. 2026-09-03: the key door is removed and the seal opens on every launch — the app is a single-user, in-house dev tool, so "never packaged into a release" has no release audience left to protect. The packaging mechanics above (unpack, explicit executable path) are what now applies to the dev engine; only the "never" is retired. Details: `impl/chatgpt-oauth-dev-provider` §2, `specs/packaging-path-resolution` §5.
+
 **Size**: the installer is far smaller than the Agent-SDK plan — no 247 MB engine binary. Electron (~150 MB) + Next + five JS provider SDKs is the bulk; delta updates still matter but the floor is much lower.
 
 ---
@@ -127,7 +129,7 @@ The **Linux fallback is the design constraint**: where no secret store is availa
 
 One API key per provider, no role (design §3.3). Keys are passed to the AI SDK provider factory **explicitly in code** — e.g. `createOpenAI({ apiKey })`, `createAnthropic({ apiKey })` — never via ambient environment variables read off the user's machine. The key is read at exactly one point: when the engine constructs the provider for a turn. No other layer touches it.
 
-For the **dev engine** only, the Claude Agent SDK resolves credentials from the developer's local OAuth session (no key, `apiKeySource: 'none'`); this path exists solely in dev and is never bundled.
+For the **dev engine** only, the Claude Agent SDK resolves credentials from the developer's local OAuth session (no key, `apiKeySource: 'none'`); this path exists solely in dev and is never bundled. *(Superseded — it is bundled and on by default since 2026-09-03; see the note under §3.3.)*
 
 ### 4.3 MCP registry is owned and provider-independent
 

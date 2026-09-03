@@ -2,11 +2,11 @@
 id: packaging-path-resolution
 title: 패키징 경로 해석과 릴리스 검증 규약
 type: interface
-version: 1.1.0
+version: 1.2.0
 status: active
-scope: 배포본에서 런타임이 파일과 패키지를 어떻게 찾는지, 그리고 릴리스가 실제로 동작하는지 무엇으로 확인하는지를 정한다. `import.meta.url`이 번들러에 따라 빌드 머신 경로로 굳는 문제와, 그 때문에 로컬 패키징 검증이 무효가 되는 문제를 다룬다. 강제 개발 모드의 문(門)도 같은 배포 경계 위에 있어 함께 둔다. 엔진 선택 규칙 자체는 phase-2-2.5-plan이 다룬다.
+scope: 배포본에서 런타임이 파일과 패키지를 어떻게 찾는지, 그리고 릴리스가 실제로 동작하는지 무엇으로 확인하는지를 정한다. `import.meta.url`이 번들러에 따라 빌드 머신 경로로 굳는 문제와, 그 때문에 로컬 패키징 검증이 무효가 되는 문제를 다룬다. 개발 프로바이더 봉인이 배포 경계에서 어떻게 열리는지도 함께 둔다(키 게이트는 1.2.0에서 제거). 엔진 선택 규칙 자체는 phase-2-2.5-plan이 다룬다.
 related: [phase-1-desktop-shell, chatgpt-oauth-dev-provider, phase-1-contracts, personalized-agent-desktop-app]
-updated: 2026-07-28
+updated: 2026-09-03
 ---
 
 # 패키징 경로 해석과 릴리스 검증 규약
@@ -82,22 +82,17 @@ file:///Users/runner/work/naby/naby/dist/naby-runtime.mjs
 
 `asar extract-file`은 0바이트를 내놓는 경우가 있다. 그것을 부재의 근거로 삼지 않는다. asar 바이너리를 직접 조회해 확인한다.
 
-## 5. 강제 개발 모드
+## 5. 개발 프로바이더는 기본으로 열려 있다
 
-배포본에서 Claude·ChatGPT 구독 로그인을 열기 위한 키 게이트다. `electron/devmode.ts`.
+배포본에서 Claude·ChatGPT 구독 로그인을 막던 키 게이트(`electron/devmode.ts`, 설정의 "개발 모드")는 2026-09-03에 없앴다. 이 앱은 사내에서 혼자 쓰는 개발용 도구다. 지킬 최종 사용자가 없는데, 키를 가진 단 한 명이 설치할 때마다 키를 입력하는 절차만 남아 있었다.
 
-- 빌드 시 `FORCE_DEVMODE_KEY`의 **SHA-256만** 굽는다. 키 평문은 아티팩트에 넣지 않는다.
-- 키는 `.env`(로컬)와 GitHub 저장소 시크릿(CI) 양쪽에 있어야 한다. `.env`는 gitignore되므로 CI에는 시크릿을 넘겨야 한다. 없으면 해시가 비고 문이 아예 생기지 않는다 — v1.4.0이 그렇게 나갔다.
-- 빌드 시점과 입력 시점 **양쪽에서 앞뒤 공백을 없앤다.** 붙여넣기에 딸려온 줄바꿈이 비밀번호 필드에서는 보이지 않는다.
-- 해제는 `~/.naby/devmode-unlocked` 마커에 기록하고 **다음 실행부터** 적용된다. `boot()`이 봉인을 한 번만 읽기 때문이다.
-
-### 실패는 구분해서 알린다
-
-`unlockDevMode`는 `'unlocked' | 'mismatch' | 'unavailable' | 'not-persisted'`를 낸다. 키 불일치와 마커 저장 실패는 원인도 대처도 다르다. 이걸 `false` 하나로 뭉치면 올바른 키를 가진 사람이 원인을 알 방법이 없다.
+- `electron/main.ts`가 실행할 때마다 `NABY_ENABLE_CHATGPT_OAUTH=1`을 기본값으로 넣는다. 패키징 여부는 보지 않는다. `boot()`이 봉인을 한 번만 읽으므로 그보다 먼저 실행한다.
+- 환경변수를 `0`으로 명시하면 그대로 둔다. 끄는 방법은 이것뿐이다.
+- 빌드 때 `FORCE_DEVMODE_KEY` 해시를 넣던 단계, CI 시크릿, `~/.naby/devmode-unlocked` 마커, `devmode:*` IPC 채널은 모두 없어졌다. 마커 파일이 남아 있어도 읽는 코드가 없다.
 
 ## 6. 스파이크
 
-`npm run spike:sdk-resolve` (10) · `npm run spike:devmode` (14)
+`npm run spike:sdk-resolve` (10)
 
 `spike:sdk-resolve`는 임시 디렉터리에 **배포본 레이아웃을 재구성해서** 검사한다. 소스 체크아웃에서는 루트 `node_modules`가 항상 먼저 걸리므로 이 계열의 버그가 드러나지 않기 때문이다. 다음을 포함한다.
 

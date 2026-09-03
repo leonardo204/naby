@@ -75,8 +75,8 @@ export class ChatgptSealedError extends Error {
   readonly code = 'CHATGPT_OAUTH_SEALED';
   constructor() {
     super(
-      'ChatGPT subscription-OAuth is a dev-only, flag-sealed path; set ' +
-        'NABY_ENABLE_CHATGPT_OAUTH to enable it (never in an official build).',
+      'ChatGPT subscription-OAuth is switched off in this launch; ' +
+        'NABY_ENABLE_CHATGPT_OAUTH was set to a falsy value (it is on by default).',
     );
     this.name = 'ChatgptSealedError';
   }

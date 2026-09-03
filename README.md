@@ -73,7 +73,7 @@ naby가 자식 프로세스를 소유해 종료 이벤트를 수신하고, 종�
 |---|---|---|
 | Claude (구독) | 로컬 Claude Code 로그인 | 멀티 계정 등록·수동 전환, 플랜 사용 한도 표시 |
 | Anthropic / OpenAI / Google Gemini / Azure OpenAI / Amazon Bedrock | API 키 | Gemini는 모델 목록 조회·세션별 선택 지원 |
-| ChatGPT (구독) | OAuth | 개발 모드 전용 |
+| ChatGPT (구독) | OAuth | 비공식 백엔드(ToS 회색지대), 개인 개발용. 기본 활성, `NABY_ENABLE_CHATGPT_OAUTH=0`으로 끔 |
 
 ## 7. 원격 사용
 

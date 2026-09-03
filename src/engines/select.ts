@@ -8,12 +8,14 @@
 // shell only ever built the first one, so a user with no API key had no way to
 // use the app at all even on a machine where the dev engine would work.
 //
-// THE CONSTRAINT THAT SHAPES THIS (design §3.3): the Agent SDK must never be in
-// a shipped build, and `electron-builder.yml` already excludes it. So the dev
-// engine is available exactly when the app runs UNPACKAGED — from a source
-// checkout, where node_modules exists. That is not something to infer from a
-// build flag; it is something to ASK, which is what
-// `isClaudeAgentSdkAvailable()` does (a resolve, no module load).
+// WHERE THE DEV ENGINE IS AVAILABLE. Design §3.3 originally kept the Agent SDK
+// out of shipped builds, so the dev engine existed only in a source checkout.
+// That is history: the SDK ships in every build (electron-builder.yml), and
+// since 2026-09-03 nothing gates its use — this app is a single-user dev tool,
+// so "dev mode" is its only mode. Availability is still something to ASK
+// rather than infer from a build flag, which is what
+// `isClaudeAgentSdkAvailable()` does (a resolve, no module load): the SDK can
+// be present while the local Claude Code sign-in is not.
 //
 // SELECTION IS EXPLICIT FIRST, AUTOMATIC SECOND:
 //
@@ -140,10 +142,12 @@ export type SelectEngineOptions = ResolveOptions & {
  *
  * THE PARENTHESIS USED TO SAY "a source checkout also enables the built-in
  * development model", which was true while release builds excluded the Agent
- * SDK and is not any more: they bundle it, and the key gate now controls USE
- * rather than presence. A reader on Windows who took that sentence literally
- * concluded the subscription was unavailable to them and went looking for a
- * checkout, when what they were missing was a local Claude Code sign-in.
+ * SDK and is not any more: they bundle it. A reader on Windows who took that
+ * sentence literally concluded the subscription was unavailable to them and
+ * went looking for a checkout, when what they were missing was a local Claude
+ * Code sign-in. It then said "stays closed until the developer-mode key is
+ * entered", which stopped being true when the key door was removed
+ * (2026-09-03) — so the one condition left is the sign-in itself.
  */
 export function noEngineMessage(): string {
   return (
@@ -151,8 +155,7 @@ export function noEngineMessage(): string {
     'Open Settings (gear icon, bottom left) → "AI provider", pick your provider, paste its API key and press Save. ' +
     "The key is stored in this computer's secure credential store and is only ever sent to the provider you chose. " +
     '(The Claude subscription option answers with the Claude Code sign-in on this computer instead of a key, ' +
-    'so it needs Claude Code installed and signed in; in an installed build it also stays closed until the ' +
-    `developer-mode key is entered. Set ${ENGINE_ENV_VAR}=dev-claude to force it.)`
+    `so it needs Claude Code installed and signed in. Set ${ENGINE_ENV_VAR}=dev-claude to force it.)`
   );
 }
 

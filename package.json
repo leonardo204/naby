@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.35.0",
+  "version": "1.36.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -39,7 +39,6 @@
     "spike:pin-order": "tsx src/spikes/spike-pin-order.ts",
     "spike:skill": "tsx src/spikes/spike-skill-inject.ts",
     "spike:chatgpt": "tsx src/spikes/spike-chatgpt-oauth.ts",
-    "spike:devmode": "tsx src/spikes/spike-devmode.ts",
     "spike:reload-guard": "tsx src/spikes/spike-reload-guard.ts",
     "spike:window-state": "tsx src/spikes/spike-window-state.ts",
     "spike:whats-new": "tsx src/spikes/spike-whats-new.ts",
@@ -93,7 +92,7 @@
     "@ai-sdk/google": "4.0.18",
     "@ai-sdk/mcp": "2.0.15",
     "@ai-sdk/openai": "4.0.16",
-    "@anthropic-ai/claude-agent-sdk": "0.3.251",
+    "@anthropic-ai/claude-agent-sdk": "0.3.259",
     "ai": "7.0.31",
     "zod": "^4.0.0"
   },

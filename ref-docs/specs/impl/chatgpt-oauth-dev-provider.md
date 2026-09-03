@@ -2,11 +2,11 @@
 id: chatgpt-oauth-dev-provider
 title: ChatGPT Subscription-OAuth — Dev-Only Provider (excluded from official distribution)
 type: impl
-version: 0.2.0
+version: 0.3.0
 status: draft
-scope: Adding a ChatGPT (OpenAI) subscription-OAuth provider that answers turns via a signed-in ChatGPT Plus/Pro subscription instead of a metered API key — DEV/TEST ONLY. The seal now gates USE rather than presence (reversed 2026-07-28, see §2) — the module ships and a key opens it. Covers the ToS verdict that makes this dev-only, the AiSdkEngine custom-transport integration at the provider-independent engine seam, the OAuth/token-vault/refresh tasks, and why Google Gemini is excluded entirely.
+scope: Adding a ChatGPT (OpenAI) subscription-OAuth provider that answers turns via a signed-in ChatGPT Plus/Pro subscription instead of a metered API key — a dev convenience with a stated ToS caveat. The module ships and the runtime seal is open by default (reversed 2026-09-03, see §2); the key door that gated it between 2026-07-28 and then is gone. Covers the ToS verdict, the AiSdkEngine custom-transport integration at the provider-independent engine seam, the OAuth/token-vault/refresh tasks, and why Google Gemini is excluded entirely.
 related: [personalized-agent-desktop-app, phase-1-contracts, phase-1-shell-architecture, phase-1-desktop-shell]
-updated: 2026-07-28
+updated: 2026-09-03
 ---
 
 # ChatGPT Subscription-OAuth — Dev-Only Provider
@@ -28,18 +28,27 @@ Full record: memory `naby-oauth-provider-tos`.
 > **REVERSED 2026-07-28 — the seal now gates USE, not PRESENCE.** §2 and CO-04
 > below say the OAuth path is stripped from official artifacts. That is no longer
 > what ships. `dist/electron/chatgpt-oauth.mjs` and the Claude Agent SDK are both
-> IN the packaged app, and a SHA-256-gated key (`electron/devmode.ts`) decides
-> whether they can be used. The trade is recorded in `electron-builder.yml`:
+> IN the packaged app, and a SHA-256-gated key (`electron/devmode.ts`) decided
+> whether they could be used. The trade is recorded in `electron-builder.yml`:
 > testing a release meant rebuilding it unpackaged, which is not the binary users
-> get, so bugs in the shipped artifact were untestable. The guarantee is now
-> "gated by a secret nobody shipped" rather than "physically not there" — weaker,
-> and chosen deliberately. The exclusion lines are still in `electron-builder.yml`
-> as comments, so restoring absence is a two-line change.
+> get, so bugs in the shipped artifact were untestable.
 >
-> The rest of §2 stands: production auth is still one API key per provider, the
-> availability probe still decides what is offered, and the ToS caveat is still
-> shown. See [`packaging-path-resolution`](../../../specs/packaging-path-resolution.md)
-> §5 for the key, the marker file and the CI secret it needs.
+> **REVERSED AGAIN 2026-09-03 — the seal is OPEN BY DEFAULT, and the key door is
+> gone.** The owner's framing: the app is a single-user, in-house development
+> tool, not a product, so there is no end user the seal protected and "dev mode"
+> is the app's only mode. `electron/main.ts` now sets
+> `NABY_ENABLE_CHATGPT_OAUTH=1` on every launch, packaged or not; an explicit
+> `0` in the environment is the one way to keep the provider off.
+> `electron/devmode.ts`, the Settings → Developer mode panel, the `devmode:*`
+> IPC channels, the `FORCE_DEVMODE_KEY` build step and CI secret, and
+> `spike:devmode` were all deleted. The ToS verdict in §1 is unchanged and the
+> caveat is still shown wherever the provider is offered; what changed is who
+> the build is for.
+>
+> The rest of §2 stands: production auth is still one API key per provider and
+> the availability probe still decides what is offered. See
+> [`packaging-path-resolution`](../../../specs/packaging-path-resolution.md) §5
+> for how the seal opens at the packaging boundary.
 
 - Production auth stays **one API key per provider** (§3.3). Subscription OAuth is a **dev/test convenience**, exactly like the Agent SDK's local Claude sign-in — it exercises the same provider-independent runtime at no metered cost.
 - **Flag-sealed out of official builds.** Reuse the `NABY_BUNDLE_AGENT_SDK` pattern (`scripts/build-dist.mjs`): a single build-time flag decides whether the ChatGPT-OAuth path is present in a packaged app; **official/public distribution MUST NOT set it.** The OAuth code + any bundled endpoints are stripped from official artifacts.

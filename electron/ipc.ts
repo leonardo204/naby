@@ -46,7 +46,6 @@ import type { ProviderProfileStore } from './providers.js';
 import type { Updater, UpdateStatus } from './updater.js';
 import type { WhatsNewStore } from './whats-new.js';
 import { nabyVersion } from './app-version.js';
-import { isDevModeAvailable, isDevModeUnlocked, lockDevMode, unlockDevMode } from './devmode.js';
 import {
   asNotifyLocale,
   isNotifyKind,
@@ -160,13 +159,13 @@ export const CHANNELS = [
   // is empty on every restart. See electron/whats-new.ts.
   'whats-new:get',
   'whats-new:seen',
-  // -- CO-05 ChatGPT subscription-OAuth (DEV-ONLY, flag-sealed) -------------
+  // -- CO-05 ChatGPT subscription-OAuth (dev provider, seal open by default) --
   //
   // The renderer face of the dev sign-in. All three are INERT unless the dev
   // seal is open (`isChatgptOauthEnabled()`): with the flag off, `status`
-  // answers `{available:false}`, and `signin`/`signout` refuse — so a shipped
-  // build (flag off, and the electron OAuth module excluded from the artifact)
-  // exposes the channels but they can never sign in or reach the backend.
+  // answers `{available:false}`, and `signin`/`signout` refuse. main.ts opens
+  // the seal on every launch (this app is a single-user dev tool); an explicit
+  // `NABY_ENABLE_CHATGPT_OAUTH=0` in the environment is the way to keep it shut.
   //
   //   chatgpt-oauth:status   — {available, signedIn, email?, accountId?}. Labels
   //                            only; NEVER token material (rule 3).
@@ -176,18 +175,6 @@ export const CHANNELS = [
   'chatgpt-oauth:status',
   'chatgpt-oauth:signin',
   'chatgpt-oauth:signout',
-
-  // FORCED DEV MODE (electron/devmode.ts) — the key-gated door that lets a
-  // SHIPPED build run the dev-only providers, so a release can be tested as the
-  // artifact users actually get. `status` reports whether this build has a door
-  // and whether it is open; it never exposes the key or its baked hash.
-  //
-  //   devmode:status  — {available, unlocked, activeNow}
-  //   devmode:unlock  — compare a typed key against the baked hash; outcome out
-  //   devmode:lock    — close it again
-  'devmode:status',
-  'devmode:unlock',
-  'devmode:lock',
 
   // FILE-BROWSER OS OPERATIONS — the file operations that only the main process
   // can perform, for the chat file browser's rows and right-click menu. All
@@ -549,41 +536,6 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
     const version = typeof payload === 'string' ? payload : '';
     if (!version) return fail('INTERNAL', 'a version string is required');
     deps.whatsNew?.record(version);
-    return ok(undefined as void);
-  });
-
-  // FORCED DEV MODE (see electron/devmode.ts). `status` is safe to expose: it
-  // reveals whether this build HAS a door and whether it is open, never the key
-  // or its hash. `unlock` returns only a boolean — a wrong key is
-  // indistinguishable from a right one that could not be persisted, which is the
-  // correct amount to tell a caller that may not be the user.
-  handle('devmode:status', () =>
-    ok({
-      available: isDevModeAvailable(),
-      unlocked: isDevModeUnlocked(),
-      // Whether THIS launch is actually running with the dev providers on. It
-      // differs from `unlocked` until the app is restarted, and the UI says so
-      // rather than implying the switch already took effect.
-      activeNow: process.env.NABY_ENABLE_CHATGPT_OAUTH === '1',
-    }),
-  );
-
-  // Returns WHICH way the attempt went, not just whether it worked: the renderer
-  // has to tell a mismatch apart from a match that could not be persisted, and
-  // it cannot see the exception that distinguishes them.
-  //
-  // NOTE THE ARGUMENT ORDER. `handle` calls `fn(payload, event)` — payload
-  // first, like every other handler here. This one was written `(_e, key)`, as
-  // if it were a raw `ipcMain.handle` listener, so the key landed in `_e`, the
-  // event landed in `key`, `typeof key === 'string'` was false, and the empty
-  // string reached the compare. Every correct key was rejected, and the two
-  // `unknown` parameters made it invisible to the type checker.
-  handle('devmode:unlock', (payload: unknown) =>
-    ok(unlockDevMode(typeof payload === 'string' ? payload : '')),
-  );
-
-  handle('devmode:lock', () => {
-    lockDevMode();
     return ok(undefined as void);
   });
 

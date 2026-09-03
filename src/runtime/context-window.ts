@@ -100,6 +100,12 @@ export const FALLBACK_CONTEXT_WINDOW = 128_000;
  * Claude aliases. Sizes are the providers' published INPUT windows.
  */
 const RULES: ReadonlyArray<{ test: (id: string) => boolean; window: number }> = [
+  // Fable (5 and 5.1) — 1M is the DEFAULT, not a negotiated tier: Anthropic
+  // publishes the maximum as the default for this family, and a live run
+  // served `claude-fable-5` on a 1,000,000-token window with no beta and no
+  // `[1m]` marker (see engine.ts `contextWindowReported`). Checked BEFORE the
+  // generic Claude rule, which would answer 200k.
+  { test: (id) => id.includes('claude-fable'), window: CLAUDE_1M_CONTEXT_WINDOW },
   // Anthropic, direct or through Bedrock (`anthropic.claude-…`) — 200k.
   { test: (id) => id.includes('claude'), window: CLAUDE_CONTEXT_WINDOW },
   // The Agent SDK aliases, which name no generation at all.

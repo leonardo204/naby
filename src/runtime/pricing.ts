@@ -39,7 +39,7 @@ import type { Usage } from './engine.js';
  * differ, so a figure shown from this table is "list price for the tokens we
  * observed", which is what the UI says it is.
  */
-export const PRICES_AS_OF = '2026-07';
+export const PRICES_AS_OF = '2026-09';
 
 export type ModelPrice = {
   /** Which provider kind this row applies to (`ProviderKind`, as a string so
@@ -71,6 +71,43 @@ export type ModelPrice = {
  */
 export const MODEL_PRICES: readonly ModelPrice[] = [
   // -- Anthropic direct ----------------------------------------------------
+  //
+  // The Claude 5 generation. Fable 5.1 has its own row rather than riding the
+  // `claude-fable-5` prefix because its cache-read rate differs (0.25 vs 1.00);
+  // longest prefix wins, so `claude-fable-5-1` lands here and `claude-fable-5`
+  // stays on the older row.
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-fable-5-1',
+    inputPerMTok: 10,
+    outputPerMTok: 50,
+    cachedInputPerMTok: 0.25,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-fable-5',
+    inputPerMTok: 10,
+    outputPerMTok: 50,
+    cachedInputPerMTok: 1,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-opus-5',
+    inputPerMTok: 5,
+    outputPerMTok: 25,
+    cachedInputPerMTok: 0.5,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-sonnet-5',
+    inputPerMTok: 2,
+    outputPerMTok: 10,
+    cachedInputPerMTok: 0.2,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
   {
     providerKind: 'anthropic',
     modelPrefix: 'claude-opus-4',
