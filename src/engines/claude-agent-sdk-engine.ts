@@ -1962,8 +1962,35 @@ export class ClaudeAgentSdkEngine implements Engine {
             // Complete thinking blocks, for the case where nothing streamed (a
             // replayed message, or a provider that sends the block whole).
             const thought = extractThinking(msg.message.content);
-            if (thought) channel.push({ kind: 'thinking', text: thought });
-            if (text) channel.push({ kind: 'text', role: 'assistant', text });
+
+            // WHOSE WORDS THESE ARE. `parent_tool_use_id` names the `Task` call
+            // that spawned a subagent, and is null on the main thread — the same
+            // discriminant the window gauge above already relies on.
+            //
+            // IT WAS BEING SPENT ON THE GAUGE AND NOWHERE ELSE, which is the bug
+            // this fixes: a subagent's narration went onto the same channel as
+            // the answer, the shell appended both to one bubble, and the reader
+            // could not tell which sentences were addressed to them. Attribution
+            // rides the event now, and the shell files the attributed text under
+            // the subagent's own block.
+            const agentToolCallId =
+              typeof msg.parent_tool_use_id === 'string' ? msg.parent_tool_use_id : undefined;
+
+            // A SUBAGENT'S REASONING IS DROPPED, not attributed. Thinking is
+            // already a collapsed aside about the answer; a nested aside about
+            // someone else's aside is noise with nowhere sensible to live, and
+            // the subagent's conclusions arrive in its result anyway.
+            if (thought && agentToolCallId === undefined) {
+              channel.push({ kind: 'thinking', text: thought });
+            }
+            if (text) {
+              channel.push({
+                kind: 'text',
+                role: 'assistant',
+                text,
+                ...(agentToolCallId ? { agentToolCallId } : {}),
+              });
+            }
             if (msg.error) {
               channel.push({
                 kind: 'error',

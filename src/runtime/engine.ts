@@ -303,6 +303,23 @@ export type EngineEvent =
       role: 'assistant' | 'user';
       text: string;
       partial?: boolean;
+      /**
+       * WHOSE WORDS THESE ARE — absent for the main thread, set for a subagent.
+       *
+       * The value is the id of the `Task` call that spawned the subagent
+       * (`parent_tool_use_id`), which is the only handle both sides already
+       * share: the tool calls a subagent makes carry it, and the transcript's
+       * subagent block is keyed on it.
+       *
+       * WHY THIS FIELD HAD TO EXIST. Without it a subagent's answer is
+       * indistinguishable from the main agent's, and the shell appended both to
+       * the same bubble — so a delegated run's narration ("I'll start by
+       * examining…", "I've been blocked, so I'm stopping here") appeared in the
+       * conversation as if naby had said it. The user could not tell which
+       * sentences were the answer to their question. The engine already knew the
+       * difference and was spending it only on the token gauge.
+       */
+      agentToolCallId?: string;
     }
   /**
    * The model's REASONING, not its reply.
