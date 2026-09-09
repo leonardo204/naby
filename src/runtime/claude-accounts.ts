@@ -312,8 +312,9 @@ export function activeClaudeAccountId(store: Store): string | undefined {
 }
 
 /** Choose the account (or '' / null for none). The caller owns the policy around
- *  it — refusing mid-turn (§5.4), resetting the login cache, and writing the
- *  activity-log line (§5.5) — because those are decisions, not storage. */
+ *  it — disclosing the next-turn lag on a mid-turn switch (§5.4), resetting the
+ *  login cache, and writing the activity-log line (§5.5) — because those are
+ *  decisions, not storage. */
 export function setActiveClaudeAccount(store: Store, id: string | null): void {
   store.setSetting(CLAUDE_ACTIVE_ACCOUNT_KEY, id && isClaudeAccountId(id) ? id : '');
 }

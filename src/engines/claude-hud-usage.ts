@@ -159,10 +159,15 @@ export function claudeIdentityPath(
 }
 
 /** Who a config directory belongs to. `uuid` is what decides a comparison;
- *  `email` exists only so a human can be shown which two things were compared. */
+ *  `email` exists only so a human can be shown which two things were compared.
+ *  `orgName`/`subscriptionType` are further LABELS, read for the settings screen
+ *  (§5.6) and never used to decide anything — both optional, so every existing
+ *  caller that only reads `uuid`/`email` is unaffected. */
 export type ClaudeAccountIdentity = {
   uuid: string;
   email?: string;
+  orgName?: string;
+  subscriptionType?: string;
 };
 
 /**
@@ -196,7 +201,24 @@ export function readClaudeIdentityFrom(parsed: unknown): ClaudeAccountIdentity |
   const uuid = typeof a.accountUuid === 'string' ? a.accountUuid.trim() : '';
   if (!uuid) return undefined;
   const email = typeof a.emailAddress === 'string' && a.emailAddress.trim() ? a.emailAddress.trim() : undefined;
-  return { uuid, ...(email ? { email } : {}) };
+  // LABELS ONLY, and spread-if-present so an absent field is an absent key rather
+  // than an `undefined` one — the identity file does not always carry these
+  // (`subscriptionType` in particular is often not in `oauthAccount` at all), and
+  // a null label is the honest reading of a field that is not there.
+  const orgName =
+    typeof a.organizationName === 'string' && a.organizationName.trim()
+      ? a.organizationName.trim()
+      : undefined;
+  const subscriptionType =
+    typeof a.subscriptionType === 'string' && a.subscriptionType.trim()
+      ? a.subscriptionType.trim()
+      : undefined;
+  return {
+    uuid,
+    ...(email ? { email } : {}),
+    ...(orgName ? { orgName } : {}),
+    ...(subscriptionType ? { subscriptionType } : {}),
+  };
 }
 
 /**

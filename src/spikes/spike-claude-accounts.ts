@@ -425,6 +425,25 @@ async function main(): Promise<void> {
       `id=${id} dirExists=${existsSync(dir)}`,
     );
 
+    // §5.6 — THE ROW'S EMAIL WITHOUT A PROCESS. The browser flow has landed, so
+    // Claude Code has written the identity file into the account's namespace, but
+    // `verify` has NOT run yet, so the stored `email` is still null. The row must
+    // still stop saying "not signed in": `describeClaudeAccounts` reads that
+    // identity file for an `emailHint` while leaving the stored `email` untouched
+    // — which is exactly field problem #1.
+    writeFileSync(
+      join(dir, '.claude.json'),
+      JSON.stringify({
+        oauthAccount: { accountUuid: 'uuid-second', emailAddress: 'second@example.com' },
+      }),
+    );
+    const hinted = describeClaudeAccounts(store).accounts.find((x) => x.id === id);
+    record(
+      'emailHint is read from the identity file while the stored email is still null (§5.6)',
+      hinted?.emailHint === 'second@example.com' && hinted?.email === null,
+      `emailHint=${String(hinted?.emailHint)} email=${String(hinted?.email)}`,
+    );
+
     // The browser flow lands (simulated: the CLI writes the credential).
     signIn(id, 'second@example.com');
     const verified = await verifyClaudeAccount(store, id, baseEnv());

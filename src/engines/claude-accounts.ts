@@ -65,10 +65,16 @@ import {
   readClaudeAccountIsolation,
   claudeAccountsRoot,
   claudeAccountsSupported,
+  claudeAccountConfigDir,
   type ClaudeAccountIsolation,
   type ClaudeAccountMeta,
 } from '../runtime/claude-accounts.js';
 import type { Store } from '../runtime/store/store.js';
+import {
+  claudeIdentityPath,
+  defaultClaudeConfigDir,
+  readClaudeIdentity,
+} from './claude-hud-usage.js';
 import {
   checkClaudeAuthStatus,
   claudeLogin,
@@ -366,8 +372,10 @@ export async function removeClaudeAccount(
 // THE CHIP MUST DESCRIBE THE ACCOUNT THAT ANSWERS. Without these three, the app
 // would read `claude auth status` for the MACHINE DEFAULT while turns spent the
 // selected account — the header naming one account and the answer belonging to
-// another, which is precisely the disagreement §5.4 refuses a mid-turn switch to
-// avoid. The same reasoning makes log in / log out follow the selection: a
+// another. (That header-vs-turn gap is DIFFERENT from §5.4's: §5.4 accepts a
+// deliberate one-turn lag after a mid-turn switch and discloses it; this one is a
+// plain bug and these entry points are what fix it.) The same reasoning makes log
+// in / log out follow the selection: a
 // "Log out" button that signs out of a namespace the app is not using is a
 // button that does nothing the user can see.
 //
@@ -413,8 +421,25 @@ export async function claudeLogoutForAccount(
 // ---------------------------------------------------------------------------
 
 /** One account as it crosses the wire: id, labels, timestamps. NO PATH — see rule
- *  3 in `runtime/claude-accounts.ts`. */
-export type ClaudeAccountView = ClaudeAccountMeta;
+ *  3 in `runtime/claude-accounts.ts`. `emailHint` is a LABEL, not a path: the
+ *  email read from this account's own identity file so a finished login stops
+ *  reading as "not signed in" before verify has confirmed it (§5.6). */
+export type ClaudeAccountView = ClaudeAccountMeta & {
+  /** The email from this account's `.claude.json`, read WITHOUT spawning a
+   *  process, or null when the file is absent/unreadable. It fills the gap while
+   *  the stored `email` (which only `verify` writes) is still null; the two are
+   *  kept separate so verify stays the source of confirmed identity. */
+  emailHint: string | null;
+};
+
+/** The identity of the MACHINE DEFAULT sign-in (the one that answers when no
+ *  account is selected). Read from `~/.claude`'s identity file so two max-plan
+ *  accounts are told apart on screen (§5.6). Labels only — never a path. */
+export type ClaudeMachineDefaultIdentity = {
+  email: string | null;
+  orgName: string | null;
+  subscriptionType: string | null;
+};
 
 export type ClaudeAccountsDescription = {
   /** Whether to offer the feature at all (§5.3). */
@@ -424,18 +449,45 @@ export type ClaudeAccountsDescription = {
   /** The chosen account, or null for "the one sign-in this computer has". */
   activeId: string | null;
   accounts: ClaudeAccountView[];
+  /** Who the machine default is, or null when its identity file cannot be read.
+   *  Not in the `accounts` list because it is not a naby-managed account (§5.6). */
+  machineDefault: ClaudeMachineDefaultIdentity | null;
 };
 
 /**
- * The whole account block for one GET. Reads only the store — no process is
- * spawned — because this is polled by an open settings screen and a probe per
- * poll would be a process per poll.
+ * The whole account block for one GET. Spawns NO process — because this is polled
+ * by an open settings screen and a probe per poll would be a process per poll —
+ * but it DOES read identity files off disk: each account's own `.claude.json` for
+ * its `emailHint`, and `~/.claude`'s for the machine default. Those are Claude
+ * Code's non-secret identity files (`accountUuid`, `emailAddress`, …), the same
+ * read the usage guard already uses; no credential and no token is touched, so
+ * the "keys never reach the renderer" invariant holds by construction (§5.6).
+ *
+ * NO PATH CROSSES THE WIRE. Every value here is an id, a label or a timestamp;
+ * `claudeIdentityPath`/`claudeAccountConfigDir` are used only to LOCATE the files
+ * to read, and their results never enter the returned shape.
  */
 export function describeClaudeAccounts(store: Store): ClaudeAccountsDescription {
+  const accounts: ClaudeAccountView[] = listClaudeAccounts(store).map((meta) => {
+    const dir = claudeAccountConfigDir(meta.id);
+    const hint = dir ? (readClaudeIdentity(claudeIdentityPath(dir))?.email ?? null) : null;
+    return { ...meta, emailHint: hint };
+  });
+
+  const machine = readClaudeIdentity(claudeIdentityPath(defaultClaudeConfigDir()));
+  const machineDefault: ClaudeMachineDefaultIdentity | null = machine
+    ? {
+        email: machine.email ?? null,
+        orgName: machine.orgName ?? null,
+        subscriptionType: machine.subscriptionType ?? null,
+      }
+    : null;
+
   return {
     supported: claudeAccountsSupported(store),
     isolation: readClaudeAccountIsolation(store),
     activeId: activeClaudeAccountId(store) ?? null,
-    accounts: listClaudeAccounts(store),
+    accounts,
+    machineDefault,
   };
 }
