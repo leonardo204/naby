@@ -55,6 +55,35 @@ export {
   type ContextWindowEngine,
 } from './runtime/context-window.js';
 
+// WHICH MODEL ANSWERS A TURN THE USER LEFT ON `auto`
+// (specs/model-auto-routing.md §4.2–§4.4). Pure: the shell's `resolveAutoModel`
+// gathers the signals — the usage cache, the live catalog, the history estimate —
+// and this decides. It crosses the barrel because the decision has to be made in
+// `engines/naby.ts`, one statement before the init event goes out, and a copy of
+// the table living on the shell side is a copy that drifts from the spike that
+// proves it.
+//
+// WHAT IS NOT HERE IS THE POINT. The keyword lists, the thresholds and the
+// order-arithmetic (`containsKeyword`, `tierRank`, `TIER_ORDER`, …) are the
+// DECISION's own parts, and the decision is not the shell's to take apart: a
+// shell that can read `BUILD_KEYWORDS` is a shell that can grow a second rule
+// beside the router's. The spike that pins those parts imports
+// `runtime/model-router.js` directly — it lives in this tree, so it needs no
+// barrel — which is why keeping them out costs no coverage.
+export {
+  routeModelTier,
+  pickCatalogValue,
+  tierOfModelId,
+  estimateContextTokens,
+  windowsForTiers,
+  type CatalogRow,
+  type ContextTextSource,
+  type ModelTier,
+  type RouteDecision,
+  type RouteReason,
+  type RouteSignals,
+} from './runtime/model-router.js';
+
 // The rolling-compaction primitives. Exported for the shell's tests and for a
 // caller that wants to size a payload the same way the engine does.
 export {
@@ -395,6 +424,7 @@ export { decideHarnessImport } from './runtime/harness-gate.js';
 // by whether the owning System MCP preset is configured. The shell owns both call
 // sites — boot (getStore) and the System MCP save/remove.
 export {
+  ALWAYS_ON_HARNESS_BUNDLES,
   applyBuiltinHarnessActivation,
   ATLASSIAN_HARNESS_BUNDLE_ID,
   builtinHarnessAutoStatusKey,
@@ -403,8 +433,13 @@ export {
   BUILTIN_HARNESS_ASSETS,
   BUILTIN_HARNESS_BUNDLES,
   CIC_HARNESS_BUNDLE_ID,
+  CORE_HARNESS_BUNDLE_ID,
   harnessAssetBody,
   seedBuiltinHarness,
+  // "May this subagent run on this engine?" — `explorer` and `implementer` are
+  // written against the Agent SDK's own tools and Anthropic's aliases, so the
+  // roster leaves them out elsewhere (subagent-delegation §4.1).
+  subagentAllowedForEngine,
 } from './runtime/harness-seed.js';
 export type {
   BuiltinHarnessActivationResult,
@@ -863,6 +898,29 @@ export {
   type DelegationSink,
   type DelegationResult,
 } from './runtime/delegate.js';
+
+// -- when to delegate (subagent-delegation §4.2) -----------------------------
+// One policy string, two call sites: the shell appends it to the dev-claude turn
+// system prompt, and `delegateSchema` appends it to the tool description on every
+// other engine. Conditional on the roster — and the `implementer` half is
+// conditional on the turn permitting changes.
+export {
+  DELEGATION_POLICY,
+  delegationPolicyFor,
+  EXPLORER_SUBAGENT,
+  IMPLEMENTER_SUBAGENT,
+  type DelegationPolicyOptions,
+} from './runtime/delegation-policy.js';
+
+// -- what the shell environment is doing to the engine (§4.4) ----------------
+// naby neither reads nor writes the variables that pick a model, but the CLI it
+// launches inherits them — so the one honest answer is to SHOW the ones that are
+// set. The list is a fact about the bundled CLI build and must be re-checked when
+// the SDK moves (§4.5).
+export {
+  engineEnvironmentNotes,
+  type EngineEnvNote,
+} from './runtime/engine-env.js';
 
 // -- taking a grown agent with you (Phase 3, P3-M6) --------------------------
 // Pure packaging: a stock Claude Code subagent `.md` (learned facts inlined, so

@@ -322,6 +322,28 @@ export type EngineEvent =
       agentToolCallId?: string;
     }
   /**
+   * WHICH MODEL A SUBAGENT ACTUALLY RAN ON (specs/subagent-delegation.md §4.3).
+   *
+   * naby asks for a model in the subagent's definition — `haiku` for `explorer`,
+   * `sonnet` for `implementer` — and the BACKEND decides. The Agent SDK has moved
+   * its resolution order between CLI versions and
+   * `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` overrides all of it, so what naby wrote
+   * and what answered can differ without anything failing. This event is the
+   * measurement: the model as the provider reported it on the subagent's own
+   * assistant messages, never the id we requested.
+   *
+   * EMITTED ONCE PER DELEGATED RUN. `agentToolCallId` is the id of the `Task`
+   * call that spawned the subagent — the SAME attribution key `text` carries — so
+   * a consumer labels an existing block with it rather than opening a new one.
+   *
+   * OBSERVATIONAL, like `harness` and `rate_limit`: it is forwarded for display
+   * and written to the activity log, it mints no `RuntimeMessage`, it is not part
+   * of the replayed transcript, and nothing in the loop or the gate may branch on
+   * it. An engine that cannot tell which model a subagent used emits nothing —
+   * there is no default worth guessing.
+   */
+  | { kind: 'subagent_model'; agentToolCallId: string; model: string }
+  /**
    * The model's REASONING, not its reply.
    *
    * Kept a separate kind rather than folded into `text` on purpose: a consumer

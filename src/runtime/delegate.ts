@@ -31,6 +31,7 @@
 //     names, and an unknown name is a tool error naming the ones that exist
 //     rather than a silent no-op.
 
+import { delegationPolicyFor } from './delegation-policy.js';
 import type { Executor, SubagentSpec, ToolOutput, ToolSchema } from './engine.js';
 
 /** The bare name of the delegation tool — also its gate/allowlist key. */
@@ -163,6 +164,19 @@ export interface DelegationSink {
   subagents: readonly SubagentSpec[];
   /** Nesting level of the CURRENT turn. 0 = the user's own. */
   depth: number;
+  /**
+   * Whether THIS TURN permits changes — "allow changes" is on and the session is
+   * not in plan mode. Only the delegation POLICY reads it (see
+   * delegation-policy.ts): a read-only turn is not told to hand code changes to
+   * `implementer`, because the tools that would carry them out are absent and the
+   * gate would refuse them anyway.
+   *
+   * ABSENT MEANS "NOT PERMITTED", deliberately. A caller that has not yet been
+   * taught the difference gets the conservative half of the policy rather than an
+   * instruction the turn may not be able to follow. It changes nothing about what
+   * delegation can DO — the gate, not this flag, is what actually stops a write.
+   */
+  canMutate?: boolean;
   /** Run the subagent as a nested turn and return its answer. The shell owns
    *  this: only it has the engine, the model and the gate. */
   run(input: { spec: SubagentSpec; task: string }): Promise<DelegationResult>;
@@ -267,12 +281,24 @@ export function makeDelegate(sink: DelegationSink): Executor {
  * Listing them in the schema is what stops the model inventing a target, and the
  * descriptions are what let it choose sensibly — a bare string parameter would
  * make delegation a guessing game.
+ *
+ * AND WHEN THE BUILT-IN DELEGATES ARE THERE, IT SAYS WHEN TO USE THEM. On every
+ * engine but dev-claude this description is the only place a model is told
+ * anything about delegating, so the shared policy (delegation-policy.ts) is
+ * appended here — under the same conditions the dev-claude system block uses:
+ * only when `explorer` or `implementer` is actually in this turn's roster, and
+ * the `implementer` half only when the turn permits changes
+ * (specs/subagent-delegation.md §4.2).
  */
-export function delegateSchema(subagents: readonly SubagentSpec[]): ToolSchema {
+export function delegateSchema(
+  subagents: readonly SubagentSpec[],
+  opts?: { canMutate?: boolean },
+): ToolSchema {
   const names = subagents.map((s) => s.name);
   const roster = subagents
     .map((s) => `"${s.name}"${s.description ? ` — ${s.description}` : ''}`)
     .join('; ');
+  const policy = delegationPolicyFor(names, { canMutate: opts?.canMutate === true });
   return {
     name: DELEGATE_TOOL_NAME,
     description:
@@ -280,7 +306,8 @@ export function delegateSchema(subagents: readonly SubagentSpec[]): ToolSchema {
       `Available: ${roster}. ` +
       'The subagent CANNOT see this conversation, so the task must be complete on its own — include ' +
       'the file paths, the constraints and what "done" looks like. Use it when a subagent is clearly ' +
-      'better suited than you are; do the work yourself when it is not.',
+      'better suited than you are; do the work yourself when it is not.' +
+      (policy ? ` ${policy}` : ''),
     parameters: {
       type: 'object',
       properties: {

@@ -79,6 +79,10 @@ import type {
 // because both engines need one answer: the AI-SDK path filters with it
 // (`restrictToolset`), this one filters and then re-qualifies (`sdkAgentTools`).
 import { resolveToolRefs } from '../runtime/delegate.js';
+// "Which model did that subagent actually run on", once per `Task` call. In its
+// own module BECAUSE this one loads the Agent SDK on import: the rule is then
+// assertable from a spike with no sign-in (subagent-delegation §4.3).
+import { subagentModelEvent } from './subagent-model.js';
 // The account → environment rule (claude-multi-account §5.1). Imported from the
 // PURE half of the account registry, which knows nothing about the CLI or this
 // engine: `engines/claude-accounts.ts` would import `claude-login.ts`, which
@@ -1705,6 +1709,14 @@ export class ClaudeAgentSdkEngine implements Engine {
     let initModel: string | undefined;
     let initBetas: readonly string[] | undefined;
 
+    // ...and the OTHER side of that discriminant: the `Task` calls whose model has
+    // already been reported. A subagent produces many assistant messages and each
+    // one names the same model; the consumer wants one label per delegated run, so
+    // the id of the spawning call is the "already said this" identity
+    // (subagent-delegation §4.3). Per RUN, never module-level: two concurrent runs
+    // must not be able to swallow each other's first reading.
+    const reportedSubagentModels = new Set<string>();
+
     // WHICH `Task` CALL SPAWNED WHICH SUBAGENT.
     //
     // The hook that reports a subagent's tool calls knows the AGENT id
@@ -1975,6 +1987,21 @@ export class ClaudeAgentSdkEngine implements Engine {
             // the subagent's own block.
             const agentToolCallId =
               typeof msg.parent_tool_use_id === 'string' ? msg.parent_tool_use_id : undefined;
+
+            // WHICH MODEL THE SUBAGENT ACTUALLY RAN ON (subagent-delegation §4.3).
+            // The same `message.model` the main-thread branch above keeps for the
+            // gauge, taken for the OTHER side of the discriminant and reported
+            // once per `Task` call — naby asked for haiku, and this is what
+            // answered. Pushed BEFORE the text of the same message so a consumer
+            // can label the subagent's block before it has anything to show in
+            // it. The "once" lives in `reportedSubagentModels`, a Set owned by
+            // this run; the decision itself is in a module that does not load the
+            // SDK, so a spike can assert it without signing in.
+            const modelEvent = subagentModelEvent(reportedSubagentModels, {
+              parentToolUseId: msg.parent_tool_use_id,
+              model: msg.message.model,
+            });
+            if (modelEvent) channel.push(modelEvent);
 
             // A SUBAGENT'S REASONING IS DROPPED, not attributed. Thinking is
             // already a collapsed aside about the answer; a nested aside about

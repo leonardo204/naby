@@ -117,6 +117,16 @@ export type ActivityKind =
   | 'stage_refusal'
   | 'approval_requested'
   | 'approval_resolved'
+  // WHICH MODEL A SUBAGENT ACTUALLY RAN ON (subagent-delegation §4.3) — one row
+  // per delegated run, carrying `agentToolCallId`, `model` and the agent type
+  // when the spawning call named one. naby asks for haiku and the backend may
+  // answer with something else (`CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, or a
+  // resolution order that moved between CLI versions), so this is the record that
+  // makes such a drift countable after the fact rather than invisible.
+  // DEV-CLAUDE ENGINE ONLY: it comes from the Agent SDK's `parent_tool_use_id`
+  // attribution. A nested ai-sdk delegation is logged as its own session instead,
+  // and its model appears in that session's own `usage` row.
+  | 'subagent_model'
   // -- growth / check-ins ---------------------------------------------------
   | 'checkin_asked'
   | 'checkin_answered'

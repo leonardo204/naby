@@ -2,11 +2,11 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 type: design
-version: 0.7.0
+version: 0.8.0
 status: active
-scope: 사내 표준 MCP(skill-hub, mcp-atlassian, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를, atlassian은 confluence-upload 스킬을 켠다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
-related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone]
-updated: 2026-08-12
+scope: 사내 표준 MCP(skill-hub, mcp-atlassian, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를, atlassian은 confluence-upload 스킬을 켠다. 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
+related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation]
+updated: 2026-09-14
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
@@ -114,6 +114,14 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 - 해당 번들 항목은 `enabled`로 도착하고, `harness.builtin.<name>.autoStatus`도 `enabled`로 기록된다. 도착 시점에 행과 기록이 일치하므로 "사용자가 이후에 손댔는가"는 그대로 판정된다 — 시드로 켜진 항목을 사람이 끄면 재저장에도 꺼진 채다.
 - **이 가지는 없는 행에만 닿는다.** 이미 있는 행은 그 위의 `findRow` 검사에서 `kept`로 빠지므로, 부팅이 사용자가 끈 것을 되켜는 뒷문이 될 수 없다.
 - cic는 이 파라미터로 달라지지 않는다. cic 프리셋과 cic 행은 같은 릴리스(0.6.0)에서 함께 왔으므로 "자격값은 있는데 행이 없는" 설치가 존재할 수 없고, 시드는 언제나 `kept`로 끝난다. 그래서 호출부는 프리셋별 예외 없이 **설정된 번들 전부**를 넘긴다.
+
+### 2.7.2 프리셋 없는 번들 — `core` (0.8.0에서 추가)
+
+지금까지 번들은 전부 프리셋의 스위치였다. [subagent-delegation](subagent-delegation.md)이 첫 예외를 만든다. `core` 번들(`explorer`·`implementer` 서브에이전트)은 자격값이 필요 없고 처음부터 켜져 있어야 한다.
+
+규칙은 하나만 늘어난다. 런타임이 `ALWAYS_ON_HARNESS_BUNDLES`를 소유하고, 시드 호출부는 `configuredHarnessBundles(store)`에 그 목록을 **합쳐** 넘긴다. 프리셋 레지스트리를 순회하는 코드에는 분기가 생기지 않고(§2.1 불변), `systemMcp.set/remove`도 이 번들을 모른다. 자격값 전환이 이 번들을 건드릴 일이 없으므로 `applyBuiltinHarnessActivation`의 자동 상태 기록도 시드 때 한 번만 쓰인다.
+
+시드 의미론은 §2.7.1과 같다. 없는 행만 만들고, `enabled`로 도착하며, 그 뒤 사용자가 끄거나 지운 것은 부팅이 되돌리지 않는다. 프리셋 스위치와 다른 점은 딱 하나다. 켜는 신호가 자격값이 아니라 릴리스다.
 
 **트리거.** 매칭은 대소문자 무시 부분 문자열이므로 낱말 선택이 곧 발동 정책이다. 최종 목록은 `confluence, 컨플루언스, 컨플, confupload, atlassian.net`이다.
 

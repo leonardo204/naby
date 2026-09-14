@@ -23,8 +23,8 @@
     "spike:04": "npm run build:electron && tsx src/spikes/spike-04-electron.ts",
     "spike:07": "tsx src/spikes/spike-07-independence.ts",
     "spike:cwd": "tsx src/spikes/spike-cwd.ts",
-    "spike:all": "npm run spike:02 && npm run spike:03 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105 && npm run spike:f104 && npm run spike:f107 && npm run spike:f110 && npm run spike:window-state && npm run spike:window-runtime && npm run spike:whats-new",
-    "spike:nokeys": "npm run spike:02 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105 && npm run spike:f104 && npm run spike:f107 && npm run spike:window-state && npm run spike:window-runtime && npm run spike:whats-new",
+    "spike:all": "npm run spike:02 && npm run spike:03 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105 && npm run spike:f104 && npm run spike:f107 && npm run spike:f110 && npm run spike:window-state && npm run spike:window-runtime && npm run spike:whats-new && npm run spike:model-router && npm run spike:subagent-model-event",
+    "spike:nokeys": "npm run spike:02 && npm run spike:03b && npm run spike:04 && npm run spike:07 && npm run spike:f105 && npm run spike:f104 && npm run spike:f107 && npm run spike:window-state && npm run spike:window-runtime && npm run spike:whats-new && npm run spike:model-router && npm run spike:subagent-model-event",
     "spikes": "npm run spike:all",
     "typecheck": "tsc --noEmit",
     "spike:f105": "tsx src/spikes/spike-f105-persistence.ts",
@@ -83,7 +83,10 @@
     "spike:boot-services": "npm run build:electron && tsx src/spikes/spike-boot-services.ts",
     "spike:hygiene": "tsx src/spikes/spike-hygiene.ts",
     "spike:activity": "tsx src/spikes/spike-activity-log.ts",
-    "spike:compaction": "tsx src/spikes/spike-compaction.ts"
+    "spike:compaction": "tsx src/spikes/spike-compaction.ts",
+    "spike:model-router": "tsx src/spikes/spike-model-router.ts",
+    "spike:subagent-model-event": "tsx src/spikes/spike-subagent-model-event.ts",
+    "spike:subagent-model": "tsx src/spikes/spike-subagent-model.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.24",

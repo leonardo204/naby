@@ -1,7 +1,7 @@
 ---
 id: session-context-management
 type: design
-version: 0.4.0
+version: 0.4.1
 status: active
 scope: 세션 컨텍스트 창 관리 — 상태 바의 창 사용률 게이지와 임계 안내, "새 탭에서 이어가기"(요약 인계 + 세션 스코프 환경 승계), ai-sdk 엔진의 롤링 요약 자동 컴팩션. Agent SDK 엔진의 자체 컴팩션은 건드리지 않고 표시만 한다.
 related:
@@ -9,7 +9,8 @@ related:
   - phase-2-2.5-plan
   - naby-activity-log
   - telegram-chat
-updated: 2026-08-09
+  - model-auto-routing
+updated: 2026-09-14
 ---
 
 # 세션 컨텍스트 관리
@@ -25,7 +26,7 @@ updated: 2026-08-09
 ### 2.1 창 사용률 게이지
 
 - **측정** — 턴의 마지막 스텝이 보고한 입력 토큰(캐시 리드 포함)이 곧 현재 창 점유량이다. 모델이 실제로 받은 양이므로 추정이 아니라 실측이다. 스텝별 usage가 없으면 게이지를 **숨긴다** — 측정하지 않은 것을 지어내지는 않는다. 이 규칙은 그대로다.
-- **모델 식별** — 분모를 정하는 것은 **실행이 실제로 보고한 구체적 모델 id**이지, 우리가 요청한 문자열이 아니다. 둘은 분모가 중요해지는 바로 그 지점에서 갈라진다. Claude 경로의 기본값은 `default`(Agent SDK의 "알아서 고르기" 행)라 어떤 창도 이름 대지 못하고, `opus` 같은 별칭도 마찬가지다. 실행 쪽은 언제나 답을 안다 — Agent SDK는 `system`/`init`의 `model`과 매 assistant 메시지의 `message.model`로, ai-sdk는 스텝 응답의 `response.modelId`로 알려준다. 엔진은 이것을 `contextModel`로, 협상된 베타 목록을 `contextBetas`로 result 이벤트에 실어 보낸다.
+- **모델 식별** — 분모를 정하는 것은 **실행이 실제로 보고한 구체적 모델 id**이지, 우리가 요청한 문자열이 아니다. 둘은 분모가 중요해지는 바로 그 지점에서 갈라진다. Claude 경로의 기본값은 `default`(Agent SDK의 "알아서 고르기" 행)라 어떤 창도 이름 대지 못하고, `opus` 같은 별칭도 마찬가지다. 실행 쪽은 언제나 답을 안다 — Agent SDK는 `system`/`init`의 `model`과 매 assistant 메시지의 `message.model`로, ai-sdk는 스텝 응답의 `response.modelId`로 알려준다. 엔진은 이것을 `contextModel`로, 협상된 베타 목록을 `contextBetas`로 result 이벤트에 실어 보낸다. *(v0.4.1 추기)* 모델 칩이 `auto`인 턴은 셸의 `system/init`이 `model`에 naby가 고른 카탈로그 값(`sonnet`, `opus[1m]` 같은 것)을 싣고 고른 이유는 `model_route`에 따로 싣는다([model-auto-routing](model-auto-routing.md) §4.6). 분모 규칙은 바뀌지 않는다. 실행이 보고한 창이 먼저고 init의 `model`은 폴백이다.
 - **분모** — *(v0.4.0에서 개정)* **실행이 스스로 보고한 창이 최우선이다.** Agent SDK의 result 메시지는 `modelUsage[모델].contextWindow`로 그 실행의 창을 직접 말해주며, 엔진이 이를 `contextWindow`로 result 이벤트에 실어 보내고 셸은 이 값을 그대로 분모로 쓴다. 개정한 이유: 1M 티어가 GA가 되면서 기존의 두 추론 신호 — 구체적 id의 `[1m]` 표식과 베타 `context-1m-2025-08-07` — 가 **둘 다 오지 않게 됐고**(실측: SDK 0.3.215, `claude-fable-5`가 베타 없이 1M), 게이지가 1M 실행을 200k로 나눴다. 백엔드가 말한 숫자는 이런 식으로 낡을 수 없다. 레지스트리 추론(`contextWindowFor(engine, model, { betas })`)은 **아무것도 보고하지 않는 백엔드의 폴백**으로 남는다 — Claude 계열 200k, 두 신호 중 하나가 있으면 1M.
 - **모르는 분모** — *(v0.3.0에서 개정)* 이전 규칙은 "모르면 비율 없이 토큰 수만"이었으나, 사용자 보고로 뒤집혔다. `293k`라는 숫자만으로는 읽는 사람이 아무것도 판단하지 못하고, 게다가 이 경우가 예외가 아니라 **가장 흔한 경로**였다. 그래서 이제는 **언제나 비율을 보여주되 근사치임을 표시한다**(`~29%`). 규칙은 세 가지다.
   - 정확한 창을 알고 측정값이 그 안이면 → 그대로 `66%`.

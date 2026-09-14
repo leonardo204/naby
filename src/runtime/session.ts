@@ -523,6 +523,17 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   // every provider without any provider-specific reordering.
   const pending = new Map<string, string>(); // toolCallId -> toolName
 
+  // WHICH SUBAGENT A DELEGATION CALL ASKED FOR — the `subagent_type` argument of
+  // a `Task`/`Agent` call, keyed by that call's id. Kept only so the
+  // `subagent_model` row can say WHICH agent ran on the model it reports
+  // (subagent-delegation §4.3): "haiku" alone does not tell a reader whether the
+  // cheap explorer was used or something else was quietly downgraded.
+  //
+  // It is free: the id of the spawning call is the same id the engine reports as
+  // `agentToolCallId`, and the arguments are already in hand in the branch below.
+  // Turn-scoped, so it cannot grow or leak across turns.
+  const subagentTypeByCall = new Map<string, string>();
+
   const closeCall = (toolCallId: string, output: ToolOutput): void => {
     const toolName = pending.get(toolCallId);
     if (toolName === undefined) return; // already closed
@@ -673,9 +684,37 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
         if (ev.partial !== true && ev.text) {
           logActivity('thinking', { ...activity, text: ev.text });
         }
+      } else if (ev.kind === 'subagent_model') {
+        // OBSERVATIONAL, like `harness` and `rate_limit`: forwarded above for
+        // display, written to the log here, and given NO store branch on purpose —
+        // it mints no RuntimeMessage and is not part of the replayed transcript
+        // (engine.ts states the contract on the event itself).
+        //
+        // WHY IT IS LOGGED WHEN THOSE TWO ARE NOT. The log is where cost is
+        // accounted for after the fact, and this is the only place the model a
+        // delegated run ACTUALLY used is ever stated: the `usage` row records one
+        // model for the whole turn, so a haiku subagent's tokens are already
+        // summed under the main model there (subagent-delegation §5).
+        logActivity('subagent_model', {
+          ...activity,
+          agentToolCallId: ev.agentToolCallId,
+          model: ev.model,
+          ...(subagentTypeByCall.has(ev.agentToolCallId)
+            ? { agentType: subagentTypeByCall.get(ev.agentToolCallId) }
+            : {}),
+        });
       } else if (ev.kind === 'tool_request') {
         pending.set(ev.toolCallId, ev.toolName);
         loggedToolCalls += 1;
+        // WHICH AGENT THIS DELEGATION ASKED FOR, remembered for the
+        // `subagent_model` row that may follow (see `subagentTypeByCall`). Read
+        // defensively: `input` is whatever the model wrote.
+        if (ev.toolName === 'Task' || ev.toolName === 'Agent') {
+          const wanted = (ev.input as { subagent_type?: unknown } | null | undefined)?.subagent_type;
+          if (typeof wanted === 'string' && wanted.trim()) {
+            subagentTypeByCall.set(ev.toolCallId, wanted.trim());
+          }
+        }
         // THE TRANSACTION. Arguments go in as the model wrote them (masked and
         // capped by the log module), because "what exactly did it pass" is the
         // question a tool call is usually being read for.

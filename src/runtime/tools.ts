@@ -887,8 +887,11 @@ export function buildToolset(
     executors[CHECKIN_TOOL_NAME] = makeCheckin(checkin);
   }
   if (delegation && canDelegate(delegation)) {
-    // The schema enumerates the roster, so it is built per turn from the sink.
-    toolSchemas.push(delegateSchema(delegation.subagents));
+    // The schema enumerates the roster, so it is built per turn from the sink —
+    // and so is the delegation policy in its description, which needs to know
+    // whether this turn may change anything before it recommends delegating a
+    // code change (subagent-delegation §4.2).
+    toolSchemas.push(delegateSchema(delegation.subagents, { canMutate: delegation.canMutate }));
     executors[DELEGATE_TOOL_NAME] = makeDelegate(delegation);
   }
   if (jobs) {

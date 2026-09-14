@@ -1,7 +1,7 @@
 ---
 id: claude-multi-account
 type: design
-version: 0.2.0
+version: 0.2.1
 status: draft
 scope: Claude 구독 계정을 여러 개 두고 naby 안에서 골라 쓰는 것과, 그 계정의 사용 한도를 표시하는 것
 related:
@@ -10,7 +10,8 @@ related:
   - phase-3-persona-agent
   - naby-activity-log
   - session-context-management
-updated: 2026-09-09
+  - model-auto-routing
+updated: 2026-09-14
 ---
 
 # Claude 멀티 계정과 한도 표시
@@ -26,7 +27,7 @@ Claude 구독 계정을 여러 개 쓰는 사람이 있다. 개인과 회사, �
 1. **naby는 남의 자격증명을 읽지도 쓰지도 않는다.** Claude Code의 자격증명은 Claude Code가 소유한다. naby가 그 저장소에 쓰기 시작하면, 형식이 바뀌거나 쓰기가 중간에 실패했을 때 **사용자가 naby 밖에서도 로그아웃된다.** 우리 앱의 실수로 다른 도구를 망가뜨리지 않는다.
 2. **전환은 naby 안에서만 유효하다.** 터미널에서 `claude`를 치면 원래 계정 그대로다. 기계 전체를 바꾸는 것은 이 스펙의 범위가 아니다.
 3. **숫자가 없으면 아무것도 그리지 않는다.** 한도는 백엔드가 줄 때만 있다. 없는 것을 추정해서 채우지 않는다. 틀린 잔량은 없는 것보다 나쁘다.
-4. **자동 전환은 하지 않는다.** 한도에 닿았을 때 다른 계정으로 자동 failover 하는 것은 한도의 취지를 거스르는 자동화다. 계정을 바꾸는 것은 언제나 사람이 누른다.
+4. **자동 전환은 하지 않는다.** 한도에 닿았을 때 다른 계정으로 자동 failover 하는 것은 한도의 취지를 거스르는 자동화다. 계정을 바꾸는 것은 언제나 사람이 누른다. 같은 계정 안에서 모델 등급을 낮추는 것은 다른 문제다. 한도를 우회하지 않고 한도 안에서 덜 쓰는 선택이므로 허용하며, 그 규칙은 [model-auto-routing](model-auto-routing.md) §4.2가 갖는다.
 
 ## 3. 무엇을 알아냈는가
 
@@ -49,6 +50,8 @@ Claude Code는 자격증명을 두 저장소에 둔다 — macOS Keychain(`secur
 ### 3.3 한도는 스트림 이벤트로만 안정적으로 온다
 
 SDK 응답(result) 메시지에는 한도가 **없다.** 한도를 한 번에 조회하는 컨트롤 요청이 따로 있지만, 그 접근 메서드의 이름이 `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`이다. 이름 자체가 계약이 없다는 뜻이므로 제품 경로에 넣지 않는다.
+
+*(v0.2.1 추기)* 이 문장은 그 뒤 구현에서 절반만 지켜졌다. `usage.limits` 액션은 이 메서드를 `probeClaudeUsage`로 **호출하되 계약으로 삼지 않는다.** 모든 필드를 `unknown`으로 받아 실패하면 `null`로 접고, CLI가 남기는 HUD 캐시와 합쳐 `usage.limits.cache.<accountId>` 설정 키에 15분 캐시한다(`src/runtime/subscription-usage.ts`, `api/naby.ts`의 `usage.limits`). 따라서 "제품 경로에 넣지 않는다"는 "제품이 이 값에 **의존**하지 않는다"로 읽는다. 값이 없으면 칩을 그리지 않고, [model-auto-routing](model-auto-routing.md)의 한도 규칙도 값이 있을 때만 움직인다.
 
 대신 `rate_limit_event`가 SDK 메시지 유니온의 정식 멤버라, naby가 이미 도는 루프에 **그냥 도착한다.** 별도 왕복도 프로세스도 지연도 없다.
 
@@ -151,7 +154,7 @@ CLI 번들에서 Windows 자격증명 저장소 구현을 찾지 못했다. 저�
 - **기계 전체 전환.** 터미널 `claude`는 영향을 받지 않는다. 원한다면 별도 결정이 필요하다.
 - **한도 도달 시 자동 계정 전환.** §2-4.
 - **ChatGPT 구독의 한도 표시.** 계정 관리는 별도 문서에서 다룬다. ChatGPT 자격증명은 naby가 이미 소유하므로 성격이 다르다.
-- **비공식 사용량 API 호출.** 안정 경로가 있는데 문서화되지 않은 엔드포인트를 쓰지 않는다.
+- **비공식 사용량 API에 의존하는 것.** 호출은 하되(§3.3 추기) 그 값이 없어도 모든 기능이 그대로 돈다. 값이 있어야만 켜지는 기능은 만들지 않는다.
 
 ## 7. 검증
 

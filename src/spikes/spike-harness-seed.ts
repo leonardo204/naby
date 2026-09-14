@@ -2,14 +2,16 @@
 //
 // THE BUILT-IN HARNESS BUNDLES — verification (skill-hub-builtin §2.7).
 //
-// naby ships three harness artifacts in TWO bundles. `cic` owns the
+// naby ships five harness artifacts in THREE bundles. `cic` owns the
 // `confluence-context` skill and the `confluence-researcher` subagent: together
 // they are one capability — ask the company wiki — and that capability is
 // worthless without the `cic` MCP server, because the subagent's only four tools
 // are cic's. `atlassian` owns the `confluence-upload` skill, which drives the
 // confUploader CLI; its switch is the atlassian preset because that preset already
-// collects the same three Confluence values the CLI needs. This spike proves the
-// claims that make shipping them safe rather than annoying:
+// collects the same three Confluence values the CLI needs. `core` owns the
+// `explorer` and `implementer` subagents, which depend on no server at all and are
+// therefore ALWAYS-ON rather than credential-switched (§(i) below). This spike
+// proves the claims that make shipping them safe rather than annoying:
 //
 //   (a) THE COMPILED COPY IS THE FILE. `harness-assets/generated.ts` is a build
 //       product of two `.md` documents that are kept VERBATIM in the tree. The
@@ -55,14 +57,27 @@
 // own failure. So (d) asserts the matcher and (e) asserts the Agent SDK
 // re-qualification.
 //
-// No filesystem writes, no sqlite file, no network: MemoryStore plus two reads of
-// the repo's own asset files.
+//   (i) THE `core` BUNDLE IS ALWAYS-ON, AND STILL THE USER'S (subagent-delegation
+//       §4.1, §7). `explorer` and `implementer` hang off no credential, so the
+//       switch that turns the other two bundles on can never fire for them: the
+//       boot call passes `ALWAYS_ON_HARNESS_BUNDLES` and they arrive ENABLED. That
+//       is the one thing that could have made "the user turned it off" meaningless,
+//       so this asserts both halves — they arrive on, and once a person has moved
+//       the row, no later seed or activation touches it again. It also pins what
+//       the two rows CARRY (haiku with Read/Glob/Grep; sonnet with no tool list at
+//       all, so it inherits the turn's) and that the `engines` declaration survives
+//       the sqlite payload column, because the roster filter reads the ROW.
+//
+// One sqlite file in a temp dir (the (i) round-trip, removed at exit); everything
+// else is MemoryStore plus reads of the repo's own asset files. No network.
 
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BUILTIN_HARNESS_ASSETS } from '../runtime/harness-assets/generated.js';
 import {
+  ALWAYS_ON_HARNESS_BUNDLES,
   applyBuiltinHarnessActivation,
   ATLASSIAN_HARNESS_BUNDLE_ID,
   builtinHarnessAutoStatusKey,
@@ -70,8 +85,10 @@ import {
   bundleOwning,
   BUILTIN_HARNESS_BUNDLES,
   CIC_HARNESS_BUNDLE_ID,
+  CORE_HARNESS_BUNDLE_ID,
   harnessAssetBody,
   seedBuiltinHarness,
+  subagentAllowedForEngine,
 } from '../runtime/harness-seed.js';
 import { parseToolRefs, resolveToolRefs, toolRefsAllow } from '../runtime/delegate.js';
 import { qualifiedToolName } from '../runtime/mcp.js';
@@ -82,12 +99,41 @@ import {
   skillMatchesTurn,
 } from '../runtime/skill-inject.js';
 import { MemoryStore } from '../runtime/store/memory-store.js';
+import { SqliteStore } from '../runtime/store/sqlite-store.js';
 import type { HarnessItem } from '../runtime/store/store.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 const checks: Check[] = [];
 function record(name: string, pass: boolean, evidence: string): void {
   checks.push({ name, pass, evidence });
+}
+
+/**
+ * Which lines of a markdown document sit INSIDE a fenced code block, by the
+ * CommonMark rule: a fence opens with three or more backticks (or tildes) and is
+ * closed only by a run of the SAME character that is AT LEAST AS LONG and carries
+ * no info string. That "at least as long" is the whole point — it is what lets a
+ * four-backtick fence contain a three-backtick one, and what makes the naive
+ * even/odd count of ``` lines the wrong test.
+ */
+function fenceScan(body: string): { openAt(line: number): boolean; openAtEnd: boolean } {
+  const inside = new Set<number>();
+  let open: { char: string; len: number } | undefined;
+  const lines = body.split('\n');
+  lines.forEach((line, i) => {
+    const m = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (open) {
+      const closes =
+        m !== null && m[1]![0] === open.char && m[1]!.length >= open.len && m[2]!.trim() === '';
+      if (closes) open = undefined;
+      else inside.add(i);
+      return;
+    }
+    // An info string may not contain a backtick in a backtick fence, but nothing
+    // here needs that refinement — these documents are ours.
+    if (m) open = { char: m[1]![0]!, len: m[1]!.length };
+  });
+  return { openAt: (line: number) => inside.has(line), openAtEnd: open !== undefined };
 }
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -791,6 +837,210 @@ function sdkToolNamesFor(refs: readonly string[], toolNames: readonly string[]):
   return [...matched.map((n) => `mcp__nabytools__${n}`), ...unmatched];
 }
 
+// ---------------------------------------------------------------------------
+// (i) the `core` bundle: always-on, still the user's, and engine-scoped
+// ---------------------------------------------------------------------------
+
+const EXPLORER = 'explorer';
+const IMPLEMENTER = 'implementer';
+
+function checkCoreBundle(): void {
+  const explorer = BUILTIN_HARNESS_ASSETS.find((a) => a.name === EXPLORER)!;
+  const implementer = BUILTIN_HARNESS_ASSETS.find((a) => a.name === IMPLEMENTER)!;
+
+  // WHAT THE TWO ASSETS SAY. The models are the reason these agents exist (§2
+  // principle 1: a model is written down only when it IS the point), and the
+  // asymmetry in `tools` is deliberate — explorer is narrowed to reading, while
+  // implementer declares NO list so it inherits whatever the turn allows, which
+  // is what keeps it inside the gate instead of alongside it (§4.1).
+  record(
+    '(i) the core pair pins its models, and only implementer inherits the toolset',
+    explorer.kind === 'subagent' &&
+      explorer.model === 'haiku' &&
+      (explorer.toolRefs ?? []).join(',') === 'Read,Glob,Grep' &&
+      implementer.kind === 'subagent' &&
+      implementer.model === 'sonnet' &&
+      implementer.toolRefs === undefined,
+    `explorer: model=${explorer.model}, tools=${(explorer.toolRefs ?? []).join(',')}; ` +
+      `implementer: model=${implementer.model}, tools=${implementer.toolRefs ? implementer.toolRefs.join(',') : 'NONE (inherits the parent turn)'}`,
+  );
+
+  record(
+    '(i) both declare the engine they were written for — dev-claude',
+    (explorer.engines ?? []).join(',') === 'dev-claude' &&
+      (implementer.engines ?? []).join(',') === 'dev-claude',
+    `explorer.engines=${(explorer.engines ?? []).join(',') || 'NONE'}; implementer.engines=${(implementer.engines ?? []).join(',') || 'NONE'}`,
+  );
+
+  // THE RETURN-FORMAT TEMPLATE MUST NOT SWALLOW THE RULES THAT FOLLOW IT.
+  // `explorer` shows its output shape inside a fenced block, and that block
+  // itself contains a fence (the `Excerpts` sample). Under CommonMark a closing
+  // fence only has to be AS LONG AS the opening one, so an inner ``` inside an
+  // outer ``` ends the outer block early — and every line after it, including
+  // "Do not return intermediate output", becomes template text the model reads as
+  // an example rather than as an instruction. Nothing throws; the prompt just
+  // quietly means something else. The outer fence is therefore four backticks,
+  // and this asserts the property rather than the character count.
+  const explorerBody = harnessAssetBody(explorer.raw);
+  const explorerFences = fenceScan(explorerBody);
+  const noticeLine = explorerBody
+    .split('\n')
+    .findIndex((l) => l.includes('Do not return intermediate output'));
+  record(
+    "(i) explorer's fences are balanced — the closing rules sit OUTSIDE the template",
+    noticeLine >= 0 && !explorerFences.openAt(noticeLine) && !explorerFences.openAtEnd,
+    `"Do not return intermediate output" at line ${noticeLine}, inside a fence=${
+      noticeLine >= 0 ? explorerFences.openAt(noticeLine) : 'LINE NOT FOUND'
+    }; fence still open at EOF=${explorerFences.openAtEnd}`,
+  );
+
+  record(
+    '(i) the bundle names exactly those two, and the always-on set is exactly it',
+    (BUILTIN_HARNESS_BUNDLES[CORE_HARNESS_BUNDLE_ID] ?? []).join(',') ===
+      `${EXPLORER},${IMPLEMENTER}` && ALWAYS_ON_HARNESS_BUNDLES.join(',') === CORE_HARNESS_BUNDLE_ID,
+    `core=[${(BUILTIN_HARNESS_BUNDLES[CORE_HARNESS_BUNDLE_ID] ?? []).join(',')}]; ` +
+      `ALWAYS_ON_HARNESS_BUNDLES=[${ALWAYS_ON_HARNESS_BUNDLES.join(',')}]`,
+  );
+
+  // THE BOOT CALL, as the shell will make it: whatever the MCP registry reports,
+  // plus the bundles that have no preset to report them. A fresh install and an
+  // existing one hit the SAME path here, because both names are new — the rows
+  // are absent, so they are created, and creation is the only moment the arrival
+  // status is decided.
+  const boot = new MemoryStore();
+  const seeded1 = seedBuiltinHarness(boot, { activeBundles: [...ALWAYS_ON_HARNESS_BUNDLES] });
+  record(
+    '(i) a boot that passes the always-on set seeds the pair ENABLED...',
+    seeded1.seeded.includes(EXPLORER) &&
+      seeded1.seeded.includes(IMPLEMENTER) &&
+      rowFor(boot, EXPLORER)?.status === 'enabled' &&
+      rowFor(boot, IMPLEMENTER)?.status === 'enabled' &&
+      boot.getSetting(builtinHarnessAutoStatusKey(EXPLORER)) === 'enabled',
+    `explorer=${rowFor(boot, EXPLORER)?.status}; implementer=${rowFor(boot, IMPLEMENTER)?.status}; ` +
+      `autoStatus(explorer)=${boot.getSetting(builtinHarnessAutoStatusKey(EXPLORER))}`,
+  );
+
+  record(
+    '(i) ...and leaves the credential bundles exactly as they were: off',
+    rowFor(boot, SKILL)?.status === 'disabled' &&
+      rowFor(boot, SUBAGENT)?.status === 'disabled' &&
+      rowFor(boot, UPLOAD)?.status === 'disabled',
+    `context=${rowFor(boot, SKILL)?.status}; researcher=${rowFor(boot, SUBAGENT)?.status}; upload=${rowFor(boot, UPLOAD)?.status}`,
+  );
+
+  // What the rows CARRY is what the engine will hand the backend.
+  const explorerRow = rowFor(boot, EXPLORER);
+  const implementerRow = rowFor(boot, IMPLEMENTER);
+  record(
+    '(i) the seeded rows carry the model, the tool list (or none) and the engine',
+    explorerRow?.subagent?.model === 'haiku' &&
+      (explorerRow.subagent.toolRefs ?? []).join(',') === 'Read,Glob,Grep' &&
+      (explorerRow.subagent.engines ?? []).join(',') === 'dev-claude' &&
+      implementerRow?.subagent?.model === 'sonnet' &&
+      implementerRow.subagent.toolRefs === undefined &&
+      (implementerRow.subagent.engines ?? []).join(',') === 'dev-claude' &&
+      // The body is the document without its frontmatter, like every built-in.
+      explorerRow.subagent.systemPrompt.trimStart().startsWith('# explorer'),
+    `explorer row: model=${explorerRow?.subagent?.model}, tools=${(explorerRow?.subagent?.toolRefs ?? []).join(',')}, engines=${(explorerRow?.subagent?.engines ?? []).join(',')}; ` +
+      `implementer row: model=${implementerRow?.subagent?.model}, tools=${implementerRow?.subagent?.toolRefs ? implementerRow.subagent.toolRefs.join(',') : 'NONE'}`,
+  );
+
+  // THE REGRESSION THE ALWAYS-ON RULE COULD CAUSE. "Always active" must describe
+  // the DEFAULT a row arrives with, not something re-asserted every boot — or the
+  // Settings toggle is a lie that lasts until the next restart.
+  boot.setHarnessEnabled(rowFor(boot, EXPLORER)!.id, false);
+  const seeded2 = seedBuiltinHarness(boot, { activeBundles: [...ALWAYS_ON_HARNESS_BUNDLES] });
+  const reactivated = applyBuiltinHarnessActivation(boot, CORE_HARNESS_BUNDLE_ID, true, {});
+  record(
+    '(i) WHAT THE USER TURNED OFF STAYS OFF — through another boot and another switch',
+    seeded2.seeded.length === 0 &&
+      reactivated.changed.length === 0 &&
+      reactivated.userOwned.includes(EXPLORER) &&
+      rowFor(boot, EXPLORER)?.status === 'disabled' &&
+      rowFor(boot, IMPLEMENTER)?.status === 'enabled',
+    `re-seeded=${seeded2.seeded.length}; userOwned=${reactivated.userOwned.join(',')}; ` +
+      `explorer=${rowFor(boot, EXPLORER)?.status}; implementer (untouched)=${rowFor(boot, IMPLEMENTER)?.status}`,
+  );
+
+  // A DELETED ONE IS DEAD. `setHarnessEnabled` on a tombstone would restore it,
+  // which on an always-on bundle would mean a built-in that cannot be removed.
+  const dead = new MemoryStore();
+  seedBuiltinHarness(dead, { activeBundles: [...ALWAYS_ON_HARNESS_BUNDLES] });
+  dead.setHarnessStatus(rowFor(dead, IMPLEMENTER)!.id, 'removed');
+  const reseed = seedBuiltinHarness(dead, { activeBundles: [...ALWAYS_ON_HARNESS_BUNDLES] });
+  const reswitch = applyBuiltinHarnessActivation(dead, CORE_HARNESS_BUNDLE_ID, true, {});
+  record(
+    '(i) a deleted core subagent is not resurrected by the always-on seed or switch',
+    reseed.seeded.length === 0 &&
+      reswitch.changed.length === 0 &&
+      reswitch.userOwned.includes(IMPLEMENTER) &&
+      rowFor(dead, IMPLEMENTER)?.status === 'removed',
+    `re-seeded=${reseed.seeded.length}; userOwned=${reswitch.userOwned.join(',')}; status=${rowFor(dead, IMPLEMENTER)?.status}`,
+  );
+
+  // The other direction: a plain seed (no always-on argument) arrives disabled and
+  // the switch can still turn the pair on later, exactly like a credential bundle.
+  const plain = new MemoryStore();
+  seedBuiltinHarness(plain);
+  const on = applyBuiltinHarnessActivation(plain, CORE_HARNESS_BUNDLE_ID, true, {});
+  record(
+    '(i) without the always-on argument the pair seeds OFF and the switch still works',
+    on.changed.length === 2 &&
+      rowFor(plain, EXPLORER)?.status === 'enabled' &&
+      rowFor(plain, IMPLEMENTER)?.status === 'enabled',
+    `changed=${on.changed.join(',')}`,
+  );
+
+  // THE ROSTER FILTER. `Read`/`Glob`/`Grep` are the Agent SDK's own tools and
+  // `haiku` is an Anthropic alias, so on any other engine this pair is a subagent
+  // with no tools asking for a model its provider does not know.
+  record(
+    '(i) the pair is offered on dev-claude and withheld everywhere else',
+    subagentAllowedForEngine(explorerRow?.subagent, 'dev-claude') &&
+      subagentAllowedForEngine(implementerRow?.subagent, 'dev-claude') &&
+      !subagentAllowedForEngine(explorerRow?.subagent, 'ai-sdk') &&
+      !subagentAllowedForEngine(explorerRow?.subagent, undefined),
+    `dev-claude=${subagentAllowedForEngine(explorerRow?.subagent, 'dev-claude')}; ` +
+      `ai-sdk=${subagentAllowedForEngine(explorerRow?.subagent, 'ai-sdk')}; ` +
+      `unknown engine=${subagentAllowedForEngine(explorerRow?.subagent, undefined)}`,
+  );
+
+  record(
+    '(i) ...while a subagent that declares no engines still runs on all of them',
+    subagentAllowedForEngine(rowFor(boot, SUBAGENT)?.subagent, 'ai-sdk') &&
+      subagentAllowedForEngine({ engines: [] }, 'ai-sdk') &&
+      subagentAllowedForEngine(undefined, 'ai-sdk'),
+    `confluence-researcher on ai-sdk=${subagentAllowedForEngine(rowFor(boot, SUBAGENT)?.subagent, 'ai-sdk')} ` +
+      `(engines=${(rowFor(boot, SUBAGENT)?.subagent?.engines ?? []).join(',') || 'NONE'})`,
+  );
+
+  // AND IT SURVIVES THE DATABASE. The harness payload is one JSON column, so a new
+  // field needs no migration — but "needs no migration" is a claim, and the filter
+  // reads the ROW, so a field that did not round-trip would silently make the pair
+  // available on every engine.
+  const dir = mkdtempSync(join(tmpdir(), 'naby-spike-harness-seed-'));
+  try {
+    const sqlite = new SqliteStore({ path: join(dir, 'app.db') });
+    seedBuiltinHarness(sqlite, { activeBundles: [...ALWAYS_ON_HARNESS_BUNDLES] });
+    const reopened = new SqliteStore({ path: join(dir, 'app.db') });
+    const row = reopened
+      .listHarness('user', DEFAULT_USER_ID, { kind: 'subagent' })
+      .find((r) => r.name === EXPLORER);
+    record(
+      '(i) model, tools and engines round-trip through the sqlite payload column',
+      row?.status === 'enabled' &&
+        row.subagent?.model === 'haiku' &&
+        (row.subagent.toolRefs ?? []).join(',') === 'Read,Glob,Grep' &&
+        (row.subagent.engines ?? []).join(',') === 'dev-claude' &&
+        subagentAllowedForEngine(row.subagent, 'dev-claude'),
+      `reopened row: status=${row?.status}, model=${row?.subagent?.model}, ` +
+        `tools=${(row?.subagent?.toolRefs ?? []).join(',')}, engines=${(row?.subagent?.engines ?? []).join(',') || 'LOST'}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function checkEngineSource(): void {
   const src = readFileSync(resolve(ROOT, 'src/engines/claude-agent-sdk-engine.ts'), 'utf8');
   record(
@@ -810,6 +1060,7 @@ function main(): boolean {
   checkTriggerGating();
   checkUploadTriggersAndBudget();
   checkToolRefSpellings();
+  checkCoreBundle();
   checkEngineSource();
 
   console.log('\n=== SPIKE-HARNESS-SEED — the built-in Confluence bundles and their switches ===\n');

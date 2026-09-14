@@ -109,7 +109,7 @@ const RULES: ReadonlyArray<{ test: (id: string) => boolean; window: number }> = 
   // Anthropic, direct or through Bedrock (`anthropic.claude-…`) — 200k.
   { test: (id) => id.includes('claude'), window: CLAUDE_CONTEXT_WINDOW },
   // The Agent SDK aliases, which name no generation at all.
-  { test: (id) => id === 'opus' || id === 'sonnet' || id === 'haiku' || id === 'fable', window: CLAUDE_CONTEXT_WINDOW },
+  { test: (id) => isClaudeAlias(id), window: CLAUDE_CONTEXT_WINDOW },
   // Gemini 1.5/2.x — 1,048,576 input tokens.
   { test: (id) => id.startsWith('gemini'), window: 1_048_576 },
   // GPT-4.1 — 1,047,576 input tokens. Checked BEFORE the gpt-4o rule so
@@ -125,16 +125,31 @@ const RULES: ReadonlyArray<{ test: (id: string) => boolean; window: number }> = 
   { test: (id) => /^o[1-9](-|$)/.test(id), window: 200_000 },
 ];
 
+/**
+ * A tier marker appended to an ALIAS, as the live catalog writes it: `opus[1m]`.
+ *
+ * The catalog's own values are `default` · `opus[1m]` · `claude-fable-5-1[1m]` ·
+ * `sonnet` · `haiku` (specs/model-auto-routing.md §3), so the bracketed form is
+ * not hypothetical — it is the value this app passes to the SDK for the 1M tier.
+ */
+const ALIAS_TIER_SUFFIX = /\[[^\]]*\]$/;
+
+/** The Agent SDK aliases, with or without a tier suffix. */
+function isClaudeAlias(id: string): boolean {
+  const bare = id.replace(ALIAS_TIER_SUFFIX, '');
+  return bare === 'opus' || bare === 'sonnet' || bare === 'haiku' || bare === 'fable';
+}
+
 /** Whether an id names the Claude family — the only family with two window
- *  tiers, so the only one that has to be recognised before the 1M check. */
+ *  tiers, so the only one that has to be recognised before the 1M check.
+ *
+ *  THE ALIAS COMPARISON IGNORES A TIER SUFFIX, and that is load-bearing rather
+ *  than tidy: `opus[1m]` matched neither `includes('claude')` nor the exact
+ *  alias, so it reached no rule at all and this function answered `undefined`
+ *  for the one value the catalog uses to name a 1M window. The `[1m]` marker was
+ *  already understood (ONE_M_MARKER below) — the id simply never got that far. */
 function isClaudeId(id: string): boolean {
-  return (
-    id.includes('claude') ||
-    id === 'opus' ||
-    id === 'sonnet' ||
-    id === 'haiku' ||
-    id === 'fable'
-  );
+  return id.includes('claude') || isClaudeAlias(id);
 }
 
 /**

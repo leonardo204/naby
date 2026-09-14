@@ -770,6 +770,23 @@ export type HarnessItem = {
     systemPrompt: string;
     model?: string;
     toolRefs?: string[];
+    /**
+     * WHICH ENGINES THIS SUBAGENT IS FOR, by `EngineSpec.id`. Absent or empty
+     * means EVERY engine, which is what every subagent written before the `core`
+     * bundle means and what an imported one means.
+     *
+     * It exists because "runs everywhere" is not always true and fails quietly
+     * when it is not: `explorer` narrows itself to the Agent SDK's own
+     * `Read`/`Glob`/`Grep` and pins `haiku`, so on the AI-SDK path it would be a
+     * subagent with NO tools (those names match nothing in naby's toolset) asking
+     * for a model name its provider has never heard of. The roster filter
+     * (`subagentAllowedForEngine`) leaves it out there instead of offering a
+     * delegation that can only disappoint.
+     *
+     * Stored inside the harness payload JSON, so it round-trips with no schema
+     * change (sqlite-store keeps command/skill/subagent as one JSON column).
+     */
+    engines?: string[];
   };
 };
 

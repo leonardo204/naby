@@ -35,15 +35,28 @@ const SOURCES = [
   { kind: 'skill', path: 'src/runtime/harness-assets/skills/confluence-context/SKILL.md' },
   { kind: 'subagent', path: 'src/runtime/harness-assets/agents/confluence-researcher.md' },
   { kind: 'skill', path: 'src/runtime/harness-assets/skills/confluence-upload/SKILL.md' },
+  // The `core` bundle (specs/subagent-delegation.md §4.1): the two cheap
+  // subagents that exist to keep the MAIN transcript small. `explorer` pins
+  // haiku and `implementer` pins sonnet, because a specific model IS the reason
+  // each of them exists — every other built-in leaves `model` blank on purpose
+  // (§2 principle 1). `implementer` also declares NO `tools`, so it inherits the
+  // parent turn's toolset and cannot drift out of step with the gate.
+  { kind: 'subagent', path: 'src/runtime/harness-assets/agents/explorer.md' },
+  { kind: 'subagent', path: 'src/runtime/harness-assets/agents/implementer.md' },
 ];
 
 /**
  * Split a Claude-format artifact into frontmatter fields and body.
  *
- * Deliberately line-based rather than a YAML dependency: these two documents use
- * exactly five scalar keys (name, description, model, tools, triggers), and a
- * generator that needed js-yaml would put a build dependency in the parent tree for
- * two files whose shape we control.
+ * Deliberately line-based rather than a YAML dependency: every one of these
+ * documents uses six scalar keys at most (name, description, model, tools,
+ * triggers, engines), and a generator that needed js-yaml would put a build
+ * dependency in the parent tree for a handful of files whose shape we control.
+ *
+ * BEING LINE-BASED IS A CONSTRAINT ON THE ARTIFACTS: a value must fit on ONE line
+ * (a quoted `description` may be long, but it may not wrap), and an absent key is
+ * absent — `implementer.md` omits `tools` rather than writing an empty list,
+ * which is what makes it inherit the parent's toolset.
  */
 function parseArtifact(raw) {
   const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
@@ -91,6 +104,7 @@ function buildAssets() {
       ...(fields.model ? { model: fields.model } : {}),
       ...(csvList(fields.tools) ? { toolRefs: csvList(fields.tools) } : {}),
       ...(csvList(fields.triggers) ? { triggers: csvList(fields.triggers) } : {}),
+      ...(csvList(fields.engines) ? { engines: csvList(fields.engines) } : {}),
       sourcePath: src.path,
       raw,
     };
@@ -102,7 +116,7 @@ const HEADER = `// src/runtime/harness-assets/generated.ts
 // GENERATED — DO NOT EDIT. Run \`node scripts/gen-builtin-harness.mjs\` after
 // changing anything under src/runtime/harness-assets/**.md.
 //
-// The two built-in harness artifacts, compiled into the runtime bundle so seeding
+// The built-in harness artifacts, compiled into the runtime bundle so seeding
 // them needs no path resolution and no filesystem (see the generator's header, and
 // specs/packaging-path-resolution.md for why a runtime read would be a trap).
 //
@@ -125,6 +139,17 @@ export type BuiltinHarnessAsset = {
    *  which for a long document is a per-turn tax on the skill budget, so a heavy
    *  built-in declares its triggers. */
   triggers?: readonly string[];
+  /** The frontmatter \`engines\` — the engine ids this artifact is FOR, by
+   *  \`EngineSpec.id\` (\`dev-claude\`, …). Absent/empty means EVERY engine, which
+   *  is what every artifact before \`core\` says.
+   *
+   *  It exists because a subagent can be engine-specific in a way that fails
+   *  quietly: \`explorer\` names the Agent SDK's OWN \`Read\`/\`Glob\`/\`Grep\`, which
+   *  match nothing in naby's toolset, and it pins \`haiku\`, which is an Anthropic
+   *  alias. On the AI-SDK path that pair is a subagent with no tools and a model
+   *  name its provider does not know. Declaring the engine lets the roster leave
+   *  it out there instead (see \`subagentAllowedForEngine\`). */
+  engines?: readonly string[];
   /** Repo-relative path of the artifact this was generated from. */
   sourcePath: string;
   /** The whole document, verbatim. */

@@ -1,13 +1,14 @@
 ---
 id: naby-activity-log
 type: design
-version: 0.1.0
+version: 0.1.1
 status: active
 scope: 활동 로그 — 요청·응답·판단·트랜잭션을 파일로 남기고 30일 뒤 스스로 지운다
 related:
   - phase-3-persona-agent
   - telegram-chat
-updated: 2026-08-06
+  - subagent-delegation
+updated: 2026-09-14
 ---
 
 # 활동 로그
@@ -56,7 +57,7 @@ updated: 2026-08-06
 
 | 지점 | 남기는 것 |
 |---|---|
-| `runtime/session.ts` `runTurn` | `turn_started` / `turn_completed` / `turn_failed`, `user_message`(전문), `assistant_text`(전문), `thinking`, `tool_call`(인자), `tool_result`(출력), `gate_decision`(허용·거절 둘 다), `memory_injected`, `usage` |
+| `runtime/session.ts` `runTurn` | `turn_started` / `turn_completed` / `turn_failed`, `user_message`(전문), `assistant_text`(전문), `thinking`, `tool_call`(인자), `tool_result`(출력), `gate_decision`(허용·거절 둘 다), `memory_injected`, `usage`, `subagent_model`(서브에이전트가 실제로 답한 모델 id. 위임 호출 id마다 한 번. dev-claude 엔진에서만 나고, ai-sdk의 중첩 위임은 자식 세션의 `turn_*`·`usage`로 남는다. *v0.1.1*, [subagent-delegation](subagent-delegation.md) §4.3) |
 | `store/sqlite-store.ts` | `memory_write`(거절 포함) · `memory_confirmed` · `memory_updated`(이전 값까지) · `memory_superseded` · `memory_deleted`, `harness_change`(가져오기·활성·상태·제거), `setting_change`, `ledger_event`(체크인·자율 행동·트립와이어 전부) |
 
 `runTurn`이 본체인 이유는 하나다. 모든 턴이 여기를 지난다. 엔진 둘, 앱, 텔레그램, 예약 작업, 스파이크 전부가. 엔진 안에 로깅을 넣으면 한쪽 엔진에만 있는 이벤트가 생기는 순간 두 벌이 갈라진다.

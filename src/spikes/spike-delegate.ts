@@ -24,6 +24,15 @@
 //   (e) `naby_delegate` is never offered inside a nested turn — without this the
 //       nested run inherits the parent's executor (depth 0) and recurses forever.
 //   (f) An unknown subagent name is a tool error that names the real ones.
+//   (g) THE DELEGATION POLICY RIDES IN THE TOOL DESCRIPTION, and only when it is
+//       true (subagent-delegation §4.2). On every engine but dev-claude this
+//       description is the only place a model is told when to delegate, so the
+//       shared policy string is appended here — but a policy naming a subagent the
+//       turn does not have invites a delegation that can only fail, and a policy
+//       telling the model to hand code changes to `implementer` on a read-only
+//       turn invites a refusal. So: explorer's half appears when explorer is in
+//       the roster, implementer's half only when it is in the roster AND the turn
+//       permits changes, and a roster of neither gets no policy at all.
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
@@ -47,7 +56,16 @@ import type {
   RunCtx,
   RunEvent,
 } from '../../shell/packages/feature/agent/src/server/engines/types.js';
-import { DEFAULT_USER_ID, DELEGATE_TOOL_NAME, type ModelResolver } from '../runtime-entry.js';
+import {
+  DEFAULT_USER_ID,
+  DELEGATE_TOOL_NAME,
+  DELEGATION_POLICY,
+  delegateSchema,
+  EXPLORER_SUBAGENT,
+  IMPLEMENTER_SUBAGENT,
+  type ModelResolver,
+  type SubagentSpec,
+} from '../runtime-entry.js';
 
 type Check = { name: string; pass: boolean; evidence: string };
 const checks: Check[] = [];
@@ -185,7 +203,84 @@ function toolResults(events: RunEvent[]): string[] {
   return out;
 }
 
+/** A roster entry, as `gatherSubagents` would hand one over. Only the name is
+ *  load-bearing for the policy; the rest is what a real spec carries. */
+function spec(name: string): SubagentSpec {
+  return { name, description: `the ${name}`, systemPrompt: `You are the ${name}.` };
+}
+
+/** (g) The policy conditions, asserted against `delegateSchema` DIRECTLY rather
+ *  than through a mock turn: the rosters that matter are the ones production will
+ *  not produce until M2 wires the filter, and the description is the artifact
+ *  under test. */
+function checkDelegationPolicy(): void {
+  const both = delegateSchema([spec(EXPLORER_SUBAGENT), spec(IMPLEMENTER_SUBAGENT)], {
+    canMutate: true,
+  }).description;
+  record(
+    '(g) both built-ins present on a turn that may change things -> the whole policy',
+    both.includes(DELEGATION_POLICY) &&
+      both.includes(`"${EXPLORER_SUBAGENT}"`) &&
+      both.includes(`"${IMPLEMENTER_SUBAGENT}"`),
+    `description ends: ${JSON.stringify(both.slice(-120))}`,
+  );
+
+  const readOnly = delegateSchema([spec(EXPLORER_SUBAGENT), spec(IMPLEMENTER_SUBAGENT)], {
+    canMutate: false,
+  }).description;
+  record(
+    '(g) the SAME roster on a read-only turn keeps explorer and drops implementer',
+    readOnly.includes('Delegation policy:') &&
+      readOnly.includes(`goes to "${EXPLORER_SUBAGENT}"`) &&
+      !readOnly.includes(`goes to "${IMPLEMENTER_SUBAGENT}"`),
+    `mentions explorer=${readOnly.includes(`goes to "${EXPLORER_SUBAGENT}"`)}; ` +
+      `mentions implementer=${readOnly.includes(`goes to "${IMPLEMENTER_SUBAGENT}"`)}`,
+  );
+
+  const explorerOnly = delegateSchema([spec(EXPLORER_SUBAGENT), spec('reviewer')], {
+    canMutate: true,
+  }).description;
+  record(
+    '(g) a roster with explorer alone names explorer alone',
+    explorerOnly.includes(`goes to "${EXPLORER_SUBAGENT}"`) &&
+      !explorerOnly.includes(IMPLEMENTER_SUBAGENT),
+    `implementer named anywhere=${explorerOnly.includes(IMPLEMENTER_SUBAGENT)}`,
+  );
+
+  const implementerOnly = delegateSchema([spec(IMPLEMENTER_SUBAGENT)], {
+    canMutate: true,
+  }).description;
+  record(
+    '(g) ...and a roster with implementer alone names implementer alone',
+    implementerOnly.includes(`goes to "${IMPLEMENTER_SUBAGENT}"`) &&
+      !implementerOnly.includes(EXPLORER_SUBAGENT),
+    `explorer named anywhere=${implementerOnly.includes(EXPLORER_SUBAGENT)}`,
+  );
+
+  const none = delegateSchema([spec('reviewer'), spec('narrow')], { canMutate: true }).description;
+  const noneReadOnly = delegateSchema([spec(IMPLEMENTER_SUBAGENT)], {
+    canMutate: false,
+  }).description;
+  const defaulted = delegateSchema([spec(IMPLEMENTER_SUBAGENT)]).description;
+  record(
+    '(g) no built-in in the roster -> NO policy at all, and the old description is intact',
+    !none.includes('Delegation policy:') &&
+      none.includes('Hand a self-contained piece of work') &&
+      none.includes('"reviewer"') &&
+      // An implementer-only roster on a read-only turn has nothing left to say…
+      !noneReadOnly.includes('Delegation policy:') &&
+      // …and a caller that has not been taught about mutation gets that same
+      // conservative answer rather than an instruction the turn may not follow.
+      !defaulted.includes('Delegation policy:'),
+    `no-builtin roster carries policy=${none.includes('Delegation policy:')}; ` +
+      `implementer on a read-only turn=${noneReadOnly.includes('Delegation policy:')}; ` +
+      `no canMutate argument=${defaulted.includes('Delegation policy:')}`,
+  );
+}
+
 async function main(): Promise<void> {
+  checkDelegationPolicy();
+
   // ==== (a) absent with no subagents ======================================
   {
     const { h } = await runOnce('just answer me', [text('hello')]);

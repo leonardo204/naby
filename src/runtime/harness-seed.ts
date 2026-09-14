@@ -3,7 +3,15 @@
 // THE BUILT-IN HARNESS — the artifacts that ship WITH naby, and the switches that
 // turn them on (skill-hub-builtin §2.7).
 //
-// WHAT SHIPS, IN TWO BUNDLES.
+// WHAT SHIPS, IN THREE BUNDLES.
+//
+//   `core`: `explorer` (subagent, haiku) and `implementer` (subagent, sonnet) —
+//   the two cheap delegates that exist to keep the MAIN transcript small
+//   (specs/subagent-delegation.md §4.1). They hang off NO credential, so unlike
+//   the two bundles below their switch is not a token: the shell adds `core` to
+//   `activeBundles` UNCONDITIONALLY at every boot, which is what "always active"
+//   means here. See CORE_HARNESS_BUNDLE_ID below for why that is still compatible
+//   with the write-once seed rule and with user ownership.
 //
 //   `cic`: `confluence-context` (skill) decides whether a question needs the
 //   company wiki, and hands the actual research to `confluence-researcher`
@@ -89,19 +97,110 @@ export const CIC_HARNESS_BUNDLE_ID = 'cic';
 export const ATLASSIAN_HARNESS_BUNDLE_ID = 'atlassian';
 
 /**
+ * The bundle that is MEANT TO BE ALWAYS ACTIVE — `explorer` and `implementer`
+ * (specs/subagent-delegation.md §4.1).
+ *
+ * WHY IT NEEDS NO CREDENTIAL, AND WHAT SWITCHES IT INSTEAD. The other two bundles
+ * are inert without a server: a Confluence skill with no cic token is a confident
+ * apology. These two need nothing but the turn's own tools, so there is no
+ * credential to wait for and no honest moment to turn them on later. The shell
+ * therefore puts this id in `activeBundles` at EVERY boot, unconditionally — the
+ * same argument the atlassian case uses for a preset that was saved long ago,
+ * applied to a bundle whose precondition is simply "naby is running".
+ *
+ * WHAT DOES NOT CHANGE, and must not:
+ *
+ *   * THE WRITE-ONCE SEED RULE. `seedBuiltinHarness` still seeds only what is
+ *     ABSENT. `activeBundles` decides the ARRIVAL STATUS of a row being created,
+ *     never the status of a row that already exists — so "always active" cannot
+ *     become "re-enabled on every boot". The two names are new (§2 principle 6),
+ *     so on an existing install the rows are absent and arrive enabled; on the
+ *     next boot they are present and nothing is written at all.
+ *   * USER OWNERSHIP. A row seeded 'enabled' records 'enabled' as its automatic
+ *     status, so a user who turns `explorer` off in Settings breaks that equality
+ *     and owns the row from then on: `applyBuiltinHarnessActivation` reports it
+ *     `userOwned` forever after, and the unconditional boot-time `activeBundles`
+ *     never reaches it because the row is not absent. Turning it off keeps it off
+ *     (§7), by exactly the mechanism the credential bundles already use.
+ */
+export const CORE_HARNESS_BUNDLE_ID = 'core';
+
+/**
+ * The bundles that have NO System MCP preset behind them and are therefore always
+ * active — today, exactly `core`.
+ *
+ * WHY A LIST AND NOT AN ASSUMPTION. The seed and the switch are both driven by
+ * "which bundles are configured", and that question is answered by the shell's
+ * `configuredHarnessBundles`, which walks the MCP registry. A bundle with no
+ * preset is invisible to that walk, so it would answer "not configured" forever
+ * and the rows would arrive disabled with nothing left to turn them on. Naming
+ * the always-on set HERE, next to the table it indexes, means the call site is
+ * one spread rather than a special case:
+ *
+ *     seedBuiltinHarness(store, {
+ *       activeBundles: [...configuredHarnessBundles(store), ...ALWAYS_ON_HARNESS_BUNDLES],
+ *     });
+ *
+ * and each id in that spread is one `applyBuiltinHarnessActivation(store, id,
+ * true)` — that function switches ONE bundle per call.
+ * NOTHING ELSE CHANGES: a row is still seeded once and only when absent, a
+ * transition still writes only while the row matches the automatic status we last
+ * recorded, and a row the user moved (or deleted) is theirs forever. "Always on"
+ * describes the DEFAULT this bundle arrives with, not a value re-asserted on
+ * every boot.
+ */
+export const ALWAYS_ON_HARNESS_BUNDLES: readonly string[] = [CORE_HARNESS_BUNDLE_ID];
+
+/**
+ * May this subagent run on this engine? (specs/subagent-delegation.md §4.1.)
+ *
+ * The rule is permissive by default: a subagent that declares NO engines (every
+ * one written before the `core` bundle, and every imported one) runs on all of
+ * them, so this filter can be applied unconditionally at the roster call site
+ * without changing what any existing install sees.
+ *
+ * `explorer` and `implementer` declare `dev-claude` because they are written
+ * against the Agent SDK's own tools and Anthropic's model aliases. Offering them
+ * on another provider would not fail loudly — it would produce a subagent with an
+ * empty toolset, or a model name the provider rejects — which is the failure mode
+ * this exists to prevent.
+ *
+ * Takes the PAYLOAD, not a row, so the shell can call it on whatever shape it has
+ * to hand (a `HarnessItem.subagent`, an asset, a `SubagentSpec` that grew the
+ * field) and a spike can call it on an object literal.
+ *
+ * AN UNKNOWN ENGINE FAILS CLOSED for a subagent that named one: "I do not know
+ * which engine this is" is not evidence that a dev-claude-only agent will work
+ * here. An undeclared subagent is unaffected — it was always allowed anyway.
+ */
+export function subagentAllowedForEngine(
+  subagent: { engines?: readonly string[] } | undefined,
+  engineId: string | undefined,
+): boolean {
+  const engines = subagent?.engines;
+  if (!engines || engines.length === 0) return true;
+  if (!engineId) return false;
+  // Both sides are compared AS THEY ARE: the generator's `csvList` already trims
+  // every entry, so trimming one side here would only hide a padded engine id
+  // arriving from somewhere that does not.
+  return engines.some((e) => e === engineId);
+}
+
+/**
  * Which built-in items each bundle owns.
  *
  * Declared here rather than in the artifact frontmatter because it is not a fact
  * about the document — it is a fact about which SERVER makes the document useful,
  * and that pairing belongs next to the activation rule it drives.
  *
- * A bundle is a SET OF NAMES, and the two bundles are disjoint. Nothing here
+ * A bundle is a SET OF NAMES, and the bundles are disjoint. Nothing here
  * assumes a name belongs to at most one bundle, but `bundleOwning` (below) does
  * take the first match, so keep them disjoint.
  */
 export const BUILTIN_HARNESS_BUNDLES: Readonly<Record<string, readonly string[]>> = {
   [CIC_HARNESS_BUNDLE_ID]: ['confluence-context', 'confluence-researcher'],
   [ATLASSIAN_HARNESS_BUNDLE_ID]: ['confluence-upload'],
+  [CORE_HARNESS_BUNDLE_ID]: ['explorer', 'implementer'],
 };
 
 /** The bundle that owns an item, if any. The inverse of the table above, computed
@@ -255,6 +354,9 @@ export function seedBuiltinHarness(
     // no triggers is ALWAYS-ON (skill-inject.ts), and always-on here would spend
     // most of the skill budget on every turn (skill-hub-builtin §2.7).
     const triggers = asset.triggers ? [...asset.triggers] : undefined;
+    // Absent = every engine, which is what every artifact but the `core` pair
+    // says (see `subagentAllowedForEngine`).
+    const engines = asset.engines ? [...asset.engines] : undefined;
     store.putHarnessItem({
       item: {
         scope: 'user',
@@ -285,6 +387,11 @@ export function seedBuiltinHarness(
                 systemPrompt: body,
                 ...(asset.model ? { model: asset.model } : {}),
                 ...(toolRefs ? { toolRefs } : {}),
+                // The frontmatter `engines`, carried into the row so the roster
+                // filter reads the STORED item and never has to go back to the
+                // asset — the user may edit the row, and a filter that consulted
+                // the shipped document would then answer about a different agent.
+                ...(engines ? { engines } : {}),
               },
             }),
       },
