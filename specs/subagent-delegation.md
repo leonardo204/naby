@@ -1,7 +1,7 @@
 ---
 id: subagent-delegation
 type: design
-version: 0.1.0
+version: 0.1.1
 status: draft
 scope: 값싼 내장 서브에이전트(탐색 haiku·구현 sonnet)와 위임 정책으로 메인 대화 기록을 작게 유지하는 것, 서브에이전트가 실제로 쓴 모델을 보이게 하는 것, 엔진 동작을 바꾸는 환경변수를 드러내는 것
 related:
@@ -13,7 +13,7 @@ related:
   - claude-multi-account
   - phase-3-persona-agent
   - settings-ia-reorg
-updated: 2026-09-14
+updated: 2026-09-16
 ---
 
 # 서브에이전트 위임과 모델 관측
@@ -79,6 +79,8 @@ updated: 2026-09-14
 `delegationPolicyFor(names, { canMutate })`가 문장을 만든다. explorer 문장은 `explorer`가 목록에 있을 때, implementer 문장은 `implementer`가 있고 그 턴이 변경을 허용할 때만 들어간다.
 
 문장의 뜻은 이렇다. 여러 파일을 읽거나 찾아야 하거나 도구 출력이 길어질 일은 `explorer`에 맡기고 그 요약으로 일한다. 완전히 명세된 자족적 코드 변경은 `implementer`에 맡긴다. 파일 한두 개를 읽거나 짧게 답할 일은 직접 한다. 서브에이전트는 이 대화를 보지 못하므로 과제에 경로·제약·완료 조건을 다 적는다.
+
+v0.1.1에서 문장 하나가 더 붙었다. 서브에이전트는 이 대화보다 작은 모델로 돌므로, 한 번에 좁고 기계적인 과제 하나만 주고 판단은 맡기지 않으며, 무엇을 어떤 형식으로 돌려줄지 적어 주고, 돌아온 보고는 인용된 경로와 행을 열어 확인한 뒤에 쓴다. [model-auto-routing](model-auto-routing.md) 원칙 8이 haiku를 메인 대화에서 뺀 날의 관찰이 근거다. haiku는 말투와 맥락을 지켜야 하는 자리에서는 무너지지만, 지시가 다 적힌 좁은 과제를 정해진 형식으로 돌려주는 자리에서는 값을 한다. 그 자리가 서브에이전트다. 이 문장은 메인 모델이 그 조건을 지키게 한다.
 
 정책은 권고이지 강제가 아니다. 모델이 위임하지 않아도 턴은 실패하지 않는다.
 

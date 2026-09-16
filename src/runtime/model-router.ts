@@ -28,9 +28,49 @@
 //     task and returns a worse answer, confidently, and nobody can tell from the
 //     outside that a routing decision caused it. The failure is SILENT.
 //
-// So every rule here is written with that asymmetry in mind. `haiku` needs all
-// of its conditions to hold at once (short, no code, no path, no URL, no verb);
-// any single hint of work goes up. An ambiguous turn is `sonnet`, never `haiku`.
+// So every rule here is written with that asymmetry in mind, and since
+// 2026-09-16 the asymmetry has a floor: THE MAIN TURN NEVER RUNS BELOW SONNET
+// (see `MAIN_TURN_TIERS`). An ambiguous turn is `sonnet`, and nothing routes
+// below sonnet. What the `quiet` clause still decides is the REASON — `chat` for
+// a short, code-free, verb-free turn against `default` for everything else — so
+// the chip can keep saying why sonnet answered.
+//
+// LENGTH IS A CEILING, NEVER A CRITERION (§4.2 rule 1, `deep-ask`; added the same
+// day, after the same session). A SHORT turn can need the most expensive kind of
+// thinking there is: "왜 이렇게 동작해?" is ten characters and the answer takes
+// reading the code until the cause is found; "effectiveAgentModel 어디서 써?" is
+// a search across two trees. Reading those as small talk because they are short
+// is exactly the silent failure above. So what a turn ASKS decides the tier, and
+// the 200-character limit only ever holds a turn DOWN to `chat` — it can no
+// longer be the reason a turn is quiet. `DEEP_KEYWORDS` and `IDENTIFIER_RE` are
+// the two signals that route up.
+//
+// ONE RULE ROUTES DOWN, AND IT IS KEYED ON THE SHAPE OF THE DELIVERABLE
+// (`routine`, added 2026-09-16 after the same user read the routing log a third
+// time). Everything above leans up; `ROUTINE_KEYWORDS` is the single content rule
+// that moves a turn to sonnet on purpose. What it recognises is not a subject but
+// a DELIVERABLE: a script, a batch or bulk operation over many items, a list, a
+// survey, a summary, a rename, a translation. Those are finished work that a
+// weaker model produces as well as a stronger one, and today they route to opus
+// by accident — "스크립트 하나 만들어줘" and "build a batch script" carry a build
+// verb, and "조사해줘" used to carry a deep word. That is the distinction between
+// the two lists: `deep` is about WHAT IS ASKED (a cause, a comparison, a trace),
+// `routine` about WHAT COMES BACK.
+//
+// IT LOSES TO EVERY STRONGER SIGNAL, which is what keeps a down-routing rule
+// safe: plan mode, a design ask, a pasted code fence, a long brief and a deep
+// question all beat it, so "스크립트 왜 실패해?" is still a diagnosis on opus and
+// "스크립트 설계 검토해줘" is still a design turn on fable. It beats only the two
+// signals that are weaker evidence than it is — the build verbs (a script request
+// usually says `만들어` or `build`) and the two-path count (a rename names the
+// files it renames) — plus full mode.
+//
+// THE COST IS ACCEPTED, NOT MINIMISED (§2 principle 3). "문제 없어", "설명 고마워"
+// and "어떻게 지내" carry those words and will go to opus. They are greetings, the
+// routing is wrong, and it is wrong in the direction that only costs part of a
+// window. Trimming the lists to catch them would cost the turns the lists exist
+// for — "오답을 줄이려고 목록을 키우지 않는다" cuts both ways, and the rule is the
+// spec's: 애매하면 위로, 그리고 목록은 다듬지 않는다.
 //
 // THE TWO RULES THAT OVERRIDE THE TURN'S OWN CHARACTER work in opposite
 // directions and are not symmetric either:
@@ -42,9 +82,10 @@
 //     is not. That is not a cost decision — a model whose window cannot hold the
 //     conversation is not a cheaper answer, it is a failed turn (§2 principle 4).
 //     An UNKNOWN window is therefore never treated as known to fit.
-//   * `budget-cap` is the only rule that lowers to SAVE something, so it is the
-//     only rule another rule may veto: it stands down whenever sonnet is not
-//     known to hold the turn.
+//   * `budget-cap` is the only one of the two that lowers to SAVE something, so
+//     it is the only rule another rule may veto: it stands down whenever sonnet
+//     is not known to hold the turn. (`routine` also lowers, but it is a reading
+//     of the turn itself rather than of the budget, and it belongs to rule 1.)
 //
 // The shell owns everything around this: reading the usage cache and the
 // catalog, calling `contextWindowFor`, putting `model_route` on the init event
@@ -58,9 +99,14 @@ import type { GrowthStage } from './growth.js';
 // The contract (§4.2)
 // ---------------------------------------------------------------------------
 
-/** The four tiers `auto` can choose between. NOT model ids — a tier becomes a
- *  concrete catalog value through `pickCatalogValue`, because which id serves a
- *  tier depends on the live catalog and the router must not know it. */
+/** The four tiers the app knows. NOT model ids — a tier becomes a concrete
+ *  catalog value through `pickCatalogValue`, because which id serves a tier
+ *  depends on the live catalog and the router must not know it.
+ *
+ *  `auto` picks the MAIN TURN's model from `MAIN_TURN_TIERS`, which is these
+ *  minus `haiku`; haiku stays a tier here because subagents run on it, receipts
+ *  are read back through `tierOfModelId`, and the chip labels it when the user
+ *  pins it by hand. */
 export type ModelTier = 'haiku' | 'sonnet' | 'opus' | 'fable';
 
 /**
@@ -75,6 +121,8 @@ export type RouteReason =
   | 'plan-mode'
   | 'design-ask'
   | 'build-ask'
+  | 'deep-ask'
+  | 'routine'
   | 'full-mode'
   | 'chat'
   | 'default'
@@ -132,9 +180,11 @@ export type RouteDecision = { tier: ModelTier; reason: RouteReason };
 /**
  * Longest a turn may be and still be read as small talk (§4.2 rule 1, `chat`).
  *
- * 200 characters is roughly two Korean sentences. It is deliberately low: this
- * is the ONLY threshold that can send a turn DOWN to the weakest model, and
- * being wrong here is the silent failure this file's header is about.
+ * 200 characters is roughly two Korean sentences. It used to be the threshold
+ * that sent a turn down to the weakest model; since the main turn's floor is
+ * sonnet it only picks the REASON (`chat` rather than `default`), which is what
+ * the chip shows. Left low anyway: a reason that is wrong is a label nobody can
+ * trust, and the number is the spec's (§4.2).
  */
 export const CHAT_MAX_CHARS = 200;
 
@@ -257,6 +307,177 @@ export const BUILD_KEYWORDS: readonly string[] = [
   'testing',
 ];
 
+/**
+ * Words that make a turn a DEEP turn → opus, however short it is (§4.2 rule 1,
+ * `deep-ask`).
+ *
+ * WHAT THEY HAVE IN COMMON is not difficulty but SHAPE: every one of them asks
+ * for a cause, a comparison, a trace or a judgement, and none of those can be
+ * answered out of the turn's own text. The answer is reached by reading
+ * something — the code, the history, the two options — and that is the work a
+ * weaker model does worst and hides best. Checked after design, so "이 설계 왜
+ * 이래?" stays a design turn on the tier above; and checked after the fence and
+ * the length ceiling, so a turn that PASTED its code is a build turn whatever it
+ * asks about it.
+ *
+ * IT OUTRANKS THE BUILD VERBS, since `routine` was added (2026-09-16), and that
+ * reordering is deliberate rather than incidental: `routine` has to beat the
+ * build verbs (a script request usually says `만들어` or `build`) and `deep` has to
+ * beat `routine` ("스크립트 왜 실패해?" is a diagnosis, not a script), so the two
+ * constraints together put the verbs last. The visible consequence is that "why
+ * does the build fail" is now labelled `deep-ask` rather than `build-ask` — the
+ * same opus turn, named after the question instead of the noun in it.
+ *
+ * SOME ENTRIES ARE PHRASES, and one is hyphenated, which the single-token rule
+ * of `containsKeyword` could not have matched — see the third branch there. Bare
+ * `how` is deliberately NOT on the list: "how are you" is small talk, "how does
+ * it work" is not, and the difference is the next word. Everything else is the
+ * same two matching modes as the lists above.
+ *
+ * THE LIST IS WIDE ON PURPOSE and is not tuned against its false positives (§2
+ * principle 3). `문제`, `설명` and `어떻게` will catch "문제 없어", "설명 고마워"
+ * and "어떻게 지내" — greetings answered by opus, at the price of part of a
+ * window. The turns on the other side of that trade are the ones this whole
+ * branch exists for.
+ */
+export const DEEP_KEYWORDS: readonly string[] = [
+  '왜',
+  '원인',
+  '이유',
+  '분석',
+  '비교',
+  '차이',
+  '장단점',
+  '트레이드오프',
+  '추적',
+  '파악',
+  '설명',
+  '평가',
+  '판단',
+  '추천',
+  '근거',
+  '영향',
+  '어떻게',
+  '어디',
+  '문제',
+  '에러',
+  '오류',
+  '실패',
+  'why',
+  'analyze',
+  'analyse',
+  'analysis',
+  'compare',
+  'comparison',
+  'difference',
+  'differences',
+  'tradeoff',
+  'tradeoffs',
+  'trade-off',
+  'trade-offs',
+  'investigate',
+  'trace',
+  'explain',
+  'evaluate',
+  'recommend',
+  'which',
+  'where',
+  'cause',
+  'causes',
+  'fails',
+  'failing',
+  'broken',
+  'wrong',
+  'understand',
+  'error',
+  'errors',
+  // Phrases, because bare `how` is a greeting as often as it is a question.
+  'how does',
+  'how do',
+  'how is',
+  'how come',
+  'how would',
+  'how should',
+  'how can',
+];
+
+/**
+ * Words that make a turn a ROUTINE turn → sonnet (2026-09-16). The one content
+ * rule in this file that routes DOWN.
+ *
+ * WHAT THEY HAVE IN COMMON is the SHAPE OF THE DELIVERABLE, not the subject and
+ * not the difficulty: a script, a batch or bulk pass over many items, a list, a
+ * survey of where something is used, a summary, a rename, a translation, a
+ * count. Each one is finished work whose correctness is visible the moment it
+ * comes back — you run the script, you read the list — which is exactly the case
+ * where a weaker model's mistake is NOT the silent kind this file's header is
+ * about. That is why the down-routing rule is allowed to exist at all, and why it
+ * is keyed here and not on length or on politeness.
+ *
+ * THE COMPARISON THAT DEFINES IT is with `DEEP_KEYWORDS`: deep is about WHAT IS
+ * ASKED (a cause, a comparison, a trace, a judgement), routine about WHAT COMES
+ * BACK. `조사`, `찾아` and `정리` MOVED HERE FROM THE DEEP LIST the day this was
+ * added — "어디서 쓰는지 조사해줘" is a survey that produces a list, not a
+ * diagnosis — while 왜·원인·이유·분석·비교·차이·추적·어디·설명 stayed where they
+ * are. When a turn carries both, deep wins: "스크립트 왜 실패해?" is a diagnosis
+ * that happens to mention a script.
+ *
+ * WORDS DELIBERATELY LEFT OUT, because they are the everyday vocabulary of real
+ * code work and would drag ordinary engineering down a tier: run, update, find,
+ * move, copy, format, search, list. "update the auth flow to use refresh tokens"
+ * is not a routine turn, and `update` on this list is all it would take to make
+ * it one. The asymmetry from the header still applies to every entry here — a
+ * wrong `routine` is the SILENT failure, not the visible one — so this list is
+ * the one place in the file where the rule is "when in doubt, leave it out".
+ *
+ * Same two matching modes as the lists above: Korean entries are substrings,
+ * single Latin entries are whole words, and `one-off` and `clean up` are phrases
+ * (see `containsKeyword`).
+ */
+export const ROUTINE_KEYWORDS: readonly string[] = [
+  '스크립트',
+  '배치',
+  '일괄',
+  '조사',
+  '목록',
+  '나열',
+  '정리',
+  '요약',
+  '번역',
+  '변환',
+  '리네임',
+  '이름 바꿔',
+  '이름을 바꿔',
+  '추출',
+  '파싱',
+  '세어',
+  '찾아',
+  'script',
+  'scripts',
+  'batch',
+  'bulk',
+  'one-off',
+  'cron',
+  'boilerplate',
+  'scaffold',
+  'survey',
+  'inventory',
+  'summarize',
+  'summarise',
+  'summary',
+  'translate',
+  'convert',
+  'conversion',
+  'rename',
+  'enumerate',
+  'extract',
+  'parse',
+  'count',
+  'lint',
+  'clean up',
+  'cleanup',
+];
+
 // ---------------------------------------------------------------------------
 // Tier ordering
 // ---------------------------------------------------------------------------
@@ -281,6 +502,29 @@ export const BUILD_KEYWORDS: readonly string[] = [
  * moved DOWN one place to opus — the only tier we then know can hold it.
  */
 export const TIER_ORDER: readonly ModelTier[] = ['haiku', 'sonnet', 'opus', 'fable'];
+
+/**
+ * THE TIERS `auto` MAY PUT ON THE MAIN CONVERSATION (§2 principle 8). Sonnet is
+ * the floor.
+ *
+ * WHY, dated because it was measured rather than assumed (2026-09-16): with the
+ * chip on `auto`, short code-free turns were routed to haiku — and haiku
+ * answering the MAIN conversation dropped the persona's voice and tone, and read
+ * only fragments of the injected context. Both failures are the silent kind this
+ * file's header is about: the answer arrives, it is fluent, and nothing in it
+ * says a routing decision made it worse. The saving was never worth it, so the
+ * main turn does not go there at all. Haiku is the SUBAGENT tier now (`explorer`
+ * reads files in its own window, where voice and continuity do not apply), plus
+ * a receipt value and an explicit pick by the user — and an explicit pick does
+ * not come through this file.
+ *
+ * USED BY BOTH WINDOW-FIT BRANCHES, not just by `baseTier`. Sonnet and haiku
+ * happen to share a 200k window today, so the window rule could not reach haiku
+ * even when it iterated `TIER_ORDER` — but that is a coincidence of the current
+ * catalog, and an invariant that holds by coincidence is one release away from
+ * not holding. The floor lives in code.
+ */
+export const MAIN_TURN_TIERS: readonly ModelTier[] = ['sonnet', 'opus', 'fable'];
 
 /** Position of a tier in `TIER_ORDER`. Higher is stronger/more expensive. */
 export function tierRank(tier: ModelTier): number {
@@ -341,6 +585,67 @@ function countPaths(text: string): number {
  *  boundaries. Anything else (Korean, in practice) keeps substring matching. */
 const LATIN_KEYWORD = /^[a-z]+$/;
 
+/**
+ * A Latin entry that is MORE THAN ONE TOKEN: a phrase (`how does`) or a
+ * hyphenated compound (`trade-off`).
+ *
+ * It needs its own branch because neither existing one is right for it. The
+ * word-set path cannot see it at all — `latinWords` splits on the very space or
+ * hyphen the entry is built around, so `how does` would be looked up as one
+ * "word" that the set can never contain. And falling through to the Korean
+ * substring path would match "show does" and "retrade-offer": a boundaryless
+ * rule on Latin text is the exact mistake `DESIGN_KEYWORDS` documents.
+ */
+const LATIN_PHRASE = /^[a-z]+(?:[\s-]+[a-z]+)+$/;
+
+/** Compiled phrase matchers, one per entry, built once. The lists are module
+ *  constants, so this map is bounded by them and never grows with traffic. */
+const phrasePatterns = new Map<string, RegExp>();
+
+/**
+ * `\bhow\s+does\b` for `how does`, `\btrade-off\b` for `trade-off`.
+ *
+ * Runs of whitespace in the entry become `\s+` so a line break or a double space
+ * between the two words still matches; everything else is escaped and literal.
+ * NOT a `/g` regex: `.test` on a global regex carries `lastIndex` between calls,
+ * which would make the second identical question of a session miss.
+ */
+function phrasePattern(keyword: string): RegExp {
+  let pattern = phrasePatterns.get(keyword);
+  if (pattern === undefined) {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    pattern = new RegExp(`\\b${escaped.replace(/\s+/g, '\\s+')}\\b`);
+    phrasePatterns.set(keyword, pattern);
+  }
+  return pattern;
+}
+
+/**
+ * A CODE IDENTIFIER WRITTEN IN PROSE — `effectiveAgentModel`, `turn_text`,
+ * `store.getMessages`, `foo()`.
+ *
+ * Why it is a signal at all: naming a symbol is how someone asks about code
+ * WITHOUT quoting any. "effectiveAgentModel 어디서 써?" has no fence, no
+ * backticks and no path, so every other clause of `quiet` holds and the turn
+ * reads as small talk — while answering it means searching two trees. It only
+ * ever DISQUALIFIES a turn from `chat`; on its own it lands on sonnet/`default`,
+ * because a name by itself is as often "what is this" as it is a deep question.
+ *
+ * FOUR SHAPES, and the boundaries matter more than the shapes: camelCase needs a
+ * lower-then-upper run, `snake_case` needs the underscore, member access and a
+ * call need NO WHITESPACE around the dot or before the parens — which is what
+ * keeps an ordinary sentence out ("done. Next" has a space after the dot, "안녕."
+ * has no Latin letter after it). "e.g." matches, and that is tolerated: it costs
+ * one reason code on a turn that was heading for sonnet either way.
+ *
+ * TESTED AGAINST CASED TEXT, never the lowercased `prose` — `effectiveagentmodel`
+ * cannot match a camelCase pattern, so testing the lowered copy would silently
+ * make this rule dead. URLs are stripped first because a host name is `a.b` in
+ * every other respect, and paths are already counted by `countPaths`.
+ */
+export const IDENTIFIER_RE =
+  /\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b|\b[a-z0-9]+_[a-z0-9_]+\b|\b[A-Za-z_][\w]*\.[A-Za-z_][\w]*\b|\b[A-Za-z_][\w]*\(\)/;
+
 /** The text as a set of Latin WORDS. Everything that is not an ASCII letter or
  *  digit separates, so Korean text simply produces no Latin words — which is
  *  correct: those keywords are matched the other way. */
@@ -356,6 +661,13 @@ function latinWords(lowercased: string): Set<string> {
  * Does the text contain any of these keywords, each matched the way its own
  * alphabet requires (see `DESIGN_KEYWORDS`)?
  *
+ * THREE BRANCHES, in narrowing order: a single Latin token is looked up in the
+ * word set, a multi-token Latin entry is matched by its own boundary-anchored
+ * regex (`LATIN_PHRASE`), and anything else — Korean, in practice — keeps
+ * substring matching. The phrase branch is checked BEFORE the fallthrough on
+ * purpose: `how does` fails the single-token test, and letting it reach the
+ * substring path would match "show does".
+ *
  * `text` is expected to be lowercased and fence-stripped already; the router
  * does both once per turn. Exported so the spike can assert the matching rule
  * itself rather than only its effect on a tier.
@@ -367,6 +679,8 @@ export function containsKeyword(text: string, keywords: readonly string[]): bool
     if (LATIN_KEYWORD.test(keyword)) {
       words ??= latinWords(lowered);
       if (words.has(keyword)) return true;
+    } else if (LATIN_PHRASE.test(keyword)) {
+      if (phrasePattern(keyword).test(lowered)) return true;
     } else if (lowered.includes(keyword)) {
       return true;
     }
@@ -385,9 +699,16 @@ function baseTier(signals: RouteSignals): RouteDecision {
   if (signals.planMode) return { tier: 'fable', reason: 'plan-mode' };
 
   const raw = signals.text ?? '';
-  const prose = stripCodeFences(raw).toLowerCase();
+  const unfenced = stripCodeFences(raw);
+  const prose = unfenced.toLowerCase();
+  // The same text WITH ITS CAPITALS, for the identifier rule only: a camelCase
+  // pattern cannot match a lowercased copy. URLs go first so a host name is not
+  // read as `a.b`; paths are counted separately by `countPaths`.
+  const cased = unfenced.replace(URL_RE, ' ');
   const design = containsKeyword(prose, DESIGN_KEYWORDS);
   const build = containsKeyword(prose, BUILD_KEYWORDS);
+  const deep = containsKeyword(prose, DEEP_KEYWORDS);
+  const routine = containsKeyword(prose, ROUTINE_KEYWORDS);
 
   // Design wins ONLY with no build verb anywhere (§4.2 rule 1, second bullet).
   // Checked before the build conditions, in the spec's own order: a review turn
@@ -396,7 +717,35 @@ function baseTier(signals: RouteSignals): RouteDecision {
 
   const fenced = FENCE_RE.test(raw);
   FENCE_RE.lastIndex = 0; // /g regexes are stateful; do not leak into the next call.
-  if (build || fenced || countPaths(prose) >= BUILD_MIN_PATHS || raw.length > BUILD_MIN_CHARS) {
+  // PASTED CODE AND A LONG BRIEF are the two build signals that outrank
+  // everything below, because neither is a claim about the words: a fence means
+  // the user is handing over code to work on, and 1,200 characters of
+  // requirements is work whatever verbs it happens to contain. Both beat
+  // `routine`, so "이 스크립트 고쳐줘" with the script pasted under it is a build
+  // turn — the shape of that deliverable is the file, not a fresh one-off.
+  if (fenced || raw.length > BUILD_MIN_CHARS) {
+    return { tier: 'opus', reason: 'build-ask' };
+  }
+
+  // A question whose answer has to be WORKED OUT — a cause, a comparison, a
+  // trace — however short it is. Below design, because "이 설계 왜 이래?" is
+  // already going somewhere at least as strong; ABOVE `routine`, because a
+  // question about a script is not a request for one ("스크립트 왜 실패해?"); and
+  // therefore above the build verbs too, since `routine` has to beat those.
+  // "why does the build fail" is labelled `deep-ask` for that reason — the same
+  // opus turn either way, named after the question rather than the noun in it.
+  if (deep) return { tier: 'opus', reason: 'deep-ask' };
+
+  // THE ONE RULE THAT ROUTES DOWN. A script, a batch pass, a survey, a rename:
+  // finished work whose deliverable can be checked on sight, which is what makes
+  // sonnet a safe answer here and nowhere else (`ROUTINE_KEYWORDS`). It is placed
+  // under every stronger signal and over the three weaker ones it has to beat —
+  // the build verbs (a script request usually says `만들어` or `build`), the
+  // two-path count (a rename names its files), and full mode.
+  if (routine) return { tier: 'sonnet', reason: 'routine' };
+
+  // The build verbs, and the file count that means "change these files".
+  if (build || countPaths(prose) >= BUILD_MIN_PATHS) {
     return { tier: 'opus', reason: 'build-ask' };
   }
 
@@ -406,7 +755,16 @@ function baseTier(signals: RouteSignals): RouteDecision {
     return { tier: 'opus', reason: 'full-mode' };
   }
 
-  // The only way down. Every clause has to hold.
+  // Small talk: the turn that used to go down to haiku. It is sonnet now
+  // (`MAIN_TURN_TIERS`), and every clause still has to hold — what they decide
+  // is the REASON the chip shows, `chat` rather than `default`.
+  //
+  // THE LENGTH TEST IS A CEILING AMONG THESE, not a criterion of its own: a turn
+  // is quiet only when it is short AND carries none of the signals. `!deep` and
+  // `!routine` are already guaranteed by the rules above returning; they are
+  // written out anyway because this conjunction is the definition of "quiet", and
+  // a definition that relies on the order of the clauses above it breaks the day
+  // one of them moves.
   const quiet =
     raw.length <= CHAT_MAX_CHARS &&
     !fenced &&
@@ -414,8 +772,11 @@ function baseTier(signals: RouteSignals): RouteDecision {
     countPaths(raw) === 0 &&
     countMatches(raw, URL_RE) === 0 &&
     !design &&
-    !build;
-  if (quiet) return { tier: 'haiku', reason: 'chat' };
+    !build &&
+    !deep &&
+    !routine &&
+    !IDENTIFIER_RE.test(cased);
+  if (quiet) return { tier: 'sonnet', reason: 'chat' };
 
   // Ambiguous is sonnet, by instruction.
   return { tier: 'sonnet', reason: 'default' };
@@ -466,7 +827,9 @@ export function routeModelTier(signals: RouteSignals): RouteDecision {
   const required = requiredWindow(signals.estimatedContextTokens);
   const windows = signals.windows ?? ({} as RouteSignals['windows']);
   if (!fits(windows, tier, required)) {
-    const fitting = TIER_ORDER.filter((t) => fits(windows, t, required));
+    // Candidates are the MAIN-TURN tiers only: a window is a reason to move, and
+    // never a reason to put the main conversation on haiku (`MAIN_TURN_TIERS`).
+    const fitting = MAIN_TURN_TIERS.filter((t) => fits(windows, t, required));
     if (fitting.length > 0) {
       // NEAREST in the order, and on a tie the HIGHER one — the move is forced
       // by the window, so it should change the character of the answer as little
@@ -486,12 +849,14 @@ export function routeModelTier(signals: RouteSignals): RouteDecision {
       }
     } else {
       // NOTHING fits. The turn may well fail, but it fails least on the biggest
-      // window we know of. The current tier keeps its place on a tie, so a fable
-      // turn stays fable when fable is already as large as anything known.
+      // window we know of — among the MAIN-TURN tiers, because a turn that is
+      // going to be tight is the last one to hand to the weakest model. The
+      // current tier keeps its place on a tie, so a fable turn stays fable when
+      // fable is already as large as anything known.
       const current = windows?.[tier];
       let best = tier;
       let bestSize = typeof current === 'number' ? current : -1;
-      for (const t of TIER_ORDER) {
+      for (const t of MAIN_TURN_TIERS) {
         const size = windows?.[t];
         if (typeof size === 'number' && size > bestSize) {
           best = t;
@@ -505,9 +870,11 @@ export function routeModelTier(signals: RouteSignals): RouteDecision {
     }
   }
 
-  // 4. BUDGET CAP — the only rule that lowers on purpose, so the only one another
-  //    rule may veto. Skipped entirely when no usage was passed (§4.5: a missing
-  //    or unusable cache means "do not guess", not "nothing is used").
+  // 4. BUDGET CAP — the only MODIFIER that lowers on purpose (rule 1's `routine`
+  //    is the other rule that can, and it judges the turn, not the budget), so
+  //    the only one another rule may veto. Skipped entirely when no usage was
+  //    passed (§4.5: a missing or unusable cache means "do not guess", not
+  //    "nothing is used").
   const usage = signals.usage;
   if (usage !== undefined && (tier === 'opus' || tier === 'fable')) {
     const opusPct = usage.opusPct;

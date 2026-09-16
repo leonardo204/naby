@@ -64,11 +64,26 @@ const EXPLORER_CLAUSE = `Any job that means reading or searching across several 
 /** The `implementer` half. Only ever used on a turn that permits changes. */
 const IMPLEMENTER_CLAUSE = `A code change that is already fully specified and self-contained — the paths, the constraints and what "done" means are all decided — goes to "${IMPLEMENTER_SUBAGENT}".`;
 
-/** What is true of any delegation: keep the cheap work, and state the task in
- *  full because the other side is blind to this conversation. */
+/**
+ * What is true of any delegation: keep the cheap work, state the task in full
+ * because the other side is blind to this conversation, and scope it for a
+ * SMALLER MODEL.
+ *
+ * WHY THE THIRD SENTENCE. The built-in subagents run on a cheaper tier than the
+ * main conversation does — that is most of what delegation buys, and it is also
+ * the failure mode: a smaller model handed "figure out how this should work"
+ * returns an answer in the right shape and the wrong substance, and the main
+ * thread then builds on a summary nobody checked. So the closing tells the model
+ * how to make a delegation safe rather than merely cheap: one narrow mechanical
+ * task, no judgement calls, an explicit statement of what must come back, and a
+ * look at the cited path before the report is treated as fact. Checking is the
+ * load-bearing half — a report that names a file and a line is cheap to verify
+ * and expensive to trust blind.
+ */
 const POLICY_CLOSING =
   'Reading one or two known files, and answering a short question, you do yourself: delegating those costs a round trip and saves nothing. ' +
-  'A subagent CANNOT see this conversation, so state the task in full — the file paths, the constraints, and the done-criteria.';
+  'A subagent CANNOT see this conversation, so state the task in full — the file paths, the constraints, and the done-criteria. ' +
+  'A subagent also runs on a SMALLER model than this conversation, so give it one narrow, mechanical task with no judgement calls, say exactly what it must return, and check its report against the source — open the path and line it cites — before you build on it.';
 
 /**
  * The policy, in full — the wording used when BOTH built-ins are available and
@@ -94,9 +109,10 @@ export const DELEGATION_POLICY: string = `${POLICY_OPENING} ${EXPLORER_CLAUSE} $
  * delegation in general: the caller then appends nothing.
  *
  * Names are matched exactly (they are the harness rows' names, which are the
- * upsert identity). The closing two sentences are common to every shape, because
- * "do the small things yourself" and "the subagent cannot see this conversation"
- * are true of any delegation.
+ * upsert identity). The closing three sentences are common to every shape,
+ * because "do the small things yourself", "the subagent cannot see this
+ * conversation" and "it is a smaller model, so scope it narrowly and check what
+ * it reports" are true of any delegation.
  */
 export function delegationPolicyFor(
   subagentNames: readonly string[],

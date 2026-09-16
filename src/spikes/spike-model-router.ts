@@ -12,8 +12,19 @@
 //     (a) plan mode → fable, whatever the text says.
 //     (b) design verbs with no build verb → fable; a build verb cancels them.
 //     (c) build verbs, a code fence, two file paths, or >1,200 chars → opus.
+//     (c2) a question that has to be WORKED OUT → opus/`deep-ask`, HOWEVER
+//          SHORT: length is a ceiling for `chat` and never a criterion of its
+//          own. Korean and English, phrases (`how does`) and hyphens
+//          (`trade-off`), and a bare code identifier that disqualifies `chat`
+//          without reaching opus on its own.
+//     (c3) a turn whose DELIVERABLE is a script, a batch pass, a survey or a
+//          rename → sonnet/`routine`: the one content rule that routes DOWN. It
+//          beats the build verbs and the two-path count, and loses to plan mode,
+//          a design ask, a pasted fence, a long brief and a deep question.
 //     (d) full mode at pupa/butterfly → opus; at egg/larva it does not apply.
-//     (e) short, code-free, path-free, URL-free and verb-free → haiku.
+//     (e) short, code-free, path-free, URL-free and verb-free → sonnet, with the
+//         reason `chat`: the main turn's floor is sonnet, so the quiet clause
+//         picks the REASON and no longer picks a cheaper model.
 //     (f) anything else → sonnet, including the ambiguous middle.
 //     (g) Korean phrasings of each, since that is the language of the app.
 //     (g2) Latin keywords match WHOLE WORDS ("explain" is not `plan`), Korean
@@ -22,9 +33,12 @@
 //     (h) past 40k the session keeps a stronger previous tier…
 //     (i) …and below 40k it does not, and it never pulls a turn DOWN.
 //   WINDOW FIT (§4.2 rule 3)
-//     (j) a 250k conversation moves a haiku turn to opus.
+//     (j) a 250k conversation moves a sonnet turn to opus.
 //     (k) when nothing fits, the largest known window wins.
 //     (l) an unknown window is not treated as a fitting one.
+//   THE FLOOR (`MAIN_TURN_TIERS`)
+//     (f2) no signal routes the main turn to haiku — not the quiet clause, not
+//          a window only haiku could hold, and not a previous haiku turn.
 //   BUDGET CAP (§4.2 rule 4)
 //     (m) opusPct/fiveHourPct ≥ 90 lowers opus and fable to sonnet…
 //     (n) …but NOT when sonnet cannot hold the conversation,
@@ -50,9 +64,13 @@ import type { RuntimeMessage } from '../runtime/engine.js';
 import {
   BUDGET_CAP_PCT,
   BUILD_KEYWORDS,
+  DEEP_KEYWORDS,
   DESIGN_KEYWORDS,
+  ROUTINE_KEYWORDS,
   containsKeyword,
+  MAIN_TURN_TIERS,
   STICKY_MIN_TOKENS,
+  TIER_ORDER,
   SYSTEM_PROMPT_TOKENS,
   estimateContextTokens,
   pickCatalogValue,
@@ -178,34 +196,222 @@ function checkBaseTier(): void {
     `want sonnet/default, got ${onePath.tier}/${onePath.reason}`,
   );
 
+  // (c2) SHORT AND DEEP. Every one of these is under 200 characters, has no
+  //      fence, no path and no build verb — so before `deep-ask` existed they
+  //      were `chat` turns answered by sonnet. Each of them takes reading
+  //      something before there is an answer at all.
+  expectRoute('(c2) "왜 이렇게 동작해?" → opus/deep-ask', '왜 이렇게 동작해?', {}, 'opus', 'deep-ask');
+  expectRoute(
+    '(c2) "effectiveAgentModel 어디서 써?" → opus/deep-ask',
+    'effectiveAgentModel 어디서 써?',
+    {},
+    'opus',
+    'deep-ask',
+  );
+  expectRoute(
+    '(c2) how-PHRASE: "how does the router pick a tier" → opus/deep-ask',
+    'how does the router pick a tier',
+    {},
+    'opus',
+    'deep-ask',
+  );
+  expectRoute(
+    '(c2) hyphen: "what is the trade-off here" → opus/deep-ask',
+    'what is the trade-off here',
+    {},
+    'opus',
+    'deep-ask',
+  );
+
+  // …and bare `how` is NOT on the list, which is the whole reason the phrases
+  // are. "how are you" is small talk in the same three words.
+  expectRoute('(c2) "how are you" is still small talk', 'how are you', {}, 'sonnet', 'chat');
+
+  // AN IDENTIFIER ALONE DISQUALIFIES `chat` WITHOUT REACHING OPUS. Naming a
+  // symbol is how someone asks about code while quoting none of it, so the turn
+  // is not small talk — but a name by itself is as often "what is this" as it is
+  // a question that needs a trace, and the floor is sonnet either way. The
+  // reason code is what changes, and the chip shows the reason.
+  expectRoute(
+    '(c2) a bare camelCase identifier → sonnet/default, not `chat`',
+    'effectiveAgentModel',
+    {},
+    'sonnet',
+    'default',
+  );
+  expectRoute(
+    '(c2) member access with no deep word → sonnet/default',
+    'store.getMessages 이거 뭐야',
+    {},
+    'sonnet',
+    'default',
+  );
+
+  // …and an ordinary short turn that merely ENDS in a full stop is not an
+  // identifier. The member-access pattern needs no whitespace around the dot,
+  // which is exactly what keeps a sentence boundary out of it.
+  expectRoute('(c2) "고마워" → sonnet/chat', '고마워', {}, 'sonnet', 'chat');
+  expectRoute('(c2) "안녕." → sonnet/chat (a trailing period is not `a.b`)', '안녕.', {}, 'sonnet', 'chat');
+
+  // ORDER: the rules above `deep-ask` keep their turns. A design ask is one tier
+  // up, so re-labelling it `deep-ask` would only make the chip less specific…
+  expectRoute('(c2) design still wins over deep: "이 설계 왜 이래?"', '이 설계 왜 이래?', {}, 'fable', 'design-ask');
+  // …and a turn that PASTED its code is a build turn whatever it asks about it.
+  // The fence is not a claim about the words, which is why it outranks both the
+  // deep list and the routine one.
+  expectRoute(
+    '(c2) a pasted fence still wins over deep',
+    '이거 왜 이래?\n```ts\nconst a = 1;\n```',
+    {},
+    'opus',
+    'build-ask',
+  );
+
+  // …but the BUILD VERBS no longer do, and that is a deliberate consequence of
+  // `routine` (2026-09-16), not an accident. `routine` has to beat the build
+  // verbs (a script request says `만들어` by construction) and `deep` has to beat
+  // `routine` ("스크립트 왜 실패해?" is a diagnosis), so the verbs end up last.
+  // "why does the build fail" is the same opus turn it always was — the chip now
+  // names it after the question rather than after the noun in it.
+  expectRoute(
+    '(c2) deep now outranks a BUILD VERB: "why does the build fail" is a diagnosis',
+    'why does the build fail',
+    {},
+    'opus',
+    'deep-ask',
+  );
+
+  // (c3) ROUTINE — the one content rule that routes DOWN. What it reads is the
+  //      SHAPE OF THE DELIVERABLE: a script, a batch pass, a survey, a rename. A
+  //      weaker model's mistake on any of those is visible the moment the work
+  //      comes back, which is what makes sonnet a safe answer here and nowhere
+  //      else in this file.
+  expectRoute('(c3) "스크립트 하나 짜줘" → sonnet/routine', '스크립트 하나 짜줘', {}, 'sonnet', 'routine');
+  expectRoute(
+    '(c3) "파일 이름 일괄로 바꿔줘" → sonnet/routine',
+    '파일 이름 일괄로 바꿔줘',
+    {},
+    'sonnet',
+    'routine',
+  );
+  // …and it beats the TWO-PATH trigger, which is the whole point of moving that
+  // trigger below it: a rename names the files it renames.
+  expectRoute(
+    '(c3) routine beats two file paths: "src/a.ts src/b.ts 이름 바꿔줘"',
+    'src/a.ts src/b.ts 이름 바꿔줘',
+    {},
+    'sonnet',
+    'routine',
+  );
+  // A SURVEY of where a symbol is used. `조사` used to be a deep word and sent
+  // this to opus; it produces a list, and the identifier only ever disqualified
+  // `chat` anyway.
+  expectRoute(
+    '(c3) a survey with an identifier in it → sonnet/routine',
+    '이 저장소에서 effectiveAgentModel 쓰는 곳 조사해줘',
+    {},
+    'sonnet',
+    'routine',
+  );
+  // …and it beats the BUILD VERBS, in both languages: `build` is right there in
+  // the text, and the thing being built is a one-off script.
+  expectRoute(
+    '(c3) routine beats `build`: "build a batch script to rename files"',
+    'build a batch script to rename files',
+    {},
+    'sonnet',
+    'routine',
+  );
+  expectRoute(
+    '(c3) "write a script to count the lines" → sonnet/routine',
+    'write a script to count the lines',
+    {},
+    'sonnet',
+    'routine',
+  );
+
+  // …and every stronger signal still beats IT. A question ABOUT a script is not
+  // a request FOR one…
+  expectRoute('(c3) deep beats routine: "스크립트 왜 실패해?"', '스크립트 왜 실패해?', {}, 'opus', 'deep-ask');
+  // …a design ask about one is still a design ask…
+  expectRoute('(c3) design beats routine: "스크립트 설계 검토해줘"', '스크립트 설계 검토해줘', {}, 'fable', 'design-ask');
+  // …and a script PASTED into the turn is code to work on, not a one-off to
+  // produce, so the fence takes it back to opus.
+  expectRoute(
+    '(c3) a pasted fence beats routine',
+    '이 스크립트 고쳐줘\n```sh\nls\n```',
+    {},
+    'opus',
+    'build-ask',
+  );
+  // …while FULL MODE does not: the persona driving tools through a rename is
+  // still doing a rename.
+  expectRoute(
+    '(c3) routine beats full mode at butterfly',
+    '@naby 스크립트 짜줘',
+    { fullMode: true, stage: 'butterfly' },
+    'sonnet',
+    'routine',
+  );
+
+  // THE WORDS LEFT OFF THE LIST are what keeps this rule from dragging ordinary
+  // engineering down a tier. `update` is the sharpest of them: it is on nobody's
+  // build list either, so this turn is simply an ordinary one — and the assertion
+  // that matters is the negative one, that it is NOT `routine`.
+  const ordinary = route('update the auth flow to use refresh tokens');
+  record(
+    '(c3) "update the auth flow to use refresh tokens" is NOT a routine turn',
+    ordinary.tier === 'sonnet' && ordinary.reason !== 'routine',
+    `want sonnet and any reason but routine, got ${ordinary.tier}/${ordinary.reason}`,
+  );
+  // `run` is off the list too, and `tests` is a build verb, so this stays work.
+  expectRoute('(c3) "run the tests" → opus/build-ask', 'run the tests', {}, 'opus', 'build-ask');
+
   // (d) full mode, by stage.
   expectRoute('(d) full mode + butterfly → opus', '@naby 오늘 뭐 해야 해?', { fullMode: true, stage: 'butterfly' }, 'opus', 'full-mode');
   expectRoute('(d) full mode + pupa → opus', '@naby 오늘 뭐 해야 해?', { fullMode: true, stage: 'pupa' }, 'opus', 'full-mode');
-  expectRoute('(d) full mode + larva does NOT apply', '@naby 안녕', { fullMode: true, stage: 'larva' }, 'haiku', 'chat');
+  expectRoute('(d) full mode + larva does NOT apply', '@naby 안녕', { fullMode: true, stage: 'larva' }, 'sonnet', 'chat');
 
-  // (e) small talk, the only way down.
-  expectRoute('(e) "안녕" → haiku', '안녕', {}, 'haiku', 'chat');
-  expectRoute('(e) "thanks!" → haiku', 'thanks!', {}, 'haiku', 'chat');
+  // (e) small talk. Sonnet, like everything else on the main turn — the clause
+  //     survives only to name the reason.
+  expectRoute('(e) "안녕" → sonnet/chat', '안녕', {}, 'sonnet', 'chat');
+  expectRoute('(e) "thanks!" → sonnet/chat', 'thanks!', {}, 'sonnet', 'chat');
 
-  // …and each disqualifier on its own sends it back up to sonnet.
-  expectRoute('(e) short + inline code → not haiku', '`foo` 이게 뭐야?', {}, 'sonnet', 'default');
-  expectRoute('(e) short + URL → not haiku', '이거 봐 https://example.com/x', {}, 'sonnet', 'default');
-  expectRoute('(e) short + one path → not haiku', 'src/runtime/gate.ts 이게 뭐야', {}, 'sonnet', 'default');
+  // …and each disqualifier on its own changes the reason to `default`.
+  expectRoute('(e) short + inline code → not `chat`', '`foo` 이게 뭐야?', {}, 'sonnet', 'default');
+  expectRoute('(e) short + URL → not `chat`', '이거 봐 https://example.com/x', {}, 'sonnet', 'default');
+  expectRoute('(e) short + one path → not `chat`', 'src/runtime/gate.ts 이게 뭐야', {}, 'sonnet', 'default');
 
   // (f) the ambiguous middle: too long to be small talk, no verb to classify it,
-  //     nothing that looks like work. This is the turn the spec sends to sonnet.
-  const medium = '어제 이야기한 방식이랑 지금 방식이랑 어떤 차이가 있는지 좀 길게 알려줄 수 있어? 궁금해서 물어본다. '.repeat(4);
+  //     no question word, nothing that looks like work. This is the turn the spec
+  //     sends to sonnet, and it is the ONLY case that reaches `default` by length
+  //     alone — so the text is kept deliberately empty of signals. It used to be
+  //     a question about the difference between two approaches, which `차이` now
+  //     reads as `deep-ask`; that text is asserted three lines down, where it
+  //     belongs.
+  const medium = '어제 저녁에 본 영화 이야기를 그냥 길게 해 보고 싶어서 적어 둔다. 별다른 용건은 없다. '.repeat(5);
   record(
     '(f) the ambiguous middle is over 200 chars and under 1,200',
     medium.length > 200 && medium.length <= 1_200,
     `${medium.length} chars`,
   );
-  expectRoute('(f) medium question with no verbs → sonnet', medium, {}, 'sonnet', 'default');
+  expectRoute('(f) medium chatter with no verbs and no question → sonnet', medium, {}, 'sonnet', 'default');
 
-  // (g) an empty turn is not small talk in the dangerous direction — it is the
-  //     shortest possible text, so it lands on haiku, which is harmless.
+  // …and the same length WITH a question word is a deep turn. Length was never
+  // the thing being measured: this text and the one above are both in the middle
+  // band, and only one of them asks for something to be worked out.
+  expectRoute(
+    '(f) the same middle band, but asking for a comparison → opus/deep-ask',
+    '어제 이야기한 방식이랑 지금 방식이랑 어떤 차이가 있는지 좀 길게 알려줄 수 있어? 궁금해서 물어본다. '.repeat(4),
+    {},
+    'opus',
+    'deep-ask',
+  );
+
+  // (g) an empty turn is the shortest possible text, so every clause of `quiet`
+  //     holds and it reads as `chat` — on sonnet, like every other main turn.
   const empty = route('');
-  record('(g) empty text does not throw', empty.tier === 'haiku' && empty.reason === 'chat', `${empty.tier}/${empty.reason}`);
+  record('(g) empty text does not throw', empty.tier === 'sonnet' && empty.reason === 'chat', `${empty.tier}/${empty.reason}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,7 +426,17 @@ function checkBaseTier(): void {
 
 function checkWordBoundaries(): void {
   // The four traps, by tier.
-  expectRoute('(g2) "explain this function" is not a design ask', 'explain this function', {}, 'haiku', 'chat');
+  //
+  // "explain this function" is the first one: it CONTAINS `plan`, and a
+  // substring rule would send it to the design tier. It is a `deep-ask` turn now
+  // — `explain` is on that list in its own right — so the assertion is written
+  // as both halves: the tier it does reach, and the reason it must NOT.
+  const explain = route('explain this function');
+  record(
+    '(g2) "explain this function" is a deep ask, never a design ask',
+    explain.reason !== 'design-ask' && explain.tier === 'opus' && explain.reason === 'deep-ask',
+    `${explain.tier}/${explain.reason}`,
+  );
   const especially = route('especially the specific part, and inspect it');
   record(
     '(g2) especially/specific/inspect do not match `spec`',
@@ -234,7 +450,12 @@ function checkWordBoundaries(): void {
 
   // …and the real words still land.
   expectRoute('(g2) "please review the design" → fable', 'please review the design', {}, 'fable', 'design-ask');
-  expectRoute('(g2) "fix the failing tests" → opus', 'fix the failing tests', {}, 'opus', 'build-ask');
+  // `fix` and `tests` both land — the tier is opus, which is what this line is
+  // here to show. The REASON is `deep-ask` rather than `build-ask` because
+  // `failing` is a deep word and deep now outranks the build verbs (see the
+  // ordering note in (c2)); "run the tests", asserted above, is the same two
+  // build verbs with no deep word in the way.
+  expectRoute('(g2) "fix the failing tests" → opus', 'fix the failing tests', {}, 'opus', 'deep-ask');
   expectRoute('(g2) inflections count: "planning the architecture"', 'planning the architecture', {}, 'fable', 'design-ask');
   expectRoute('(g2) inflections count: "refactoring this module"', 'refactoring this module', {}, 'opus', 'build-ask');
 
@@ -257,6 +478,38 @@ function checkWordBoundaries(): void {
       !containsKeyword('latest', BUILD_KEYWORDS) &&
       containsKeyword('run the test', BUILD_KEYWORDS),
     'explain/specific/latest miss, plan/test hit',
+  );
+
+  // MULTI-TOKEN LATIN ENTRIES get their own branch, and the two assertions that
+  // matter are the negative ones. `how does` is not a single token, so the word
+  // set cannot hold it; falling through to the Korean substring path instead
+  // would match "showdown" — and, the sharper case, "show does", which has the
+  // space and fails only on the word boundary. That is the one that tells the
+  // regex branch apart from a substring.
+  record(
+    '(g2) phrases match with boundaries, and bare `how` is not on the list',
+    containsKeyword('how does it work', DEEP_KEYWORDS) &&
+      !containsKeyword('how are you', DEEP_KEYWORDS) &&
+      !containsKeyword('showdown', ['how does']) &&
+      !containsKeyword('show does', ['how does']) &&
+      containsKeyword('what is the trade-off here', DEEP_KEYWORDS) &&
+      !containsKeyword('retrade-offer', ['trade-off']),
+    'how does hits; how are you, showdown, show does and retrade-offer miss',
+  );
+
+  // (c3) THE ROUTINE LIST USES THE SAME THREE BRANCHES, and `clean up` is its
+  // phrase entry — two tokens, so the word set cannot hold it and the substring
+  // path would match "clean upstream". The second half is the MOVE: `조사` left
+  // the deep list the day the routine one arrived, and a copy left behind in
+  // `DEEP_KEYWORDS` would send every survey back to opus with `routine` never
+  // reached, which nothing else here would notice.
+  record(
+    '(c3) `clean up` matches as a phrase, and `조사` is no longer a deep word',
+    containsKeyword('please clean up the imports', ROUTINE_KEYWORDS) &&
+      !containsKeyword('조사해줘', DEEP_KEYWORDS) &&
+      containsKeyword('조사해줘', ROUTINE_KEYWORDS) &&
+      !containsKeyword('clean upstream first', ROUTINE_KEYWORDS),
+    'clean up and 조사해줘 hit routine; 조사해줘 misses deep; clean upstream misses',
   );
 }
 
@@ -285,7 +538,7 @@ function checkSticky(): void {
     '(i) at exactly 40k it does not stick (threshold is exclusive)',
     '안녕',
     { estimatedContextTokens: STICKY_MIN_TOKENS, previousTier: 'opus' },
-    'haiku',
+    'sonnet',
     'chat',
   );
   expectRoute(
@@ -296,12 +549,34 @@ function checkSticky(): void {
     'build-ask',
   );
 
+  // (f2) THE FLOOR, THROUGH STICKY. A session whose last turn was served by
+  //      haiku — a receipt the shell can genuinely read back, since a pinned
+  //      pick or an older build could have put one there — must not drag the
+  //      next turn down with it. Sticky only ever moves UP, and this is the
+  //      assertion that keeps that property honest now that the base is sonnet.
+  const stickyDown = route('안녕', { estimatedContextTokens: big, previousTier: 'haiku' });
+  record(
+    '(f2) a previous haiku turn never pulls the next one down to haiku',
+    stickyDown.tier === 'sonnet' && stickyDown.reason === 'chat',
+    `${stickyDown.tier}/${stickyDown.reason} (previousTier=haiku at ${big} tokens)`,
+  );
+
   record(
     '(i) tier order is haiku < sonnet < opus < fable',
     tierRank('haiku') < tierRank('sonnet') &&
       tierRank('sonnet') < tierRank('opus') &&
       tierRank('opus') < tierRank('fable'),
     `haiku=${tierRank('haiku')} sonnet=${tierRank('sonnet')} opus=${tierRank('opus')} fable=${tierRank('fable')}`,
+  );
+
+  // (f2) …and the order still HAS haiku, while the main turn's roster does not:
+  //      receipts, the chip's tier labels and the subagents all read the order.
+  record(
+    '(f2) MAIN_TURN_TIERS is the order without haiku',
+    !MAIN_TURN_TIERS.includes('haiku') &&
+      MAIN_TURN_TIERS.length === 3 &&
+      TIER_ORDER.includes('haiku'),
+    `MAIN_TURN_TIERS=${MAIN_TURN_TIERS.join(',')} TIER_ORDER=${TIER_ORDER.join(',')}`,
   );
 }
 
@@ -319,7 +594,7 @@ function checkWindowFit(): void {
   );
 
   expectRoute(
-    '(j) a greeting in a 250k conversation goes to opus',
+    '(j) a greeting in a 250k conversation goes to opus (sonnet cannot hold it)',
     '안녕',
     { estimatedContextTokens: huge },
     'opus',
@@ -362,14 +637,15 @@ function checkWindowFit(): void {
     `${fableNoCatalog.tier}/${fableNoCatalog.reason}, fable window ${String(noCatalogWindows.fable)}`,
   );
 
-  // (j) A TIE GOES UP. The chosen tier is sonnet and its window cannot hold the
-  // turn; haiku and opus both can, and they sit one place away on either side.
-  // The rule says the higher one, and the reason is the same one that makes the
-  // whole window rule a qualification rather than a price: a turn moved DOWN to
-  // haiku because sonnet did not fit has been made cheaper and worse for no
-  // reason anybody asked for. Synthetic windows — no real catalog puts haiku
-  // above sonnet — because a tie cannot otherwise be constructed from the sizes
-  // Anthropic actually ships.
+  // (j) A TIE GOES UP, and haiku is not even in the running. The chosen tier is
+  // sonnet and its window cannot hold the turn; haiku and opus are both large
+  // enough and sit one place away on either side — but the window rule filters
+  // `MAIN_TURN_TIERS`, so haiku is NOT A CANDIDATE AT ALL and opus is the only
+  // one left to tie with. That is the point of the floor living in code: a turn
+  // moved DOWN to haiku because sonnet did not fit has been made cheaper and
+  // worse for no reason anybody asked for. Synthetic windows — no real catalog
+  // puts haiku above sonnet — because the case cannot otherwise be constructed
+  // from the sizes Anthropic actually ships.
   const tie = route(
     // Long enough to miss `chat` (>200 chars) with no build/design verb, no code
     // fence and no path, so the base tier is `default` → sonnet.
@@ -380,9 +656,29 @@ function checkWindowFit(): void {
     },
   );
   record(
-    '(j) a tie in distance goes UP: sonnet does not fit, haiku and opus both do → opus',
+    '(j) sonnet does not fit; haiku is not a candidate, so opus takes the turn',
     tie.tier === 'opus' && tie.reason === 'window-fit',
     `${tie.tier}/${tie.reason} (required ${requiredWindow(50_000)}, haiku and opus at 500,000)`,
+  );
+
+  // (f2) THE FLOOR, THROUGH THE WINDOW RULE. The one arrangement that could
+  // still reach haiku by accident: haiku is the ONLY tier whose window holds the
+  // conversation. Before `MAIN_TURN_TIERS` this landed on haiku/window-fit —
+  // sonnet, opus and fable all fail to fit, and the "biggest known window" loop
+  // walked TIER_ORDER and found 500,000 there. Now the loop walks the main-turn
+  // tiers, which all tie at 10,000, so the current tier keeps its place: sonnet,
+  // with the reason the base tier gave it. A turn that is going to be tight is
+  // the last one to hand to the weakest model.
+  const onlyHaikuFits = route('안녕', {
+    estimatedContextTokens: 50_000,
+    windows: { haiku: 500_000, sonnet: 10_000, opus: 10_000, fable: 10_000 },
+  });
+  record(
+    '(f2) when ONLY haiku fits, the turn still does not go to haiku',
+    onlyHaikuFits.tier !== 'haiku' &&
+      onlyHaikuFits.tier === 'sonnet' &&
+      onlyHaikuFits.reason === 'chat',
+    `${onlyHaikuFits.tier}/${onlyHaikuFits.reason} (required ${requiredWindow(50_000)}, haiku alone at 500,000)`,
   );
 
   // (l) an UNKNOWN window never counts as fitting.
@@ -442,7 +738,7 @@ function checkBudgetCap(): void {
     '(o) the cap never touches sonnet or haiku',
     '안녕',
     { usage: { opusPct: 100, fiveHourPct: 100 } },
-    'haiku',
+    'sonnet',
     'chat',
   );
 }

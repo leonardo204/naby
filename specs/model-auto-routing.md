@@ -1,16 +1,16 @@
 ---
 id: model-auto-routing
 type: design
-version: 0.1.0
+version: 0.2.0
 status: draft
-scope: Claude 구독 엔진에서 모델을 `auto`로 두면 naby가 요청마다 haiku·sonnet·opus·fable 중 하나를 고르고, 고른 모델을 화면에 보여주는 것
+scope: Claude 구독 엔진에서 모델을 `auto`로 두면 naby가 요청마다 sonnet·opus·fable 중 하나를 고르고(haiku는 메인 대화의 후보가 아니다), 고른 모델을 화면에 보여주는 것
 related:
   - claude-multi-account
   - session-context-management
   - naby-voice-layer
   - phase-3-persona-agent
   - phase-3-fast-evolution
-updated: 2026-09-14
+updated: 2026-09-16
 ---
 
 # 모델 자동 선택 (auto)
@@ -21,15 +21,22 @@ updated: 2026-09-14
 
 사용자가 원하는 것은 두 가지다. 요청의 무게에 맞는 모델을 naby가 골라 쓰고, 지금 어느 모델이 돌아가는지 화면에서 보이는 것이다. 매번 같은 모델이 뜨면 그것은 auto가 아니다.
 
+v0.1.0은 짧은 대화를 haiku로 보냈다. 2026-09-16에 실제로 써 보니 haiku가 메인 대화를 받으면 두 가지가 무너진다. 페르소나의 말투를 지키지 못하고, 대화 맥락의 단편만 보고 답한다. 같은 턴을 opus가 받으면 둘 다 문제가 없다. 응답 모델을 고르는 문제와 별개로, **메인 대화를 누가 받는가**에는 바닥이 있어야 한다. haiku는 메인 대화가 아니라 [subagent-delegation](subagent-delegation.md)의 서브에이전트가 쓰는 등급이다. 지시를 다 적어 주고 정해진 형식으로 결과만 돌려받는 자리에서만 haiku가 값을 한다.
+
+같은 날 두 번째 지적이 있었다. 짧은 글이라도 깊은 탐색이나 사고가 필요할 수 있다. "왜 이렇게 동작해?"는 열 글자지만 코드를 따라가 원인을 찾아야 답이 나온다. 길이만 보고 `chat`으로 내리면 이 턴이 sonnet에 걸린다. 그래서 규칙 1에 내용 신호를 더한다. 길이는 `chat`의 상한일 뿐이고, 무엇을 묻는지가 등급을 정한다.
+
+세 번째 지적은 반대 방향이다. 스크립트를 만들거나, 파일을 일괄로 바꾸거나, 저장소를 조사해 목록을 내는 일은 sonnet으로 충분한데 "스크립트 하나 만들어줘"는 "만들어"에, "build a batch script"는 "build"에, "조사해줘"는 deep 목록의 "조사"에 걸려 opus로 갔다. 그래서 산출물의 모양으로 sonnet에 두는 갈래(`routine`)를 더한다. `deep-ask`가 **무엇을 묻는가**(왜·비교·추적)라면 `routine`은 **무엇을 내놓는가**(스크립트·일괄 작업·목록)다.
+
 ## 2. 원칙
 
 1. **명시 선택이 항상 이긴다.** 사용자가 칩에서 특정 모델을 고르면 라우터는 개입하지 않는다. `NABY_DEV_MODEL` 환경변수도 지금처럼 그 위에 있다. 라우팅 대상 에이전트와 서브에이전트가 가진 자기 모델도 그대로다.
 2. **판정에 모델을 부르지 않는다.** 분류용 호출을 하나 더 만들면 아끼려던 비용을 도로 쓴다. 라우터는 순수 함수이고 입력은 이미 손에 있는 신호뿐이다.
-3. **내리는 쪽을 좁게 잡는다.** 약한 모델이 어려운 일을 받으면 에러가 나지 않고 답만 나빠진다. 실패가 조용하므로 haiku로 내리는 조건은 좁고, 올리는 조건은 넓다.
+3. **내리는 쪽을 좁게 잡는다.** 약한 모델이 어려운 일을 받으면 에러가 나지 않고 답만 나빠진다. 실패가 조용하므로 내리는 조건은 좁고, 올리는 조건은 넓다. 애매하면 sonnet이다. 길이는 내리는 조건의 하나일 뿐 그것만으로 내리지 않는다. 원인·비교·설명을 묻는 말이나 코드 식별자가 보이면 짧아도 올린다. "문제 없어", "설명 고마워" 같은 인사가 그 때문에 opus로 가는 일이 있고, 그 비용은 감수한다. 오답을 줄이려고 목록을 다듬지 않는다. 내용으로 내리는 규칙은 `routine` 하나뿐이고, 그 목록은 산출물을 이름 짓는 명사와 뜻이 하나뿐인 일괄 동사만 담는다. run·update·find·move·copy·format·search·list처럼 실제 코드 작업 어디에나 나오는 동사는 넣지 않는다. "update the auth flow"를 sonnet에 보내는 것이 이 원칙이 막으려는 조용한 실패다.
 4. **창에 안 들어가는 모델은 후보가 아니다.** opus는 1M, sonnet과 haiku는 200k다. 대화가 300k까지 찬 세션에서 sonnet을 고르면 그 턴은 실패한다. 창 크기는 비용 규칙이 아니라 자격 조건이다.
 5. **고른 이유를 남긴다.** 무슨 모델을 왜 골랐는지 이벤트에 실어 보내고 화면에서 보여준다. 말없이 바뀌는 모델은 버그처럼 보인다.
 6. **`''`(default)의 뜻은 바꾸지 않는다.** `''`는 지금처럼 "SDK 기본값"이다. `auto`는 새 값이고 SDK에는 절대 닿지 않는다. `auto`는 채팅 바의 선택값이지 에이전트의 모델 필드에 저장되는 값이 아니다.
 7. **한도 규칙은 값이 있을 때만 움직인다.** 한도 퍼센트는 백엔드가 줄 때만 있고 대개 안 온다([claude-multi-account](claude-multi-account.md) §3.4). 값이 없으면 한도 규칙은 없는 것처럼 건너뛰고, 나머지 규칙은 그대로 돈다. 값이 있어야 켜지는 기능은 만들지 않는다는 그 문서의 원칙과 같다.
+8. **메인 대화는 sonnet 아래로 내려가지 않는다.** haiku는 라우터가 고를 수 있는 등급이 아니다. 페르소나 말투와 대화 맥락을 함께 지켜야 하는 자리는 sonnet이 바닥이다(§1의 2026-09-16 관찰). haiku가 쓰이는 자리는 셋뿐이다. 서브에이전트 정의의 `model`(explorer), 영수증을 등급으로 읽는 `tierOfModelId`, 사용자가 칩에서 직접 고른 값(원칙 1). 창 자격 규칙(4.2의 3)도 haiku를 후보에 넣지 않는다. sonnet과 haiku의 창이 같아 오늘은 차이가 없지만, 이 규칙은 카탈로그 값에 기대지 않고 코드에 둔다.
 
 ## 3. 확인한 사실
 
@@ -78,7 +85,7 @@ type RouteSignals = {
 type RouteDecision = { tier: ModelTier; reason: RouteReason };
 type RouteReason =
   | 'plan-mode' | 'design-ask' | 'build-ask' | 'full-mode'
-  | 'chat' | 'default' | 'sticky' | 'window-fit' | 'budget-cap';
+  | 'deep-ask' | 'routine' | 'chat' | 'default' | 'sticky' | 'window-fit' | 'budget-cap';
 ```
 
 등급에는 순서가 있다. **haiku < sonnet < opus < fable**이다. "낮다", "가깝다"는 전부 이 순서로 잰다. 창 크기만은 순서와 별개로 각 등급의 실제 창을 본다.
@@ -88,15 +95,22 @@ type RouteReason =
 1. **바탕 등급.** 요청의 성격으로 한 등급을 고른다.
    - `planMode`이면 **fable**. 사용자가 "먼저 계획, 편집 안 함"을 켠 턴은 설계·검토 턴이다. (`plan-mode`)
    - 텍스트에 설계·스펙·아키텍처·계획서·전략·리뷰·검토 계열 동사가 있고 코드 편집 동사가 없으면 **fable**. (`design-ask`)
-   - 구현·수정·고쳐·리팩터·버그·테스트·만들어·implement·fix·refactor·debug·build·test 계열 동사가 있거나, 코드 펜스가 있거나, 파일 경로가 둘 이상이거나, 본문이 1,200자를 넘으면 **opus**. (`build-ask`) "how should we build the architecture"처럼 설계 질문에 build가 섞이면 opus로 간다. 위로 가는 오답이라 감수한다.
+   - 코드 펜스가 있거나 본문이 1,200자를 넘으면 **opus**. (`build-ask`) 붙여 넣은 코드와 긴 요청서는 무슨 명사가 붙어 있든 코드 작업이다.
+   - 왜·원인·이유·분석·비교·차이·장단점·트레이드오프·추적·조사·찾아·파악·설명·정리·평가·판단·추천·근거·영향·어떻게·어디·문제·에러·오류·실패 계열, 영어 why·analyze·compare·difference·trade-off·investigate·trace·explain·evaluate·recommend·which·where·cause·error·fails·broken·wrong·understand와 `how does`·`how do`·`how is`·`how come`·`how would`·`how should`·`how can` 구절이 있으면 **opus**. (`deep-ask`) 짧아도 답하려면 코드를 따라가거나 근거를 세워야 하는 질문이다. 맨 `how`는 넣지 않는다("how are you"는 대화다). 조사·찾아·정리는 이 목록이 아니라 아래 `routine`에 있다.
+   - 스크립트·배치·일괄·조사·목록·나열·정리·요약·번역·변환·리네임·이름 바꿔·추출·파싱·세어·찾아, 영어 script·batch·bulk·one-off·cron·boilerplate·scaffold·survey·inventory·summarize·summary·translate·convert·rename·enumerate·extract·parse·count·lint·`clean up`이 있으면 **sonnet**. (`routine`) 산출물의 모양이 스크립트·일괄 작업·목록인 일이다. 위의 deep 갈래보다 뒤에 있으므로 "스크립트 왜 실패해?"는 opus로 간다. 진단은 질문이지 산출물이 아니다. 아래 구현 동사·경로 개수·전면 모드보다는 앞에 있어서 "스크립트 만들어줘", "src/a.ts src/b.ts 이름 바꿔줘", "@naby 스크립트 짜줘"는 sonnet이다.
+   - 구현·수정·고쳐·리팩터·버그·테스트·만들어·implement·fix·refactor·debug·build·test 계열 동사가 있거나 파일 경로가 둘 이상이면 **opus**. (`build-ask`) "how should we build the architecture"처럼 설계 질문에 build가 섞이면 opus로 간다. 위로 가는 오답이라 감수한다.
    - `fullMode`이고 단계가 번데기 이상이면 **opus**. 나비가 도구를 여러 스텝 주도하는 턴이다. (`full-mode`)
-   - 본문이 200자 이하이고 코드·경로·URL이 없고 위 동사가 하나도 없으면 **haiku**. (`chat`)
+   - 본문이 200자 이하이고 코드·경로·URL·코드 식별자(camelCase, snake_case, `a.b`, `f()`)가 없고 위 동사·의문어·일괄 작업 명사가 하나도 없으면 **sonnet**. (`chat`) v0.1.0에서는 haiku였다. 이유 코드를 `default`와 나눠 두는 것은 칩 툴팁이 "짧은 대화"와 "일반 요청"을 구분해 보여주기 위해서다. 식별자만 있고 의문어가 없는 턴은 `default`다.
    - 그 밖에는 **sonnet**. (`default`)
+
+   바탕 등급은 sonnet·opus·fable 중 하나다(원칙 8). haiku는 어느 갈래에서도 나오지 않는다.
 2. **붙어 있기.** `previousTier`가 있고 `estimatedContextTokens`가 40k를 넘으면 바탕 등급이 그보다 낮아도 `previousTier`를 유지한다. 턴마다 새 `query()`가 전체 기록을 다시 보내고 프롬프트 캐시는 모델별이므로, 큰 대화에서 모델을 오가면 캐시를 버리고 5시간 창을 더 빨리 쓴다. 작은 대화에서는 매 턴 달라지고 깊은 대화에서는 붙어 있는다. (`sticky`)
-3. **창 자격.** 고른 등급의 창이 `estimatedContextTokens × 1.5 + 20k`보다 작으면 창이 맞는 등급 가운데 순서상 가장 가까운 것으로 바꾼다. 거리가 같으면 높은 쪽이다. 어느 등급도 안 맞으면 창이 가장 큰 등급이다. 추정이 실제보다 작을 수 있으니 여유를 크게 둔다. (`window-fit`)
+3. **창 자격.** 고른 등급의 창이 `estimatedContextTokens × 1.5 + 20k`보다 작으면 창이 맞는 등급 가운데 순서상 가장 가까운 것으로 바꾼다. 거리가 같으면 높은 쪽이다. 어느 등급도 안 맞으면 창이 가장 큰 등급이다. 후보는 메인 등급 셋(`MAIN_TURN_TIERS` = sonnet·opus·fable)이고 haiku는 창이 맞아도 후보가 아니다(원칙 8). 추정이 실제보다 작을 수 있으니 여유를 크게 둔다. (`window-fit`)
 4. **한도 보호.** `usage`의 값이 있을 때만 본다(원칙 7). `opusPct ≥ 90` 또는 `fiveHourPct ≥ 90`이면 opus와 fable을 sonnet으로 내린다. 단 sonnet이 3번 창 자격에 걸리면 내리지 않는다. 창에 안 들어가는 모델로 내려 실패시키는 것보다 한도를 조금 더 쓰는 쪽이 낫다. (`budget-cap`)
 
-키워드 목록은 상수로 두고 한국어·영어를 함께 둔다. 한국어는 조사가 붙어 오므로("설계해줘") 소문자 포함 검사다. 영어는 단어 경계로 비교한다. "explain"이 "plan"에, "specific"이 "spec"에 걸려 가장 비싼 모델로 가는 일이 있어서다. 영어 굴절형(plans, planning, fixes, testing 같은 것)은 목록에 직접 적는다. 코드 펜스 안의 텍스트는 키워드 검사에서 뺀다. 오답을 줄이려고 목록을 키우지 않는다. 애매하면 sonnet이다.
+키워드 목록은 상수로 두고 한국어·영어를 함께 둔다. 한국어는 조사가 붙어 오므로("설계해줘") 소문자 포함 검사다. 영어는 단어 경계로 비교한다. "explain"이 "plan"에, "specific"이 "spec"에 걸려 가장 비싼 모델로 가는 일이 있어서다. 영어 굴절형(plans, planning, fixes, testing 같은 것)은 목록에 직접 적는다. 공백이나 하이픈이 든 영어 항목(`how does`, `trade-off`)은 단어 경계를 붙인 정규식으로 찾는다. 코드 펜스 안의 텍스트는 키워드 검사에서 뺀다. 오답을 줄이려고 목록을 키우지 않는다. 애매하면 sonnet이다. 상수는 `DESIGN_KEYWORDS`·`BUILD_KEYWORDS`·`DEEP_KEYWORDS`·`ROUTINE_KEYWORDS` 넷이다.
+
+`routine`으로 내려도 두 가지가 받쳐 준다. 여러 파일을 뒤지는 조사는 위임 정책이 `explorer`(haiku)에 보내므로 sonnet 메인 턴이 조사를 맡기는 모양이 의도한 그대로다([subagent-delegation](subagent-delegation.md) §4.2). 그리고 붙어 있기 규칙은 위로만 움직이므로, 40k를 넘긴 opus 세션에서 스크립트를 부탁하면 칩은 `sticky` 이유로 opus를 보인다. 그 세션에서 sonnet을 쓰고 싶으면 칩에서 직접 고른다.
 
 ### 4.3 등급을 카탈로그 값으로
 
@@ -108,6 +122,8 @@ type RouteReason =
 | fable | `value`가 `claude-fable`로 시작하는 행 | `fable` |
 | sonnet | `sonnet` | `sonnet` |
 | haiku | `haiku` | `haiku` |
+
+haiku 행은 라우터가 고르는 값이 아니다(원칙 8). 칩 라벨과 `windowsForTiers`가 네 등급을 같은 함수로 다루려고 남겨 둔 행이다.
 
 opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 풀리기 때문이다. auto를 켰다고 창이 1M에서 200k로 줄면 안 된다. 카탈로그가 없을 때도 같은 값을 쓴다. 이 플랜이 `default`로 이미 그 모델을 받고 있으므로 `opus[1m]`은 지어낸 값이 아니다.
 
@@ -153,7 +169,7 @@ opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 �
 - `Chat.tsx`가 init 이벤트의 `model_route`를 상태로 들고 `ModelSwitcher`에 `liveRoute` prop으로 넘긴다. 세션이 바뀌거나 사용자가 auto 아닌 값을 고르면 비운다.
 - 칩의 값이 `auto`이고 `liveRoute`가 있으면 라벨을 "Auto · Sonnet"처럼 쓴다. 등급 표시명은 라이브 카탈로그의 `displayName`을 쓰고 없으면 등급 이름의 첫 글자를 대문자로 쓴다.
 - 칩 툴팁에 이유를 한 줄로 쓴다. 이유 코드별 문구는 i18n 키 `modelSwitcher.route.<reason>`이다.
-  - `plan-mode` "플랜 모드라 설계용 모델" / `design-ask` "설계·검토 요청" / `build-ask` "구현·수정 요청" / `full-mode` "나비 전면 모드" / `chat` "짧은 대화" / `default` "일반 요청" / `sticky` "대화가 커서 이전 모델 유지" / `window-fit` "대화가 커서 큰 창의 모델" / `budget-cap` "한도가 차서 한 단계 낮춤"
+  - `plan-mode` "플랜 모드라 설계용 모델" / `design-ask` "설계·검토 요청" / `build-ask` "구현·수정 요청" / `deep-ask` "깊은 사고가 필요한 질문" / `routine` "스크립트·일괄·조사 작업" / `full-mode` "나비 전면 모드" / `chat` "짧은 대화" / `default` "일반 요청" / `sticky` "대화가 커서 이전 모델 유지" / `window-fit` "대화가 커서 큰 창의 모델" / `budget-cap` "한도가 차서 한 단계 낮춤"
 - result 이벤트의 `context_model`이 도착하면 같은 상태에 `served`로 덧붙이고 툴팁에 실제 id를 함께 보인다. 칩 라벨은 등급 이름을 유지한다.
 
 ## 5. 범위 밖
@@ -179,7 +195,9 @@ opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 �
 
 ## 7. 완료 기준
 
-- 칩에서 Auto를 고르고 "안녕"을 보내면 칩이 "Auto · Haiku"로 바뀌고, 이어서 긴 구현 요청을 보내면 "Auto · Opus"로 바뀐다. 두 턴 사이에 앱을 다시 켜지 않는다.
+- 칩에서 Auto를 고르고 "안녕"을 보내면 칩이 "Auto · Sonnet"으로 바뀌고 툴팁이 "짧은 대화"라고 말한다. 이어서 긴 구현 요청을 보내면 "Auto · Opus"로 바뀐다. 두 턴 사이에 앱을 다시 켜지 않는다.
+- "왜 이렇게 동작해?"처럼 짧아도 원인을 묻는 턴은 "Auto · Opus"이고 툴팁이 "깊은 사고가 필요한 질문"이라고 말한다. 함수 이름만 던진 턴은 sonnet이고 툴팁은 "일반 요청"이다.
+- "스크립트 하나 짜줘", "파일 이름 일괄로 바꿔줘", "이 저장소에서 X 쓰는 곳 조사해줘"는 "Auto · Sonnet"이고 툴팁이 "스크립트·일괄·조사 작업"이라고 말한다. "스크립트 왜 실패해?"는 opus다.
 - 플랜 모드를 켜고 보내면 "Auto · Fable"이다.
 - 대화 기록이 200k 창을 넘긴 세션에서는 짧은 인사도 opus로 간다. 툴팁이 "대화가 커서 큰 창의 모델"이라고 말한다.
 - 대화 기록 추정이 40k를 넘긴 세션에서 직전 턴이 opus였으면 짧은 인사도 opus로 가고 툴팁이 "대화가 커서 이전 모델 유지"라고 말한다.
@@ -189,6 +207,7 @@ opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 �
 - 칩을 Opus로 고정하면 어떤 요청에도 라우터가 개입하지 않는다.
 - `NABY_DEV_MODEL`을 두면 auto를 골라도 그 값이 간다.
 - 에이전트의 모델란에 `auto`를 적어 저장해도 그 에이전트를 부른 턴이 실패하지 않고 턴의 모델로 돈다.
+- 어떤 신호를 넣어도 라우터가 haiku를 돌려주지 않는다. 창이 haiku만 맞는 인위적 입력에서도 메인 등급 안에서 고른다.
 - `cd shell && npm test`, 양 트리 `npm run typecheck`, `npm run spike:model-router`, `npm run spike:02`가 통과한다.
 
 ## 8. 검증 기록 (2026-09-14, v0.1.0 구현)
@@ -201,4 +220,19 @@ opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 �
 | 루트 `npm run typecheck` | `src/`·`electron/` 0건. `shell/**` 30건은 이번 변경과 무관한 파일(git status에 없음) |
 | prod 서버 실 턴 (`model: 'auto'`, "안녕", 임시 DB) | init `model: "haiku"`, `model_route: {tier: haiku, reason: chat}`, result `context_model: "claude-haiku-4-5-20251001"`, 로그 `auto → haiku (chat) as haiku` |
 
-실 엔진에서 돌린 경로는 haiku/chat 하나다. opus 승급·플랜 모드 fable·창 자격·붙어 있기·한도 보호·에이전트 모델 우선은 스파이크와 단위 테스트로만 확인했다. 칩의 "Auto · Haiku" 표시는 순수 함수 테스트로 확인했고 화면에서 눈으로 보지는 않았다.
+실 엔진에서 돌린 경로는 haiku/chat 하나다(v0.1.0 기준. v0.2.0에서 이 갈래는 sonnet으로 바뀌었다. §9). opus 승급·플랜 모드 fable·창 자격·붙어 있기·한도 보호·에이전트 모델 우선은 스파이크와 단위 테스트로만 확인했다. 칩의 "Auto · Haiku" 표시는 순수 함수 테스트로 확인했고 화면에서 눈으로 보지는 않았다.
+
+## 9. 검증 기록 (2026-09-16, v0.2.0 — 메인 대화 바닥 sonnet, 내용 신호로 올리기)
+
+바뀐 것은 넷이다. 규칙 1의 `chat` 갈래가 sonnet을 돌려주고, 창 자격 규칙의 후보가 `MAIN_TURN_TIERS`(sonnet·opus·fable)로 좁혀졌으며, 위임 정책 문장에 작은 모델에 맡길 때의 조건이 붙었다([subagent-delegation](subagent-delegation.md) §4.2). 같은 날 `deep-ask` 갈래와 코드 식별자 검사가 더해져 짧은 질문도 내용으로 올라가고, `routine` 갈래가 더해져 스크립트·일괄·조사 작업은 sonnet에 남는다.
+
+| 항목 | 결과 |
+|---|---|
+| `npm run spike:model-router` | 95/95 통과. `routine` 케이스 열셋을 더했다. "스크립트 하나 짜줘"·"파일 이름 일괄로 바꿔줘"·"src/a.ts src/b.ts 이름 바꿔줘"·"build a batch script to rename files"·전면 모드의 "@naby 스크립트 짜줘"가 sonnet/`routine`이고, "스크립트 왜 실패해?"는 opus, "스크립트 설계 검토해줘"는 fable, 코드 펜스가 붙은 스크립트 요청은 opus다. 순서를 바꾸면서 "why does the build fail"과 "fix the failing tests"의 이유 코드가 `build-ask`에서 `deep-ask`로 바뀌었다(등급은 둘 다 opus 그대로). 바닥 케이스 셋과 바닥 케이스 셋(haiku만 창이 맞는 인위적 입력에서도 sonnet, 직전 등급이 haiku여도 다음 턴이 haiku로 내려가지 않음, `MAIN_TURN_TIERS`에 haiku 없음)에 `deep-ask` 케이스 열셋을 더했다. 짧은 "왜 이렇게 동작해?", 식별자를 부르는 "effectiveAgentModel 어디서 써?", `how does` 구절, `trade-off` 하이픈이 opus로 간다. "how are you"·"고마워"·"안녕."은 그대로 `chat`이고, 식별자만 있고 의문어가 없는 턴은 `default`다. 설계와 구현 갈래가 deep보다 먼저 걸리는 것도 함께 본다 |
+| `npm run spike:delegate` · `spike:02` · `spike:autonomy` | 12/12 · 5/5 · 34/34 통과 |
+| 루트 `npm run typecheck` | `src/`·`electron/` 0건. `shell/**` 30건은 이전과 같은 무관한 파일 |
+| `npm run build:runtime` 뒤 `cd shell && npx vitest run` | 200 파일 · 3900 테스트 통과. `modelRoute.test.ts`의 인사 턴 기대값 셋을 haiku에서 sonnet으로 바꾸고, 짧은 "왜 이렇게 동작해?" 턴이 opus/`deep-ask`로, "스크립트 하나 짜줘"가 sonnet/`routine`으로 가는 케이스를 더했다. `modelRouteLabel.test.ts`의 이유 코드 목록에도 `deep-ask`를 넣어 두 로케일의 문구가 실제로 검사되게 했다 |
+
+실 엔진(prod 빌드 서버)으로 "안녕" 턴을 다시 돌리지는 않았다. 라우터는 순수 함수이고 셸이 가로채는 자리는 v0.1.0과 같으므로, 스파이크와 셸 단위 테스트가 그 갈래를 덮는다. 칩의 "Auto · Sonnet" 표시는 라벨 함수 테스트로만 확인했다.
+
+스파이크에서 기대값을 둘 바꿨다. 중간 길이 예문(§4.2의 `default` 갈래)이 `차이`를 담고 있어 이제 `deep-ask`가 된다. 길이만으로 `default`가 되는 갈래를 덮을 곳이 그 케이스뿐이라, 본문을 신호가 없는 잡담으로 갈고 원래 예문은 `deep-ask` 케이스로 옮겼다. 같은 길이의 두 글이 갈리는 것을 그대로 보여 준다. "explain this function"은 sonnet/`chat`에서 opus/`deep-ask`가 되었다. 그 케이스의 원래 요지인 "`explain`이 `plan`에 걸리지 않는다"는 `reason !== 'design-ask'` 단정으로 남겼다.
