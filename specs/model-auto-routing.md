@@ -160,7 +160,7 @@ opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 �
 | `system/init` | `model_route` | `{ requested: 'auto'; tier: ModelTier; reason: RouteReason }` | 요청 모델이 `auto`인 턴에만 있다. 명시 선택 턴에는 없다. |
 | `result` | `context_model` | string | 기존 필드. 실제로 답한 모델의 id. 클라이언트는 이것을 `served`로 이어 붙인다. |
 
-컨텍스트 게이지의 분모 규칙은 그대로다. 실행이 보고한 창이 먼저고 init의 `model`은 폴백이다([session-context-management](session-context-management.md) §2.1).
+컨텍스트 게이지의 분모 규칙에서 실행이 보고한 창은 여전히 가장 먼저다. 다만 init의 `model`은 폴백만이 아니다 — 서빙된 모델이 같은 모델이면 이 값의 `[1m]` 표식이 1M 티어를 말한다([session-context-management](session-context-management.md) §2.1 분모 2번).
 
 ### 4.7 표시
 

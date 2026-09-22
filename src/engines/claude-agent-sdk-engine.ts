@@ -96,6 +96,12 @@ import {
   parseSdkUsage,
   type SubscriptionUsage,
 } from '../runtime/subscription-usage.js';
+// The tier marker the catalog and the SDK append to a model name (`[1m]`). SHARED
+// with the window registry rather than re-declared here: `reportedContextWindow`
+// matches a `modelUsage` key against a served id, the registry sizes those same
+// ids, and one question with two answers is how the UI ends up believing the
+// wrong one. Pure regex, so it drags nothing else in.
+import { TIER_SUFFIX } from '../runtime/context-window.js';
 
 // What may be echoed out of a harness message. Both are the "rule 1" guard in
 // regex form: a LABEL is a short type name we are willing to render, an ID is an
@@ -1078,14 +1084,41 @@ export function normalizeAgentSdkUsage(raw: {
  * GA, so nothing flagged it any more and the gauge divided by 200k. A number the
  * backend states cannot drift out of date that way.
  *
- * `model` is the id the reading belongs to (the last assistant step's, falling
- * back to init's). WHEN THAT EXACT KEY IS MISSING, only a SOLE entry is taken:
- * a result that billed two models cannot say which of them owns the numerator,
- * and picking one at random would be the same guess this whole path removes.
- * Anything else answers `undefined`, and the caller falls back to the registry.
+ * WHY THE KEYS HAVE TO BE NORMALIZED, which is the bug this function had:
+ * `modelUsage` IS KEYED BY THE ID WE REQUESTED, MARKER AND ALL
+ * (`claude-opus-5[1m]`), while every assistant step reports the served id WITHOUT
+ * it (`claude-opus-5`) — verified twice on a live run, and no local transcript has
+ * ever shown a served id carrying `[1m]`. `model` here is that served id, so the
+ * exact lookup NEVER matched on a 1M run. A single-model turn was rescued by the
+ * sole-entry rule below and looked fine; the moment a second model is billed —
+ * ordinary now that subagents are routed to a cheap one — there were two keys, the
+ * window was dropped, and the gauge fell back to inferring 200k for a
+ * 1,000,000-token run (`97% (194k/200k)`, no `~`, plus the "continue in a new tab"
+ * banner that an exact window at ≥85% fires).
  *
- * Exported so the selection is assertable without a live SDK run.
+ * So the order is: the EXACT key; then the key whose tier suffix stripped equals
+ * the model's, taken only when EXACTLY ONE key matches; then a SOLE entry. Two
+ * candidates and nothing to choose between them answers `undefined` — for the
+ * normalized match and the multi-entry case alike, because a result that billed
+ * two models cannot say which owns the numerator and picking one at random is the
+ * same guess this whole path removes. The caller then falls back to the registry,
+ * which reads the requested tier itself (`requestedOneMTier`).
+ *
+ * The exact match stays FIRST on purpose: it is the run's own attribution. It does
+ * mean that a result billing both `claude-opus-5[1m]` and a bare `claude-opus-5`
+ * would answer with the bare one — not a shape any run has produced (subagents go
+ * to haiku), and "believe the exact key" is the safer default of the two.
+ *
+ * `model` is the id the reading belongs to (the last assistant step's, falling
+ * back to init's). Exported so the selection is assertable without a live SDK run.
  */
+/** A model id reduced to the name it shares with the other tier of itself:
+ *  `claude-opus-5[1m]` → `claude-opus-5`. Case and padding go too, since these
+ *  ids arrive from two different messages of the same run. */
+function normalizeTier(id: string): string {
+  return id.trim().toLowerCase().replace(TIER_SUFFIX, '');
+}
+
 export function reportedContextWindow(
   modelUsage: Record<string, ModelUsage> | undefined,
   model: string | undefined,
@@ -1095,6 +1128,15 @@ export function reportedContextWindow(
   if (!modelUsage || typeof modelUsage !== 'object') return undefined;
   const keys = Object.keys(modelUsage);
   let entry: ModelUsage | undefined = model !== undefined ? modelUsage[model] : undefined;
+  if (entry === undefined && model !== undefined) {
+    // The tier suffix stripped from BOTH sides, because which side carries the
+    // marker is the SDK's business and has already moved once. `TIER_SUFFIX` is
+    // imported rather than re-declared: the registry answers the same question
+    // about the same ids, and two copies would let the UI believe the wrong one.
+    const base = normalizeTier(model);
+    const matches = keys.filter((k) => normalizeTier(k) === base);
+    if (matches.length === 1) entry = modelUsage[matches[0] as string];
+  }
   if (entry === undefined) {
     if (keys.length !== 1) return undefined;
     entry = modelUsage[keys[0] as string];
@@ -1699,9 +1741,12 @@ export class ClaudeAgentSdkEngine implements Engine {
     //                   denominator always describe the same call.
     //   initModel     — the id the init message resolved, as the fallback for a
     //                   turn that ends before any assistant message lands.
-    //   initBetas     — what the CLI negotiated. `context-1m-2025-08-07` here is
-    //                   the difference between a 200k and a 1M window, and it is
-    //                   the sign-in's plan that decides it, not this app.
+    //   initBetas     — what the CLI negotiated. This USED to be how a 1M turn
+    //                   was told from a 200k one; the tier went GA and a live run
+    //                   now sends no `betas` at all, so it is carried for older
+    //                   CLIs only. The live tier signal is the id we REQUESTED
+    //                   (`requestedOneMTier` in runtime/context-window.ts), which
+    //                   the consumer already has.
     //
     // ALL THREE ARE MAIN-THREAD ONLY, for the same reason the token reading is: a
     // subagent runs in its own window on possibly its own model.
@@ -1963,10 +2008,16 @@ export class ClaudeAgentSdkEngine implements Engine {
                 // message reports nothing, and taking it would blank a real reading.
                 if (typeof total === 'number' && total > 0) lastStepInputTokens = total;
               }
-              // The id that produced this step. Anthropic's assistant message
-              // carries the concrete model (`claude-opus-5[1m]` on a long-context
-              // run), which is the only place the tier is visible when the CLI
-              // negotiated it without announcing a beta. Typed (`BetaMessage`)
+              // The id that produced this step — the concrete model, which is
+              // what the window registry can size and what pins the numerator and
+              // the denominator to the same call.
+              //
+              // IT DOES NOT CARRY THE TIER. Verified twice on a live 1M run and
+              // across every local transcript: the step reports `claude-opus-5`
+              // with the `[1m]` marker STRIPPED, even when that is exactly the id
+              // we requested. That mismatch is why `reportedContextWindow` has to
+              // normalize the suffix before matching `modelUsage`, and why the
+              // requested id is the consumer's tier signal. Typed (`BetaMessage`)
               // for the same reason as the init fields above.
               if (msg.message.model) lastStepModel = msg.message.model;
             }

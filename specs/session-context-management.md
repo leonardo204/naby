@@ -1,7 +1,7 @@
 ---
 id: session-context-management
 type: design
-version: 0.4.1
+version: 0.4.2
 status: active
 scope: 세션 컨텍스트 창 관리 — 상태 바의 창 사용률 게이지와 임계 안내, "새 탭에서 이어가기"(요약 인계 + 세션 스코프 환경 승계), ai-sdk 엔진의 롤링 요약 자동 컴팩션. Agent SDK 엔진의 자체 컴팩션은 건드리지 않고 표시만 한다.
 related:
@@ -10,7 +10,7 @@ related:
   - naby-activity-log
   - telegram-chat
   - model-auto-routing
-updated: 2026-09-14
+updated: 2026-09-22
 ---
 
 # 세션 컨텍스트 관리
@@ -26,8 +26,16 @@ updated: 2026-09-14
 ### 2.1 창 사용률 게이지
 
 - **측정** — 턴의 마지막 스텝이 보고한 입력 토큰(캐시 리드 포함)이 곧 현재 창 점유량이다. 모델이 실제로 받은 양이므로 추정이 아니라 실측이다. 스텝별 usage가 없으면 게이지를 **숨긴다** — 측정하지 않은 것을 지어내지는 않는다. 이 규칙은 그대로다.
-- **모델 식별** — 분모를 정하는 것은 **실행이 실제로 보고한 구체적 모델 id**이지, 우리가 요청한 문자열이 아니다. 둘은 분모가 중요해지는 바로 그 지점에서 갈라진다. Claude 경로의 기본값은 `default`(Agent SDK의 "알아서 고르기" 행)라 어떤 창도 이름 대지 못하고, `opus` 같은 별칭도 마찬가지다. 실행 쪽은 언제나 답을 안다 — Agent SDK는 `system`/`init`의 `model`과 매 assistant 메시지의 `message.model`로, ai-sdk는 스텝 응답의 `response.modelId`로 알려준다. 엔진은 이것을 `contextModel`로, 협상된 베타 목록을 `contextBetas`로 result 이벤트에 실어 보낸다. *(v0.4.1 추기)* 모델 칩이 `auto`인 턴은 셸의 `system/init`이 `model`에 naby가 고른 카탈로그 값(`sonnet`, `opus[1m]` 같은 것)을 싣고 고른 이유는 `model_route`에 따로 싣는다([model-auto-routing](model-auto-routing.md) §4.6). 분모 규칙은 바뀌지 않는다. 실행이 보고한 창이 먼저고 init의 `model`은 폴백이다.
-- **분모** — *(v0.4.0에서 개정)* **실행이 스스로 보고한 창이 최우선이다.** Agent SDK의 result 메시지는 `modelUsage[모델].contextWindow`로 그 실행의 창을 직접 말해주며, 엔진이 이를 `contextWindow`로 result 이벤트에 실어 보내고 셸은 이 값을 그대로 분모로 쓴다. 개정한 이유: 1M 티어가 GA가 되면서 기존의 두 추론 신호 — 구체적 id의 `[1m]` 표식과 베타 `context-1m-2025-08-07` — 가 **둘 다 오지 않게 됐고**(실측: SDK 0.3.215, `claude-fable-5`가 베타 없이 1M), 게이지가 1M 실행을 200k로 나눴다. 백엔드가 말한 숫자는 이런 식으로 낡을 수 없다. 레지스트리 추론(`contextWindowFor(engine, model, { betas })`)은 **아무것도 보고하지 않는 백엔드의 폴백**으로 남는다 — Claude 계열 200k, 두 신호 중 하나가 있으면 1M.
+- **모델 식별** — 분모를 계산할 때 이름을 대는 것은 **실행이 실제로 보고한 구체적 모델 id**다. 요청한 문자열은 티어를 말할 때만 함께 읽는다(아래 분모 2번). 둘은 분모가 중요해지는 바로 그 지점에서 갈라진다. Claude 경로의 기본값은 `default`(Agent SDK의 "알아서 고르기" 행)라 어떤 창도 이름 대지 못하고, `opus` 같은 별칭도 마찬가지다. 실행 쪽은 언제나 답을 안다 — Agent SDK는 `system`/`init`의 `model`과 매 assistant 메시지의 `message.model`로, ai-sdk는 스텝 응답의 `response.modelId`로 알려준다. 엔진은 이것을 `contextModel`로, 협상된 베타 목록을 `contextBetas`로 result 이벤트에 실어 보낸다. *(v0.4.1 추기)* 모델 칩이 `auto`인 턴은 셸의 `system/init`이 `model`에 naby가 고른 카탈로그 값(`sonnet`, `opus[1m]` 같은 것)을 싣고 고른 이유는 `model_route`에 따로 싣는다([model-auto-routing](model-auto-routing.md) §4.6). *(v0.4.2 추기)* 이 카탈로그 값이 분모 규칙의 2번·4번이 읽는 "요청한 id"다. 표식 붙은 별칭(`opus[1m]`)이 1M 티어를 말하는 유일한 자리이기도 하다.
+- **분모** — *(v0.4.2에서 개정)* 네 단계로 정한다. 앞 단계가 답을 내면 뒤는 보지 않는다.
+  1. **실행이 보고한 창.** Agent SDK의 result 메시지가 `modelUsage[모델].contextWindow`로 그 실행의 창을 직접 말해준다. 측정값이라 가장 먼저다.
+  2. **우리가 요청한 티어** — 실행이 서빙한 모델이 같은 모델일 때만이다(`requestedOneMTier`). `opus[1m]`을 보내고 `claude-opus-5`를 받았으면 그 턴은 1M이다.
+  3. **서빙된 id의 레지스트리 답** — `contextWindowFor(engine, model, { betas, requested })`.
+  4. **요청 라벨의 레지스트리 답** — id를 보고하지 못하고 끝난 턴을 위한 마지막 수단이다.
+
+  2번을 새로 넣은 이유는 1번이 늘 오지는 않기 때문이다. `modelUsage`의 **키는 우리가 요청한 id 그대로**(`claude-opus-5[1m]`)인데 assistant 스텝이 보고하는 서빙 id에는 표식이 없어서(`claude-opus-5`) 정확 일치가 성립하지 않는다. 모델이 하나뿐인 턴은 "항목이 하나면 그것을 쓴다"는 규칙에 걸려 우연히 맞았다. 그런데 서브에이전트를 싼 모델로 돌리기 시작하면서([model-auto-routing](model-auto-routing.md)) 항목이 둘인 턴이 평범해졌고, 그때부터 측정값이 통째로 버려졌다. 그러면 3번이 200k라고 답하고 4번에는 닿지도 않는다. 1M 실행이 `97% (194k/200k)`로 — `~` 표시도 없이, "새 탭에서 이어가기" 배너까지 달고 — 나온 것이 이것이다. 엔진은 `modelUsage` 키에서 티어 접미사만 떼고 맞춰보게 고쳤고(정확히 하나만 걸릴 때), 레지스트리는 요청 id를 세 번째 1M 신호로 읽는다. `max(서빙, 요청)`은 쓰지 않는다 — 거부 폴백으로 `opus[1m]`이 haiku로 내려간 턴은 아무리 크게 요청했어도 200k다.
+
+  베타 `context-1m-2025-08-07`과 서빙 id의 `[1m]` 표식은 **둘 다 오지 않는다.** 1M 티어가 GA가 되면서 끊긴 신호이고, 레거시 CLI를 위해서만 남겨둔다.
 - **모르는 분모** — *(v0.3.0에서 개정)* 이전 규칙은 "모르면 비율 없이 토큰 수만"이었으나, 사용자 보고로 뒤집혔다. `293k`라는 숫자만으로는 읽는 사람이 아무것도 판단하지 못하고, 게다가 이 경우가 예외가 아니라 **가장 흔한 경로**였다. 그래서 이제는 **언제나 비율을 보여주되 근사치임을 표시한다**(`~29%`). 규칙은 세 가지다.
   - 정확한 창을 알고 측정값이 그 안이면 → 그대로 `66%`.
   - 측정값이 알고 있던 창을 **넘으면** → 그 계열의 다음 티어로 올린다(Claude 200k → 1M). 측정값은 이 실행에 대한 사실이고 창은 id에서 끌어낸 추론이므로, 측정값을 믿는다. 올릴 티어가 없으면 그대로 두어 100%가 넘게 표시한다 — "우리가 아는 모든 창보다 크다"의 정직한 표현이다.
@@ -113,6 +121,13 @@ updated: 2026-09-14
 - 셸 `npm test` — **1872 통과 / 96 파일**(기준선 1854). 신규 18건: `sessionHandoff` 12건(cwd 폴백·noLearn·기억 복사와 복사 실패 용서·플랜 모드·재바인딩 심과 실패 용서·의도적 미승계·프롬프트의 작업 환경 항목) · `continueInNewTab` 2건(엔드투엔드 승계·다른 세션 링크 불간섭) · `telegramChat` 2건 · `scheduledTasks` 2건. 실행 보고 분모는 v1.15.0에서 `contextWindow.test.ts` 7건으로 고정했다(보고값 우선·부재 시 추론 폴백).
 - 타입체크 — 루트 기준선 그대로(30건, 이 작업이 건드린 파일에는 없음).
 - 실측 근거 — SDK 0.3.215 라이브 프로브: init `betas: undefined`, 모델 id `claude-fable-5`(표식 없음), `modelUsage["claude-fable-5"].contextWindow = 1000000`.
+
+### 검증 기록 (v0.4.2 — 요청 티어를 세 번째 신호로)
+
+- 실측 근거 — `claude-opus-5[1m]`을 요청한 라이브 Agent SDK 프로브 2회. init `model`은 `claude-opus-5[1m]`(표식 유지), assistant 스텝 `message.model`은 `claude-opus-5`(표식 탈락), `betas` 없음, 단일 모델 턴 `modelUsage = { "claude-opus-5[1m]": 1000000 }`, Task 서브에이전트를 쓴 턴 `modelUsage = { "claude-opus-5[1m]": 1000000, "claude-haiku-4-5-20251001": 200000 }`. 로컬 트랜스크립트 전수에서도 서빙 id가 `[1m]`을 단 적은 없다(`claude-opus-5` 24747건, `[1m]` 형태 0건).
+- 셸 `npm test` — **3906 통과 / 200 파일**. 고친 코드 없이 먼저 돌려 4건이 빨갛게 실패하는 것을 확인한 뒤 고쳤다.
+- 런타임 — `npm run build:runtime` 후 `npm run spike:model-router` **98/98 통과**. 빌드된 `dist`에 실측 그대로의 `modelUsage`를 넣어 1,000,000이 나오는 것과, haiku로 내려간 턴이 200,000으로 남는 것을 함께 확인했다.
+- 타입체크 — 루트 30건으로 기준선과 같다(`git stash` 대조). 이 작업이 건드린 파일에는 없다.
 
 ### 남긴 것
 

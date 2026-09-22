@@ -409,16 +409,26 @@ export type EngineEvent =
        * assistant message carry the resolved id, and `ai@7` reports the resolved
        * id on the step response.
        *
+       * IT IS NOT WHERE THE 1M TIER IS VISIBLE, and it never was — a claim that
+       * used to stand here. The Agent SDK strips the `[1m]` marker from the served
+       * id (verified twice live; 0 of 24747 local transcript ids carry it), so this
+       * field names a 200k model on a 1,000,000-token run. The tier lives on the id
+       * we REQUESTED, which keeps the marker — consumers pair the two
+       * (`requestedOneMTier` in runtime/context-window.ts), so that the request is
+       * read only when this field names the SAME model.
+       *
        * Undefined only when the backend reported nothing at all (a turn that
        * failed before its first step). Consumers fall back to the configured id.
        */
       contextModel?: string;
       /**
-       * The betas the RUN negotiated, as the backend reported them. Currently one
-       * thing depends on it: `context-1m-2025-08-07` is how a Claude turn on the
-       * long-context tier is distinguished from an ordinary 200k one — a
-       * difference of five times the denominator that nothing in our own
-       * configuration can predict, because the plan decides it.
+       * The betas the RUN negotiated, as the backend reported them.
+       *
+       * LEGACY, AND KEPT FOR OLDER CLIs. `context-1m-2025-08-07` was how a Claude
+       * turn on the long-context tier was told from an ordinary 200k one; the tier
+       * is GA now and a live run sends no `betas` array whatsoever, so this field
+       * is usually absent on exactly the turns it was added for. Consumers must not
+       * read its absence as "200k" — see `contextModel` above.
        */
       contextBetas?: readonly string[];
       /**
@@ -435,10 +445,15 @@ export type EngineEvent =
        * times larger. A number the run states about itself cannot go stale that
        * way.
        *
-       * Absent when the backend reported none (every AI-SDK turn, and an Agent
-       * SDK turn whose result names no usable entry). Consumers then fall back to
-       * `contextWindowFor(contextModel, { betas: contextBetas })` exactly as
-       * before, so this field only ever adds an answer.
+       * IT DOES NOT ALWAYS ARRIVE, and a consumer that assumes it does will show a
+       * wrong number. It is absent on every AI-SDK turn, on an Agent SDK turn that
+       * ends before its result, and on any result whose `modelUsage` names no entry
+       * that can be attributed to the reading — a result billing two models with no
+       * matchable key answers nothing rather than guessing (see
+       * `reportedContextWindow`). Consumers then fall back to
+       * `contextWindowFor(contextModel, { betas: contextBetas, requested })`, where
+       * `requested` is the configured id — the only remaining statement about the
+       * 1M tier. So this field adds an answer; it does not replace that chain.
        */
       contextWindow?: number;
     }

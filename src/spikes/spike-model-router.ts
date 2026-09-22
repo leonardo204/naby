@@ -46,7 +46,12 @@
 //   CATALOG (§4.3)
 //     (p) the real cache shape, and the no-catalog fallback.
 //     (q) windows measured end-to-end through the real `contextWindowFor`,
-//         including the `opus[1m]` → 1M lookup this milestone depends on.
+//         including the `opus[1m]` → 1M lookup this milestone depends on, and the
+//         REQUESTED-id 1M signal: the tier went GA, so a live run serves
+//         `claude-opus-5` with the marker stripped and sends no beta — the catalog
+//         value we asked for is the only statement about the tier left. Read only
+//         when the served id names the SAME model, so a refusal fallback down to
+//         haiku is still 200k.
 //   IDS AND ESTIMATES (§4.4)
 //     (r) `tierOfModelId` on resolved ids, aliases and garbage.
 //     (s) `estimateContextTokens` over a typed `RuntimeMessage[]` — including a
@@ -59,6 +64,7 @@ import {
   CLAUDE_1M_CONTEXT_WINDOW,
   CLAUDE_CONTEXT_WINDOW,
   contextWindowFor,
+  requestedOneMTier,
 } from '../runtime/context-window.js';
 import type { RuntimeMessage } from '../runtime/engine.js';
 import {
@@ -802,6 +808,44 @@ function checkCatalog(): void {
     "(q) 'default' is still an unknown window",
     contextWindowFor('dev-claude', 'default') === undefined,
     String(contextWindowFor('dev-claude', 'default')),
+  );
+  // The live shape, verified twice against the real SDK: we send the catalog's
+  // `opus[1m]`, the assistant steps report `claude-opus-5` with the marker
+  // STRIPPED, and no `betas` array arrives at all. Without the requested id the
+  // gauge sizes a 1,000,000-token run at 200k.
+  record(
+    "(q) requested 'opus[1m]' sizes a served 'claude-opus-5' at 1M",
+    contextWindowFor('dev-claude', 'claude-opus-5', { requested: 'opus[1m]' }) ===
+      CLAUDE_1M_CONTEXT_WINDOW &&
+      contextWindowFor('dev-claude', 'claude-opus-5', { requested: 'claude-opus-5[1m]' }) ===
+        CLAUDE_1M_CONTEXT_WINDOW &&
+      contextWindowFor('dev-claude', '', { requested: 'opus[1m]' }) === CLAUDE_1M_CONTEXT_WINDOW,
+    `alias=${String(contextWindowFor('dev-claude', 'claude-opus-5', { requested: 'opus[1m]' }))} id=${String(contextWindowFor('dev-claude', 'claude-opus-5', { requested: 'claude-opus-5[1m]' }))} empty=${String(contextWindowFor('dev-claude', '', { requested: 'opus[1m]' }))}`,
+  );
+  // …and the guard that makes reading a REQUEST safe: the CLI can swap the model
+  // mid-turn (a refusal fallback does exactly that), and that turn is on the new
+  // model's window. Same-model check, never the larger of the two.
+  record(
+    '(q) a requested 1M tier does not follow the run onto another model',
+    contextWindowFor('dev-claude', 'claude-haiku-4-5-20251001', { requested: 'opus[1m]' }) ===
+      CLAUDE_CONTEXT_WINDOW &&
+      contextWindowFor('dev-claude', 'claude-sonnet-5', { requested: 'claude-opus-5[1m]' }) ===
+        CLAUDE_CONTEXT_WINDOW &&
+      contextWindowFor('dev-claude', 'claude-opus-5', { requested: 'opus' }) ===
+        CLAUDE_CONTEXT_WINDOW,
+    `haiku=${String(contextWindowFor('dev-claude', 'claude-haiku-4-5-20251001', { requested: 'opus[1m]' }))} sonnet=${String(contextWindowFor('dev-claude', 'claude-sonnet-5', { requested: 'claude-opus-5[1m]' }))} plain=${String(contextWindowFor('dev-claude', 'claude-opus-5', { requested: 'opus' }))}`,
+  );
+  // The rule on its own, including the fable tier the catalog also names.
+  record(
+    '(q) requestedOneMTier pairs a request with the id the run served',
+    requestedOneMTier('opus[1m]', 'claude-opus-5') &&
+      requestedOneMTier('claude-fable-5-1[1m]', 'claude-fable-5-1') &&
+      requestedOneMTier('opus[1m]', '') &&
+      !requestedOneMTier('opus[1m]', 'claude-haiku-4-5-20251001') &&
+      !requestedOneMTier('opus', 'claude-opus-5') &&
+      !requestedOneMTier('default', 'claude-opus-5') &&
+      !requestedOneMTier(undefined, 'claude-opus-5'),
+    `opus→opus5=${String(requestedOneMTier('opus[1m]', 'claude-opus-5'))} opus→haiku=${String(requestedOneMTier('opus[1m]', 'claude-haiku-4-5-20251001'))}`,
   );
   record(
     '(q) windowsForTiers over the live catalog: opus/fable 1M, sonnet/haiku 200k',

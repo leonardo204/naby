@@ -52,6 +52,14 @@ export {
   CLAUDE_1M_CONTEXT_WINDOW,
   CONTEXT_1M_BETA,
   FALLBACK_CONTEXT_WINDOW,
+  // The live 1M signal — "the tier we ASKED for is the tier this run is on" —
+  // exported on its own so the shell can assert the same-model rule that keeps a
+  // requested tier off a model the run swapped to (contextWindow.test.ts).
+  requestedOneMTier,
+  // The tier marker the catalog and the SDK append to a model name. Shared rather
+  // than re-declared, because the Agent SDK engine matches `modelUsage` keys with
+  // it and two copies would be two answers to one question.
+  TIER_SUFFIX,
   type ContextWindowEngine,
 } from './runtime/context-window.js';
 
