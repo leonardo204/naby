@@ -24,3 +24,5 @@ release/
 # Code-signing key material. Never commit — see the release docs.
 *.p12
 *.pfx
+.claude/.dotclaude-version
+.claude/.dotclaude-manifest.json
