@@ -116,6 +116,34 @@ const ONE_M_MARKER = /(^|[^a-z0-9])1m($|[^a-z0-9])/;
 export const FALLBACK_CONTEXT_WINDOW = 128_000;
 
 /**
+ * Claude model names whose DEFAULT window is 1M — no `[1m]` marker, beta or
+ * requested tier needed to be on it. Fable is not listed: the whole family is
+ * 1M-default and has its own rule in RULES.
+ *
+ * Append a name here only after its model card says so; see the RULES comment
+ * for why this is a list rather than a version comparison.
+ */
+export const ONE_M_DEFAULT_CLAUDE_MODELS: readonly string[] = ['claude-opus-5-5'];
+
+/**
+ * Whether `id` names one of ONE_M_DEFAULT_CLAUDE_MODELS.
+ *
+ * The name must stand ALONE (bounded by a non-alphanumeric on each side, the
+ * same rule as ONE_M_MARKER), so a dated snapshot (`claude-opus-5-5-20260901`),
+ * a Bedrock id (`anthropic.claude-opus-5-5-v1:0`) or a `[1m]` suffix still
+ * matches, while `claude-opus-5` and a hypothetical `claude-opus-5-50` do not.
+ */
+function isOneMDefaultClaudeId(id: string): boolean {
+  return ONE_M_DEFAULT_CLAUDE_MODELS.some((name) => {
+    const at = id.indexOf(name);
+    if (at < 0) return false;
+    const before = at === 0 ? '' : id.charAt(at - 1);
+    const after = id.charAt(at + name.length);
+    return !/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after);
+  });
+}
+
+/**
  * Model id -> window size, as ordered prefix rules (first match wins).
  *
  * The ids are the ones this codebase actually produces: `describeProviders`
@@ -130,6 +158,22 @@ const RULES: ReadonlyArray<{ test: (id: string) => boolean; window: number }> = 
   // `[1m]` marker (see engine.ts `contextWindowReported`). Checked BEFORE the
   // generic Claude rule, which would answer 200k.
   { test: (id) => id.includes('claude-fable'), window: CLAUDE_1M_CONTEXT_WINDOW },
+  // Opus ids whose DEFAULT window is 1M, with no `[1m]` marker needed. Opus 5.5
+  // is the first: Anthropic publishes 1,000,000 as its default, and SDK 0.3.283's
+  // catalog lists it only as plain `opus` (resolving to `claude-opus-5-5`), with
+  // no `opus[1m]` row left to carry the marker.
+  //
+  // AN EXPLICIT LIST, NOT "opus >= 5.5". A version comparison would size the
+  // NEXT opus before anyone has read its model card — the guess this file's one
+  // rule forbids (a future id could ship at 200k or at 2M). New 1M-default ids
+  // are appended to ONE_M_DEFAULT_CLAUDE_MODELS when the weekly SDK check
+  // (`npm run sdk:check`) reports them and their model card confirms the size.
+  // Plain `claude-opus-5` stays OFF the list on purpose: it is 200k unless
+  // the run is shown to be on the 1M tier (marker, beta, or requested tier).
+  //
+  // See `isOneMDefaultClaudeId` for how an id is matched. Checked BEFORE the
+  // generic Claude rule, which would answer 200k.
+  { test: (id) => isOneMDefaultClaudeId(id), window: CLAUDE_1M_CONTEXT_WINDOW },
   // Anthropic, direct or through Bedrock (`anthropic.claude-…`) — 200k.
   { test: (id) => id.includes('claude'), window: CLAUDE_CONTEXT_WINDOW },
   // The Agent SDK aliases, which name no generation at all.
@@ -286,4 +330,40 @@ export function contextWindowFor(
   // An unknown model. The caller shows tokens without a ratio (gauge) or falls
   // back to FALLBACK_CONTEXT_WINDOW (compaction) — never a guess presented as fact.
   return undefined;
+}
+
+/**
+ * The window a CATALOG VALUE runs in, read through its catalog row.
+ *
+ * `contextWindowFor` sizes an id; a catalog value is often an alias, and an alias
+ * names no generation. The live catalog says what each alias resolves to
+ * (`resolvedModel`), so this sizes THAT — the same pairing the gauge uses for a
+ * finished run: the resolved id as the served model, the value as the request.
+ *
+ *   `opus`     → `claude-opus-5-5`   → 1M (SDK 0.3.283; 1M-default model)
+ *   `opus[1m]` → `claude-opus-5[1m]` → 1M (SDK 0.3.259; the marker, or
+ *                                         `requestedOneMTier` if it is stripped)
+ *   `sonnet`   → `claude-sonnet-5`   → 200k
+ *
+ * WHY IT EXISTS: `auto` sizes each tier before choosing one (`windowsForTiers`),
+ * and on 0.3.283 opus is sent as plain `opus`. Sized as a bare alias that is
+ * 200k, and `window-fit` would move every long conversation off a 1M opus.
+ *
+ * No row, or a row without `resolvedModel` → the bare value, exactly as before.
+ * A resolved id the table does not know also falls back to the value, so this
+ * never answers LESS than `contextWindowFor(engine, value)` would for lack of a
+ * rule. The row type is structural so this file keeps no dependency on the router.
+ */
+export function contextWindowForCatalogValue(
+  engine: ContextWindowEngine | undefined,
+  value: string,
+  rows: readonly { value: string; resolvedModel?: string }[] | undefined,
+): number | undefined {
+  const row = rows?.find((r) => r?.value === value);
+  const resolved = typeof row?.resolvedModel === 'string' ? row.resolvedModel.trim() : '';
+  if (resolved) {
+    const window = contextWindowFor(engine, resolved, { requested: value });
+    if (window !== undefined) return window;
+  }
+  return contextWindowFor(engine, value);
 }

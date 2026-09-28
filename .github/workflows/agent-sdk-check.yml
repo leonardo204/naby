@@ -1,0 +1,73 @@
+# .github/workflows/agent-sdk-check.yml
+#
+# WEEKLY: IS THERE A NEWER CLAUDE AGENT SDK, AND WHICH MODELS DOES IT BRING?
+#
+# naby pins @anthropic-ai/claude-agent-sdk exactly (root and shell/), and the
+# model list the app offers comes from the CLI binary bundled in that pin. A new
+# model therefore reaches users only when someone bumps the pin — this workflow
+# is what tells them to. It runs `scripts/check-agent-sdk.mjs --ci`, which diffs
+# the Claude model ids in the pinned and the latest binaries, and when latest is
+# newer it opens an issue "Agent SDK <version> available" (or refreshes the body
+# of the open one with that title) carrying the new ids and the bump checklist.
+#
+# NO AUTOMATIC PR, on purpose. The shell is a submodule of another repository, so
+# a bump is a commit there, a commit here and a pointer move — plus a live probe
+# with a signed-in account that CI does not have. An issue is the honest output.
+
+name: Agent SDK check
+
+on:
+  schedule:
+    # Monday 00:00 UTC (09:00 KST).
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: agent-sdk-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Compare pinned SDK with npm latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # shell/package.json carries the second pin. The script tolerates a
+          # missing submodule (it reports the shell pin as "not checked out").
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # No `npm ci`: the script needs only npm itself (`npm view`, `npm pack`).
+      - name: Check the Agent SDK
+        id: check
+        run: node scripts/check-agent-sdk.mjs --ci --out "$RUNNER_TEMP/agent-sdk-check.md"
+
+      - name: Open or update the issue
+        if: steps.check.outputs.newer == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          BODY_FILE: ${{ runner.temp }}/agent-sdk-check.md
+        run: |
+          set -euo pipefail
+          title="Agent SDK ${LATEST} available"
+          # Dedup by EXACT title among open issues; `--search` narrows, `select`
+          # makes it exact.
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"${title}\" in:title" --json number,title \
+            --jq ".[] | select(.title == \"${title}\") | .number" | head -n 1)
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE"
+            echo "Updated issue #${existing}"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$BODY_FILE"
+          fi

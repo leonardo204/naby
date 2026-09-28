@@ -15,8 +15,13 @@
 //
 // WHERE THE LIST COMES FROM, AND WHY IT EXPIRES. These names were taken from the
 // STRINGS IN THE BUNDLED CLI BINARY — @anthropic-ai/claude-agent-sdk 0.3.259,
-// whose manifest.json reports CLI **2.1.259** (build 2026-09-02). They are
-// therefore a fact about one build, not a documented contract: the CLI has
+// whose manifest.json reports CLI **2.1.259** (build 2026-09-02) — and
+// re-checked against SDK 0.3.283 / CLI **2.1.283** (build 2026-09-25) on
+// 2026-09-28: every name below is still present. The model-related names the
+// newer binary adds are `CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY_TIMEOUT_MS` and
+// `CLAUDE_CODE_MODEL_CAPABILITIES`; neither picks a turn's model, so neither is
+// listed. (`spike:subagent-model` was NOT re-run against a real sign-in for that
+// bump.) They are therefore a fact about one build, not a documented contract: the CLI has
 // already changed how it resolves a subagent model once (the environment variable
 // came FIRST before 2.1.251), and it can add or drop a variable in any release.
 // SO, ON EVERY SDK BUMP: re-extract the strings from the new binary, reconcile

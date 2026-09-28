@@ -1,7 +1,7 @@
 ---
 id: subagent-delegation
 type: design
-version: 0.1.1
+version: 0.1.2
 status: draft
 scope: 값싼 내장 서브에이전트(탐색 haiku·구현 sonnet)와 위임 정책으로 메인 대화 기록을 작게 유지하는 것, 서브에이전트가 실제로 쓴 모델을 보이게 하는 것, 엔진 동작을 바꾸는 환경변수를 드러내는 것
 related:
@@ -13,7 +13,7 @@ related:
   - claude-multi-account
   - phase-3-persona-agent
   - settings-ia-reorg
-updated: 2026-09-16
+updated: 2026-09-28
 ---
 
 # 서브에이전트 위임과 모델 관측
@@ -24,7 +24,7 @@ updated: 2026-09-16
 
 서브에이전트는 자기 창에서 돌고 결론만 메인 기록에 남긴다. naby는 이미 서브에이전트마다 `model`을 둘 수 있고 엔진이 그것을 Agent SDK의 네이티브 에이전트로 넘긴다. 없는 것은 셋이다. 값싼 서브에이전트가 기본으로 들어 있지 않고, 메인 모델에게 언제 위임하라는 말이 없으며, 서브에이전트가 실제로 어느 모델로 돌았는지 아무 데도 남지 않는다.
 
-세 번째가 사용자의 우려와 닿는다. Claude Code는 서브에이전트 모델 해석 순서를 버전마다 바꿔 왔다. 호출 시 `model` → 정의의 `model`(`inherit` 포함) → `CLAUDE_CODE_SUBAGENT_MODEL` → 메인 모델이 지금 순서이고, 2.1.251 이전에는 환경변수가 맨 앞이었다. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`은 전부를 덮는다. naby는 SDK 0.3.259(번들 CLI 2.1.259)를 고정해 쓰므로 어느 순서가 적용되는지는 SDK를 올릴 때마다 달라질 수 있다. 우선순위에 기대는 코드는 SDK를 올리는 날 조용히 뒤집힌다.
+세 번째가 사용자의 우려와 닿는다. Claude Code는 서브에이전트 모델 해석 순서를 버전마다 바꿔 왔다. 호출 시 `model` → 정의의 `model`(`inherit` 포함) → `CLAUDE_CODE_SUBAGENT_MODEL` → 메인 모델이 지금 순서이고, 2.1.251 이전에는 환경변수가 맨 앞이었다. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`은 전부를 덮는다. naby는 SDK 0.3.283(번들 CLI 2.1.283, 2026-09-28에 0.3.259에서 올림)을 고정해 쓰므로 어느 순서가 적용되는지는 SDK를 올릴 때마다 달라질 수 있다. 우선순위에 기대는 코드는 SDK를 올리는 날 조용히 뒤집힌다.
 
 ## 2. 원칙
 

@@ -60,6 +60,10 @@ export {
   // than re-declared, because the Agent SDK engine matches `modelUsage` keys with
   // it and two copies would be two answers to one question.
   TIER_SUFFIX,
+  // A catalog VALUE sized through its row's `resolvedModel` — how `auto` sizes
+  // plain `opus` (→ `claude-opus-5-5`, 1M by default) instead of as a 200k alias.
+  contextWindowForCatalogValue,
+  ONE_M_DEFAULT_CLAUDE_MODELS,
   type ContextWindowEngine,
 } from './runtime/context-window.js';
 

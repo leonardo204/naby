@@ -45,6 +45,13 @@
 //     (o) …and not at all when no usage was passed, or the percentages are absent.
 //   CATALOG (§4.3)
 //     (p) the real cache shape, and the no-catalog fallback.
+//     (p2) BOTH catalog shapes: SDK 0.3.259 (`opus[1m]` row) picks `opus[1m]`;
+//          SDK 0.3.283 (no `opus[1m]`; `opus` → `claude-opus-5-5`, plus a 200k
+//          `claude-opus-5` row) picks plain `opus`, whatever the row order.
+//     (q2) Opus 5.5 is 1M by default with no `[1m]` marker, `claude-opus-5`
+//          keeps its 200k, and the 0.3.283 catalog's `opus` measures 1M
+//          THROUGH ITS ROW (`contextWindowForCatalogValue`) — so `window-fit`
+//          keeps a long conversation on opus rather than moving it to fable.
 //     (q) windows measured end-to-end through the real `contextWindowFor`,
 //         including the `opus[1m]` → 1M lookup this milestone depends on, and the
 //         REQUESTED-id 1M signal: the tier went GA, so a live run serves
@@ -64,6 +71,7 @@ import {
   CLAUDE_1M_CONTEXT_WINDOW,
   CLAUDE_CONTEXT_WINDOW,
   contextWindowFor,
+  contextWindowForCatalogValue,
   requestedOneMTier,
 } from '../runtime/context-window.js';
 import type { RuntimeMessage } from '../runtime/engine.js';
@@ -101,7 +109,8 @@ function record(name: string, pass: boolean, evidence: string): void {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/** The live catalog as the app caches it (`models.claude.cache`, spec §3). */
+/** The live catalog as the app caches it (`models.claude.cache`, spec §3), in
+ *  its SDK 0.3.259 shape: opus is split into a 200k alias and `opus[1m]`. */
 const LIVE_CATALOG: CatalogRow[] = [
   { value: 'default', resolvedModel: 'claude-opus-5[1m]' },
   { value: 'opus[1m]', resolvedModel: 'claude-opus-5[1m]' },
@@ -110,11 +119,35 @@ const LIVE_CATALOG: CatalogRow[] = [
   { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' },
 ];
 
-/** Windows as the shell will compute them from that catalog. */
-const LIVE_WINDOWS = windowsForTiers(
-  (tier) => pickCatalogValue(tier, LIVE_CATALOG),
-  (value) => contextWindowFor('dev-claude', value),
-);
+/** The same catalog in its SDK 0.3.283 shape — the live probe of the bundled
+ *  CLI (2026-09-28), rows in the order it returned them. No `opus[1m]` row:
+ *  plain `opus` resolves to the 1M-default `claude-opus-5-5`, and the older
+ *  `claude-opus-5` (a 200k model) is listed as a concrete row of its own. */
+const LIVE_CATALOG_0283: CatalogRow[] = [
+  { value: 'default', resolvedModel: 'claude-fable-5-1' },
+  { value: 'opus', resolvedModel: 'claude-opus-5-5' },
+  { value: 'claude-fable-5-1', resolvedModel: 'claude-fable-5-1' },
+  { value: 'sonnet', resolvedModel: 'claude-sonnet-5' },
+  { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001' },
+  { value: 'claude-opus-5', resolvedModel: 'claude-opus-5' },
+  { value: 'claude-fable-5', resolvedModel: 'claude-fable-5' },
+  { value: 'claude-opus-4-8', resolvedModel: 'claude-opus-4-8' },
+  { value: 'claude-opus-4-7', resolvedModel: 'claude-opus-4-7' },
+  { value: 'claude-opus-4-6', resolvedModel: 'claude-opus-4-6' },
+  { value: 'claude-sonnet-4-6', resolvedModel: 'claude-sonnet-4-6' },
+];
+
+/** Windows as the shell computes them from a catalog (`resolveAutoModel`):
+ *  each tier's value, sized through its catalog row. */
+function windowsFor(catalog: readonly CatalogRow[] | undefined) {
+  return windowsForTiers(
+    (tier) => pickCatalogValue(tier, catalog),
+    (value) => contextWindowForCatalogValue('dev-claude', value, catalog),
+  );
+}
+
+const LIVE_WINDOWS = windowsFor(LIVE_CATALOG);
+const LIVE_WINDOWS_0283 = windowsFor(LIVE_CATALOG_0283);
 
 /** A small conversation: nothing but the system-prompt share. */
 const SMALL_CONTEXT = SYSTEM_PROMPT_TOKENS;
@@ -617,10 +650,7 @@ function checkWindowFit(): void {
   );
 
   // (k) nothing fits → the largest known window, not a failure and not a guess.
-  const noCatalogWindows = windowsForTiers(
-    (tier) => pickCatalogValue(tier, undefined),
-    (value) => contextWindowFor('dev-claude', value),
-  );
+  const noCatalogWindows = windowsFor(undefined);
   const nothingFits = route('안녕', {
     estimatedContextTokens: 900_000,
     windows: { haiku: 200_000, sonnet: 200_000, opus: 1_000_000, fable: 1_000_000 },
@@ -775,6 +805,8 @@ function checkCatalog(): void {
     sonnet: pickCatalogValue('sonnet', undefined),
     haiku: pickCatalogValue('haiku', undefined),
   };
+  // With no catalog opus stays `opus[1m]`: the pinned CLI (2.1.283) still lists
+  // it as an alias, and a bare `opus` would measure 200k (see pickCatalogValue).
   record(
     '(p) no catalog → opus[1m] kept, fable falls back to the alias',
     withoutCatalog.opus === 'opus[1m]' &&
@@ -786,6 +818,46 @@ function checkCatalog(): void {
 
   const emptyCatalog = pickCatalogValue('fable', []);
   record('(p) empty catalog → fable alias', emptyCatalog === 'fable', emptyCatalog);
+
+  // (p2) the SDK 0.3.283 shape.
+  const with0283: Record<ModelTier, string> = {
+    opus: pickCatalogValue('opus', LIVE_CATALOG_0283),
+    fable: pickCatalogValue('fable', LIVE_CATALOG_0283),
+    sonnet: pickCatalogValue('sonnet', LIVE_CATALOG_0283),
+    haiku: pickCatalogValue('haiku', LIVE_CATALOG_0283),
+  };
+  record(
+    '(p2) 0.3.283 catalog → opus / claude-fable-5-1 / sonnet / haiku',
+    with0283.opus === 'opus' &&
+      with0283.fable === 'claude-fable-5-1' &&
+      with0283.sonnet === 'sonnet' &&
+      with0283.haiku === 'haiku',
+    JSON.stringify(with0283),
+  );
+  // The concrete `claude-opus-5` row names opus too, and is a 200k model. Row
+  // order must not let it win — put it FIRST and the pick must not move.
+  const reordered = [
+    { value: 'claude-opus-5', resolvedModel: 'claude-opus-5' },
+    ...LIVE_CATALOG_0283.filter((r) => r.value !== 'claude-opus-5'),
+  ];
+  const onlyConcrete: CatalogRow[] = [{ value: 'claude-opus-5', resolvedModel: 'claude-opus-5' }];
+  record(
+    '(p2) a concrete claude-opus-5 row never stands in for the opus alias',
+    pickCatalogValue('opus', reordered) === 'opus' &&
+      // No alias row at all: the no-catalog fallback, never the concrete id.
+      pickCatalogValue('opus', onlyConcrete) === 'opus[1m]',
+    `reordered=${pickCatalogValue('opus', reordered)} onlyConcrete=${pickCatalogValue('opus', onlyConcrete)}`,
+  );
+  // Both rows present (a transitional catalog): the 1M-marked row still wins.
+  const both: CatalogRow[] = [
+    { value: 'opus', resolvedModel: 'claude-opus-5' },
+    { value: 'opus[1m]', resolvedModel: 'claude-opus-5[1m]' },
+  ];
+  record(
+    '(p2) opus[1m] beats plain opus when a catalog lists both',
+    pickCatalogValue('opus', both) === 'opus[1m]',
+    pickCatalogValue('opus', both),
+  );
 
   // (q) the dependency this whole milestone rests on: the catalog's own opus
   //     value measures 1M. It did NOT before this change — `contextWindowFor`
@@ -841,6 +913,8 @@ function checkCatalog(): void {
     requestedOneMTier('opus[1m]', 'claude-opus-5') &&
       requestedOneMTier('claude-fable-5-1[1m]', 'claude-fable-5-1') &&
       requestedOneMTier('opus[1m]', '') &&
+      // The no-catalog fallback served by Opus 5.5: the alias branch must hold.
+      requestedOneMTier('opus[1m]', 'claude-opus-5-5') &&
       !requestedOneMTier('opus[1m]', 'claude-haiku-4-5-20251001') &&
       !requestedOneMTier('opus', 'claude-opus-5') &&
       !requestedOneMTier('default', 'claude-opus-5') &&
@@ -855,6 +929,64 @@ function checkCatalog(): void {
       LIVE_WINDOWS.haiku === CLAUDE_CONTEXT_WINDOW,
     JSON.stringify(LIVE_WINDOWS),
   );
+
+  // (q2) Opus 5.5 — 1M by default, no marker needed.
+  const w = (id: string) => contextWindowFor('dev-claude', id);
+  record(
+    '(q2) claude-opus-5-5 is 1M with no [1m] marker; claude-opus-5 stays 200k',
+    w('claude-opus-5-5') === CLAUDE_1M_CONTEXT_WINDOW &&
+      w('claude-opus-5-5-20260901') === CLAUDE_1M_CONTEXT_WINDOW &&
+      w('claude-opus-5-5[1m]') === CLAUDE_1M_CONTEXT_WINDOW &&
+      contextWindowFor('ai-sdk', 'anthropic.claude-opus-5-5-v1:0') === CLAUDE_1M_CONTEXT_WINDOW &&
+      w('claude-opus-5') === CLAUDE_CONTEXT_WINDOW &&
+      w('claude-opus-5-50') === CLAUDE_CONTEXT_WINDOW &&
+      w('claude-opus-4-8') === CLAUDE_CONTEXT_WINDOW,
+    `5-5=${String(w('claude-opus-5-5'))} dated=${String(w('claude-opus-5-5-20260901'))} 5=${String(w('claude-opus-5'))} 5-50=${String(w('claude-opus-5-50'))}`,
+  );
+  // The alias measured through its row: `opus` alone is still an alias (200k),
+  // but the 0.3.283 row says it resolves to claude-opus-5-5.
+  record(
+    "(q2) 0.3.283 catalog: 'opus' measures 1M through its row, 200k with no row",
+    contextWindowForCatalogValue('dev-claude', 'opus', LIVE_CATALOG_0283) ===
+      CLAUDE_1M_CONTEXT_WINDOW &&
+      contextWindowForCatalogValue('dev-claude', 'opus', undefined) === CLAUDE_CONTEXT_WINDOW &&
+      contextWindowForCatalogValue('dev-claude', 'claude-opus-5', LIVE_CATALOG_0283) ===
+        CLAUDE_CONTEXT_WINDOW &&
+      // A row that resolved opus to the OLD model must not be read as 1M.
+      contextWindowForCatalogValue('dev-claude', 'opus', [
+        { value: 'opus', resolvedModel: 'claude-opus-5' },
+      ]) === CLAUDE_CONTEXT_WINDOW &&
+      // The 0.3.259 row keeps its 1M, even if the resolved id lost the marker.
+      contextWindowForCatalogValue('dev-claude', 'opus[1m]', [
+        { value: 'opus[1m]', resolvedModel: 'claude-opus-5' },
+      ]) === CLAUDE_1M_CONTEXT_WINDOW,
+    `withRow=${String(contextWindowForCatalogValue('dev-claude', 'opus', LIVE_CATALOG_0283))} noRow=${String(contextWindowForCatalogValue('dev-claude', 'opus', undefined))}`,
+  );
+  record(
+    '(q2) windowsForTiers over the 0.3.283 catalog: opus/fable 1M, sonnet/haiku 200k',
+    LIVE_WINDOWS_0283.opus === CLAUDE_1M_CONTEXT_WINDOW &&
+      LIVE_WINDOWS_0283.fable === CLAUDE_1M_CONTEXT_WINDOW &&
+      LIVE_WINDOWS_0283.sonnet === CLAUDE_CONTEXT_WINDOW &&
+      LIVE_WINDOWS_0283.haiku === CLAUDE_CONTEXT_WINDOW,
+    JSON.stringify(LIVE_WINDOWS_0283),
+  );
+  // End to end: a long conversation on the 0.3.283 catalog. A build ask keeps
+  // opus (it fits 1M), and a greeting is moved UP to opus, not to fable. Had
+  // `opus` been sized as a bare alias, both would have gone to fable.
+  const huge = 250_000;
+  const build = route('이 함수 리팩터해줘', {
+    estimatedContextTokens: huge,
+    windows: LIVE_WINDOWS_0283,
+  });
+  const greet = route('안녕', { estimatedContextTokens: huge, windows: LIVE_WINDOWS_0283 });
+  record(
+    '(q2) 0.3.283 catalog, 250k conversation: build stays opus, greeting moves to opus',
+    build.tier === 'opus' &&
+      build.reason === 'build-ask' &&
+      greet.tier === 'opus' &&
+      greet.reason === 'window-fit',
+    `build=${build.tier}/${build.reason} greet=${greet.tier}/${greet.reason}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +996,7 @@ function checkCatalog(): void {
 function checkTierOfModelId(): void {
   const cases: Array<[string | undefined, ModelTier | undefined]> = [
     ['claude-opus-5[1m]', 'opus'],
+    ['claude-opus-5-5', 'opus'],
     ['claude-opus-4-1-20250805', 'opus'],
     ['claude-haiku-4-5-20251001', 'haiku'],
     ['claude-sonnet-4-5', 'sonnet'],

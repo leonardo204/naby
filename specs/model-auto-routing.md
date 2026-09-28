@@ -1,7 +1,7 @@
 ---
 id: model-auto-routing
 type: design
-version: 0.2.0
+version: 0.2.1
 status: draft
 scope: Claude 구독 엔진에서 모델을 `auto`로 두면 naby가 요청마다 sonnet·opus·fable 중 하나를 고르고(haiku는 메인 대화의 후보가 아니다), 고른 모델을 화면에 보여주는 것
 related:
@@ -10,7 +10,7 @@ related:
   - naby-voice-layer
   - phase-3-persona-agent
   - phase-3-fast-evolution
-updated: 2026-09-16
+updated: 2026-09-28
 ---
 
 # 모델 자동 선택 (auto)
@@ -48,6 +48,7 @@ v0.1.0은 짧은 대화를 haiku로 보냈다. 2026-09-16에 실제로 써 보�
 - `:792`부터 init 이벤트를 내보내는 `:1927` 사이에서 `modelForEngine`을 읽는 코드는 클로저뿐이다. 그 사이에 `turnText`(`:1245`), `routedAgent`/`routedStage`(`:921`/`:931`), `subjectGrowth`(`:1398`), `planMode`(`:1081`)가 전부 묶인다. 라우터를 부를 자리는 여기다.
 - 클라이언트 칩은 요청한 값만 안다. init 이벤트의 `model`은 `modelLabel`이고 엔진이 실제로 돌리기 전에 나간다. 엔진 자체의 init(`kind:'init'`, 해석된 id)은 `:2347`에서 버려진다. 실제 돌아간 id는 result 이벤트의 `context_model`에만 있고, 화면에서는 컨텍스트 게이지 툴팁(`TokenUsageBar.tsx:457`)에만 나온다.
 - 라이브 카탈로그(`models.claude.cache`)의 값은 `default` · `opus[1m]` · `claude-fable-5-1[1m]` · `sonnet` · `haiku`다. 별칭 `opus`·`sonnet`·`haiku`·`fable`도 SDK가 받는다.
+- SDK 0.3.283(번들 CLI 2.1.283)에서 카탈로그 모양이 바뀌었다(2026-09-28 라이브 프로브). `opus[1m]` 행이 없어지고 `opus`가 `claude-opus-5-5`(Opus 5.5, 기본 창 1M)로 풀린다. fable 행은 `claude-fable-5-1`로 `[1m]`이 빠졌고, 200k 모델인 `claude-opus-5`가 별도 행으로 붙었다. CLI의 별칭 표에는 `opus[1m]`이 그대로 있어서 이 값도 여전히 받는다.
 - `contextWindowFor('dev-claude', 'opus[1m]')`는 이 작업 전에는 **undefined**였다. 별칭 판정이 맨 별칭만 정확히 비교해서 `[1m]`이 붙은 별칭은 어느 규칙에도 닿지 못했다. `isClaudeAlias()`가 꼬리의 `[...]`를 떼고 비교하도록 고쳤고(`src/runtime/context-window.ts`), 맨 별칭 200k와 `default` undefined는 그대로다. 스파이크가 세 사실을 고정한다.
 - 구독 한도는 `usage.limits.cache.<accountId>` 설정 키에 캐시된다. `readUsageCache`·`usageCacheState`가 `api/naby.ts:1073`·`:1125`에 있고 동기 호출이다. 다만 `engines/naby.ts`가 `api/naby.ts`를 가져오는 방향은 없으므로 두 함수를 `server/lib/`로 옮긴다.
 - 컨텍스트 점유량은 세션에 저장되지 않는다. `usage` 테이블의 `input_tokens`는 턴의 합계이지 점유량이 아니다. 턴 시작 시점에는 `store.getMessages(sessionId)`로 대화 기록을 읽어 추정하는 수밖에 없다.
@@ -118,16 +119,16 @@ type RouteReason =
 
 | 등급 | 우선 | 없으면 |
 |---|---|---|
-| opus | `opus[1m]` | `opus[1m]` |
+| opus | `opus[1m]` 행, 없으면 `opus` 행 | `opus[1m]` |
 | fable | `value`가 `claude-fable`로 시작하는 행 | `fable` |
 | sonnet | `sonnet` | `sonnet` |
 | haiku | `haiku` | `haiku` |
 
 haiku 행은 라우터가 고르는 값이 아니다(원칙 8). 칩 라벨과 `windowsForTiers`가 네 등급을 같은 함수로 다루려고 남겨 둔 행이다.
 
-opus를 `opus[1m]`으로 두는 이유는 오늘의 `default`가 그 값으로 풀리기 때문이다. auto를 켰다고 창이 1M에서 200k로 줄면 안 된다. 카탈로그가 없을 때도 같은 값을 쓴다. 이 플랜이 `default`로 이미 그 모델을 받고 있으므로 `opus[1m]`은 지어낸 값이 아니다.
+opus에서 지키는 것은 하나다. auto를 켰다고 창이 1M에서 200k로 줄면 안 된다. 어느 값이 1M 창을 주는지는 SDK 버전마다 달라서 카탈로그가 정한다. 0.3.259 카탈로그는 opus를 200k `opus`와 1M `opus[1m]`로 나눴으므로 `opus[1m]`을 고른다. 0.3.283 카탈로그에는 `opus[1m]`이 없고 `opus`가 기본 창 1M인 Opus 5.5로 풀리므로 `opus`를 고른다. `claude-opus-5` 같은 구체 id 행은 보지 않는다. 행 순서에 따라 200k 모델이 뽑힐 수 있어서다. 카탈로그가 없으면 `opus[1m]`을 쓴다. 고정한 CLI가 이 별칭을 받고, 맨 `opus`는 카탈로그 없이 재면 200k로 나와 창 자격 규칙이 opus를 긴 대화에서 빼기 때문이다.
 
-등급별 창 크기(`windows`)는 이 값에 `contextWindowFor('dev-claude', value)`를 물어 채운다. 라우터가 카탈로그를 직접 알지 않게 하려는 분리다. 한 가지 결과를 알고 둔다. 맨 별칭 `fable`은 그 함수가 200k로 답한다(`claude-fable*` 형태의 id만 1M). 카탈로그 캐시가 없는 기계에서 큰 세션의 플랜 모드 턴은 창 자격 규칙이 fable을 opus로 옮긴다. 모르는 창을 1M로 가정하는 것보다 이쪽이 정직하다.
+등급별 창 크기(`windows`)는 이 값을 카탈로그 행의 `resolvedModel`로 풀어 잰다(`contextWindowForCatalogValue('dev-claude', value, rows)`). 맨 값으로 재면 0.3.283의 `opus`가 200k 별칭으로 나와 긴 대화가 fable로 옮겨 가기 때문이다. 행이 없거나 `resolvedModel`이 없으면 전처럼 `contextWindowFor('dev-claude', value)`로 잰다. 라우터가 카탈로그를 직접 알지 않게 하려는 분리다. 한 가지 결과를 알고 둔다. 맨 별칭 `fable`은 그 함수가 200k로 답한다(`claude-fable*` 형태의 id만 1M). 카탈로그 캐시가 없는 기계에서 큰 세션의 플랜 모드 턴은 창 자격 규칙이 fable을 opus로 옮긴다. 모르는 창을 1M로 가정하는 것보다 이쪽이 정직하다.
 
 ### 4.4 점유량 추정과 이전 등급
 

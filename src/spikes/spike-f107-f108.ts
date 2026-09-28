@@ -499,6 +499,25 @@ async function checkUsage(dbPath: string): Promise<void> {
       `label="${priced.label}" (rate: $${rate?.inputPerMTok}/$${rate?.outputPerMTok} per MTok)`,
   );
 
+  // -- (c2b) longest prefix wins: Opus 5.5 is cheaper than Opus 5 ----------
+  // `claude-opus-5-5` also matches the `claude-opus-5` prefix; without its own
+  // row it would be billed at Opus 5 rates ($5/$25/$0.50 instead of $4/$20/$0.20).
+  const opus55 = priceModel('anthropic', 'claude-opus-5-5');
+  const opus55Dated = priceModel('anthropic', 'claude-opus-5-5-20260901');
+  const opus5 = priceModel('anthropic', 'claude-opus-5');
+  const opus5OneM = priceModel('anthropic', 'claude-opus-5[1m]');
+  const is = (p: typeof opus55, i: number, o: number, c: number) =>
+    p !== null && p.inputPerMTok === i && p.outputPerMTok === o && p.cachedInputPerMTok === c;
+  record(
+    '(c2b) claude-opus-5-5 has its own rate ($4/$20/$0.20); claude-opus-5 keeps $5/$25/$0.50',
+    is(opus55, 4, 20, 0.2) &&
+      is(opus55Dated, 4, 20, 0.2) &&
+      is(opus5, 5, 25, 0.5) &&
+      is(opus5OneM, 5, 25, 0.5),
+    `5-5=${opus55?.modelPrefix} $${opus55?.inputPerMTok}/$${opus55?.outputPerMTok}/$${opus55?.cachedInputPerMTok} ` +
+      `dated=${opus55Dated?.modelPrefix} 5=${opus5?.modelPrefix} $${opus5?.inputPerMTok} 5[1m]=${opus5OneM?.modelPrefix}`,
+  );
+
   // -- (c3) an UNPRICED metered model --------------------------------------
   const unpricedSession = store.createSession('azure-openai').sessionId;
   const unpricedModel = textOnlyModel('hello', 300, 100, 'my-private-deployment');

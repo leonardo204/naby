@@ -902,31 +902,57 @@ export function routeModelTier(signals: RouteSignals): RouteDecision {
  *  two fields this file reads. */
 export type CatalogRow = { value: string; resolvedModel?: string };
 
-/** The catalog value that names the 1M opus tier. */
+/** The value that names the 1M opus tier: the catalog row on SDK <= 0.3.259
+ *  (`opus[1m]` → `claude-opus-5[1m]`), and the no-catalog fallback on every
+ *  version (see `pickCatalogValue`). */
 export const OPUS_1M_VALUE = 'opus[1m]';
 
-/** Live fable rows are concrete ids (`claude-fable-5-1[1m]`), not the alias. */
+/** The plain opus alias. On SDK 0.3.283 it is the only opus alias the CATALOG
+ *  lists, and it resolves to `claude-opus-5-5`, whose default window is 1M. */
+export const OPUS_VALUE = 'opus';
+
+/** Live fable rows are concrete ids (`claude-fable-5-1[1m]` on 0.3.259,
+ *  `claude-fable-5-1` on 0.3.283), not the alias. */
 export const FABLE_VALUE_PREFIX = 'claude-fable';
 
 /**
  * The value to send to the SDK for a tier (§4.3).
  *
- * OPUS IS `opus[1m]`, WITH OR WITHOUT A CATALOG. Today's `default` resolves to
- * exactly that id (`resolvedModel` on the cached row), so turning `auto` on must
- * not quietly shrink the window from 1M to 200k — a downgrade the user never
- * asked for and could not see. The bare alias `opus` is a 200k window as far as
- * `contextWindowFor` can tell, which makes it the wrong fallback: it would make
- * opus ineligible for exactly the long conversations opus exists to hold. The
- * live row for opus carries this same string, so the catalog lookup below is a
- * confirmation rather than a choice.
+ * OPUS MUST NOT SILENTLY DROP FROM 1M TO 200K. Turning `auto` on must not shrink
+ * the window below what the user's `default` was running on — a downgrade they
+ * never asked for and could not see, and one that makes opus ineligible for
+ * exactly the long conversations opus exists to hold. Which catalog value keeps
+ * the 1M window has CHANGED between SDK versions, so the catalog decides:
+ *
+ *   1. `opus[1m]` when the catalog lists it. SDK 0.3.259's catalog split opus
+ *      into `opus` (200k) and `opus[1m]` (→ `claude-opus-5[1m]`); there the bare
+ *      alias is the 200k downgrade and must lose.
+ *   2. otherwise the catalog's plain `opus` row. SDK 0.3.283 lists no `opus[1m]`
+ *      at all: `opus` resolves to `claude-opus-5-5`, which is 1M by default, so
+ *      the plain alias IS the 1M tier (`contextWindowForCatalogValue` measures it
+ *      through the row's `resolvedModel`).
+ *   3. with no catalog, `opus[1m]`. The pinned CLI (2.1.283, bundled with SDK
+ *      0.3.283) still ACCEPTS it — its own alias table reads `sonnet, opus,
+ *      haiku, fable, best, sonnet[1m], opus[1m], fable[1m], opusplan` (grep of
+ *      the bundled binary, 2026-09-28) — so it is not a guess sent to a
+ *      provider. On a 5.5 sign-in the marker is redundant (the model is 1M by
+ *      default); on an older sign-in it is the only spelling that keeps 1M. A
+ *      bare `opus` fallback would be measured as a 200k alias whenever the
+ *      catalog cache is empty, so `window-fit` would stop treating opus as able
+ *      to hold a long conversation — the silent drop this function prevents.
+ *
+ * CONCRETE `claude-opus-*` ROWS ARE NEVER SCANNED. 0.3.283 also lists
+ * `claude-opus-5` (a 200k model), and "any row naming opus" would pick it or
+ * `opus` depending on row order — the silent 1M → 200k drop this function exists
+ * to prevent. Only the aliases name "the current opus".
  *
  * FABLE FALLS BACK TO THE PLAIN ALIAS, deliberately unlike opus. Live fable rows
- * are concrete ids (`claude-fable-5-1[1m]`), and no `fable[1m]` alias is known to
- * be accepted — inventing one to win a window would be a guess sent to a
- * provider. The honest consequence, on a machine whose catalog cache is empty:
- * fable measures 200k, so in a conversation past that size `window-fit` moves a
- * design turn to opus. That is the correct outcome of the information we have,
- * not a bug to paper over.
+ * are concrete ids (`claude-fable-5-1[1m]`, `claude-fable-5-1`). The 2.1.283
+ * CLI's alias table does list `fable[1m]`, but no catalog names it, so the
+ * fallback stays on the plain alias. The honest consequence, on a machine whose
+ * catalog cache is empty: fable measures 200k, so in a conversation past that
+ * size `window-fit` moves a design turn to opus. That is the correct outcome of
+ * the information we have, not a bug to paper over.
  */
 export function pickCatalogValue(
   tier: ModelTier,
@@ -934,8 +960,10 @@ export function pickCatalogValue(
 ): string {
   const rows = live ?? [];
   if (tier === 'opus') {
-    const row = rows.find((r) => r?.value === OPUS_1M_VALUE);
-    return row?.value ?? OPUS_1M_VALUE;
+    const oneM = rows.find((r) => r?.value === OPUS_1M_VALUE);
+    if (oneM) return oneM.value;
+    const plain = rows.find((r) => r?.value === OPUS_VALUE);
+    return plain?.value ?? OPUS_1M_VALUE;
   }
   if (tier === 'fable') {
     const row = rows.find(
@@ -950,10 +978,15 @@ export function pickCatalogValue(
  * Window size per tier, for `RouteSignals.windows`.
  *
  * The indirection is the point: the caller passes `pickCatalogValue`-with-its-
- * catalog and `(value) => contextWindowFor('dev-claude', value)`, so the router
- * gets sizes without ever importing either the catalog cache or the window
- * table. On a live catalog this yields opus 1,000,000 / fable 1,000,000 /
- * sonnet 200,000 / haiku 200,000.
+ * catalog and `(value) => contextWindowForCatalogValue('dev-claude', value,
+ * catalog)`, so the router gets sizes without ever importing either the catalog
+ * cache or the window table. On a live catalog this yields opus 1,000,000 /
+ * fable 1,000,000 / sonnet 200,000 / haiku 200,000 — on both catalog shapes.
+ *
+ * THE LOOKUP MUST GO THROUGH THE ROW, not the bare value. On SDK 0.3.283 opus is
+ * sent as plain `opus`, which the window table can only size as an alias (200k);
+ * measured that way, `window-fit` would move every long conversation off opus
+ * even though `opus` resolves to the 1M-default `claude-opus-5-5`.
  */
 export function windowsForTiers(
   pick: (tier: ModelTier) => string,

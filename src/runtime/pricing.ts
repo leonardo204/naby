@@ -92,6 +92,17 @@ export const MODEL_PRICES: readonly ModelPrice[] = [
     cachedInputPerMTok: 1,
     source: 'anthropic.com/pricing (API, standard tier)',
   },
+  // Opus 5.5 is CHEAPER than Opus 5 on every column, so it must not ride the
+  // `claude-opus-5` prefix — that would overstate its cost by 25% (input/output)
+  // and 150% (cache reads). Longest prefix wins, like the fable-5-1 row above.
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-opus-5-5',
+    inputPerMTok: 4,
+    outputPerMTok: 20,
+    cachedInputPerMTok: 0.2,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
   {
     providerKind: 'anthropic',
     modelPrefix: 'claude-opus-5',

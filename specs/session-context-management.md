@@ -1,7 +1,7 @@
 ---
 id: session-context-management
 type: design
-version: 0.4.2
+version: 0.4.3
 status: active
 scope: 세션 컨텍스트 창 관리 — 상태 바의 창 사용률 게이지와 임계 안내, "새 탭에서 이어가기"(요약 인계 + 세션 스코프 환경 승계), ai-sdk 엔진의 롤링 요약 자동 컴팩션. Agent SDK 엔진의 자체 컴팩션은 건드리지 않고 표시만 한다.
 related:
@@ -10,7 +10,7 @@ related:
   - naby-activity-log
   - telegram-chat
   - model-auto-routing
-updated: 2026-09-22
+updated: 2026-09-28
 ---
 
 # 세션 컨텍스트 관리
@@ -26,11 +26,11 @@ updated: 2026-09-22
 ### 2.1 창 사용률 게이지
 
 - **측정** — 턴의 마지막 스텝이 보고한 입력 토큰(캐시 리드 포함)이 곧 현재 창 점유량이다. 모델이 실제로 받은 양이므로 추정이 아니라 실측이다. 스텝별 usage가 없으면 게이지를 **숨긴다** — 측정하지 않은 것을 지어내지는 않는다. 이 규칙은 그대로다.
-- **모델 식별** — 분모를 계산할 때 이름을 대는 것은 **실행이 실제로 보고한 구체적 모델 id**다. 요청한 문자열은 티어를 말할 때만 함께 읽는다(아래 분모 2번). 둘은 분모가 중요해지는 바로 그 지점에서 갈라진다. Claude 경로의 기본값은 `default`(Agent SDK의 "알아서 고르기" 행)라 어떤 창도 이름 대지 못하고, `opus` 같은 별칭도 마찬가지다. 실행 쪽은 언제나 답을 안다 — Agent SDK는 `system`/`init`의 `model`과 매 assistant 메시지의 `message.model`로, ai-sdk는 스텝 응답의 `response.modelId`로 알려준다. 엔진은 이것을 `contextModel`로, 협상된 베타 목록을 `contextBetas`로 result 이벤트에 실어 보낸다. *(v0.4.1 추기)* 모델 칩이 `auto`인 턴은 셸의 `system/init`이 `model`에 naby가 고른 카탈로그 값(`sonnet`, `opus[1m]` 같은 것)을 싣고 고른 이유는 `model_route`에 따로 싣는다([model-auto-routing](model-auto-routing.md) §4.6). *(v0.4.2 추기)* 이 카탈로그 값이 분모 규칙의 2번·4번이 읽는 "요청한 id"다. 표식 붙은 별칭(`opus[1m]`)이 1M 티어를 말하는 유일한 자리이기도 하다.
+- **모델 식별** — 분모를 계산할 때 이름을 대는 것은 **실행이 실제로 보고한 구체적 모델 id**다. 요청한 문자열은 티어를 말할 때만 함께 읽는다(아래 분모 2번). 둘은 분모가 중요해지는 바로 그 지점에서 갈라진다. Claude 경로의 기본값은 `default`(Agent SDK의 "알아서 고르기" 행)라 어떤 창도 이름 대지 못하고, `opus` 같은 별칭도 마찬가지다. 실행 쪽은 언제나 답을 안다 — Agent SDK는 `system`/`init`의 `model`과 매 assistant 메시지의 `message.model`로, ai-sdk는 스텝 응답의 `response.modelId`로 알려준다. 엔진은 이것을 `contextModel`로, 협상된 베타 목록을 `contextBetas`로 result 이벤트에 실어 보낸다. *(v0.4.1 추기)* 모델 칩이 `auto`인 턴은 셸의 `system/init`이 `model`에 naby가 고른 카탈로그 값(`sonnet`, `opus[1m]` 같은 것)을 싣고 고른 이유는 `model_route`에 따로 싣는다([model-auto-routing](model-auto-routing.md) §4.6). *(v0.4.2 추기)* 이 카탈로그 값이 분모 규칙의 2번·4번이 읽는 "요청한 id"다. 표식 붙은 별칭(`opus[1m]`)이 1M 티어를 말하는 유일한 자리이기도 하다. *(v0.4.3 추기)* SDK 0.3.283부터는 예외가 하나 있다. 카탈로그의 `opus`가 기본 창이 1M인 `claude-opus-5-5`로 풀려서, 표식 없이도 1M이다. 이 경우는 3번의 레지스트리가 답한다.
 - **분모** — *(v0.4.2에서 개정)* 네 단계로 정한다. 앞 단계가 답을 내면 뒤는 보지 않는다.
   1. **실행이 보고한 창.** Agent SDK의 result 메시지가 `modelUsage[모델].contextWindow`로 그 실행의 창을 직접 말해준다. 측정값이라 가장 먼저다.
   2. **우리가 요청한 티어** — 실행이 서빙한 모델이 같은 모델일 때만이다(`requestedOneMTier`). `opus[1m]`을 보내고 `claude-opus-5`를 받았으면 그 턴은 1M이다.
-  3. **서빙된 id의 레지스트리 답** — `contextWindowFor(engine, model, { betas, requested })`.
+  3. **서빙된 id의 레지스트리 답** — `contextWindowFor(engine, model, { betas, requested })`. *(v0.4.3)* 기본 창이 1M인 Claude 모델은 `ONE_M_DEFAULT_CLAUDE_MODELS`에 이름으로 적는다(지금은 `claude-opus-5-5` 하나). 다음 모델의 창은 추측하지 않고, 새 모델이 나오면 이 목록에 한 줄을 더한다. `claude-opus-5`는 여전히 표식이나 요청 티어가 있어야 1M이다.
   4. **요청 라벨의 레지스트리 답** — id를 보고하지 못하고 끝난 턴을 위한 마지막 수단이다.
 
   2번을 새로 넣은 이유는 1번이 늘 오지는 않기 때문이다. `modelUsage`의 **키는 우리가 요청한 id 그대로**(`claude-opus-5[1m]`)인데 assistant 스텝이 보고하는 서빙 id에는 표식이 없어서(`claude-opus-5`) 정확 일치가 성립하지 않는다. 모델이 하나뿐인 턴은 "항목이 하나면 그것을 쓴다"는 규칙에 걸려 우연히 맞았다. 그런데 서브에이전트를 싼 모델로 돌리기 시작하면서([model-auto-routing](model-auto-routing.md)) 항목이 둘인 턴이 평범해졌고, 그때부터 측정값이 통째로 버려졌다. 그러면 3번이 200k라고 답하고 4번에는 닿지도 않는다. 1M 실행이 `97% (194k/200k)`로 — `~` 표시도 없이, "새 탭에서 이어가기" 배너까지 달고 — 나온 것이 이것이다. 엔진은 `modelUsage` 키에서 티어 접미사만 떼고 맞춰보게 고쳤고(정확히 하나만 걸릴 때), 레지스트리는 요청 id를 세 번째 1M 신호로 읽는다. `max(서빙, 요청)`은 쓰지 않는다 — 거부 폴백으로 `opus[1m]`이 haiku로 내려간 턴은 아무리 크게 요청했어도 200k다.
