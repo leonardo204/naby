@@ -30,6 +30,7 @@
 // dimension. The same servers and the same tools are present whichever engine
 // runs — which is the property SPIKE-07 protects.
 
+import type { ChildProcess } from 'node:child_process';
 import { createMCPClient } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { Executor, JsonSchema, ToolOutput, ToolSchema } from './engine.js';
@@ -223,10 +224,58 @@ export type McpConnection = {
 
 type McpClient = Awaited<ReturnType<typeof createMCPClient>>;
 
+/** How long a stdio server gets to exit after its stdin closes, and again after
+ *  SIGTERM, before the next step of the shutdown (MCP spec, stdio "Shutdown"). */
+export const MCP_STDIO_EXIT_GRACE_MS = 2_000;
+
+/** Resolves true once `child` has exited, false if `ms` passes first. */
+function waitForExit(child: ChildProcess, ms: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      resolve(false);
+    }, ms);
+    timer.unref?.();
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once('exit', onExit);
+  });
+}
+
+/**
+ * The stdio transport with the MCP spec's shutdown sequence: close stdin, wait,
+ * SIGTERM, wait, SIGKILL.
+ *
+ * WHY. `@ai-sdk/mcp`'s own `close()` only aborts the spawn signal, i.e. sends
+ * SIGTERM to the DIRECT child, and leaves stdin open. Launchers do not pass that
+ * on: `uvx mcp-atlassian` is `uv` → `python`, and `uv` survives SIGTERM, so both
+ * stayed alive — and because this process still held the stdin pipe, the server
+ * never saw EOF either. One `uv`+`python` pair leaked per chat turn for as long
+ * as the app ran (measured: 3 turns, 3 survivors). Closing stdin first is the
+ * signal every stdio server honours, and it reaches the grandchild because the
+ * pipe is shared down the chain.
+ */
+class GracefulStdioTransport extends StdioMCPTransport {
+  override async close(): Promise<void> {
+    const child = (this as unknown as { process?: ChildProcess }).process;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.stdin?.end();
+      if (!(await waitForExit(child, MCP_STDIO_EXIT_GRACE_MS))) {
+        child.kill('SIGTERM');
+        if (!(await waitForExit(child, MCP_STDIO_EXIT_GRACE_MS))) child.kill('SIGKILL');
+      }
+    }
+    await super.close();
+  }
+}
+
 async function openClient(entry: McpEntry): Promise<McpClient> {
   if (entry.transport === 'stdio') {
     return createMCPClient({
-      transport: new StdioMCPTransport({
+      transport: new GracefulStdioTransport({
         command: entry.command,
         ...(entry.args ? { args: entry.args } : {}),
         ...(entry.env ? { env: entry.env } : {}),
