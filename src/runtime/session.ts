@@ -213,6 +213,45 @@ export type RunTurnOptions = {
 
 /** Run one turn on the given engine, folding its events into the store. Returns
  * the full event list so a spike can assert on it. */
+/**
+ * What an arriving event proves about the block the naby layer is holding
+ * (P3-M14a, naby-voice-layer §4.1).
+ *
+ *   verbatim — the block was a progress note: a main-agent tool call follows it
+ *              (or something this function does not know, which errs toward the
+ *              narrow rule: no call, original words).
+ *   restyle  — the block ended a stretch of prose: the result, or another
+ *              main-agent block.
+ *   keep     — the event says nothing about the block. Observational events and
+ *              anything a subagent or background task produced run concurrently
+ *              with the main agent; they pass ahead and the block stays held.
+ *
+ * A `tool_result` is `keep` too: arriving while prose is held, it belongs to a call
+ * already in flight (a background agent's, a parallel call's), and the main agent's
+ * next tool call or block is what will settle the held one.
+ */
+function heldVerdict(ev: EngineEvent): 'verbatim' | 'restyle' | 'keep' {
+  switch (ev.kind) {
+    case 'result':
+      return 'restyle';
+    case 'text':
+      if (ev.agentToolCallId !== undefined) return 'keep';
+      if (ev.role === 'assistant' && ev.partial !== true) return 'restyle';
+      return 'verbatim';
+    case 'tool_request':
+      return ev.subagent !== undefined ? 'keep' : 'verbatim';
+    case 'thinking':
+    case 'harness':
+    case 'rate_limit':
+    case 'subagent_model':
+    case 'gate_result':
+    case 'tool_result':
+      return 'keep';
+    default:
+      return 'verbatim';
+  }
+}
+
 export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   const { engine, store, sessionId, model, userText, toolSchemas, executors, gate } =
     opts;
@@ -373,12 +412,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   // §5 caps. But a streaming loop cannot know a block is the last one when it
   // arrives — only when something else does, or when the stream stops.
   //
-  // SO THE LOOP HOLDS ONE BLOCK. A complete assistant text event is parked here
-  // instead of being folded. Anything arriving after it proves it was not the
-  // last thing said, so it is released VERBATIM and the new event is handled
-  // normally. The engine's terminal `result` — and the end of the stream, for a
-  // backend that produces none — is what proves it WAS the last, and that is the
-  // one release that goes through the port.
+  // SO THE LOOP HOLDS ONE BLOCK. A complete main-agent text event is parked here
+  // instead of being folded. A main-agent tool call arriving after it proves it
+  // was a progress note, so it is released VERBATIM. The engine's terminal
+  // `result`, another main-agent block, and the end of the stream prove it ended
+  // a stretch of prose, and those releases go through the port. Events from
+  // concurrent actors (subagents, background tasks, harness notices) say neither,
+  // so they pass ahead while the block stays held — see `heldVerdict`.
   //
   // WHY `result` COUNTS AS THE END rather than as "something else arrived". Every
   // engine emits `result` after its final text, so treating it as an ordinary
@@ -634,15 +674,33 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       // A `partial` text event is NOT parked: it is a token delta, there is
       // nothing to restyle in a fragment, and holding one would stall the stream
       // the UI is rendering. No engine emits them today; the contract is kept.
-      if (ev.kind === 'result') await releaseHeldRestyled();
-      else releaseHeld();
+      //
+      // WHAT AN ARRIVING EVENT SAYS ABOUT THE HELD BLOCK (see `heldVerdict`). Only
+      // a main-agent tool call proves the block was a progress note. Observational
+      // and subagent-attributed events say nothing about it — they come from
+      // other actors running concurrently — so they pass AHEAD of it and the
+      // block stays held. Another main-agent block, or the result, proves it
+      // ended a stretch of prose, so it is restyled. Field case: with background
+      // agents running, an English paragraph was followed 8ms later by a
+      // subagent's text and went out verbatim, untranslated.
+      const verdict = heldText === undefined ? 'verbatim' : heldVerdict(ev);
+      if (verdict === 'restyle') await releaseHeldRestyled();
+      else if (verdict === 'verbatim') releaseHeld();
       // NOTHING IS PARKED WITHOUT A PORT (second review, defect 3a). Holding a
       // block for a layer that does not exist buys nothing and costs a window: the
       // block sits here until the stream ends, and anything that goes wrong in
       // between — an abort, a throw — has to be careful not to lose it. With the
       // condition here, "no port = byte-for-byte the pre-M14a turn" is structural
       // rather than something each release path has to remember to preserve.
-      if (opts.voice && ev.kind === 'text' && ev.role === 'assistant' && ev.partial !== true) {
+      if (
+        opts.voice &&
+        ev.kind === 'text' &&
+        ev.role === 'assistant' &&
+        ev.partial !== true &&
+        // A subagent's prose is not naby's voice, and parking it would make it
+        // compete with the main agent's held block for the one slot.
+        ev.agentToolCallId === undefined
+      ) {
         heldText = ev;
         continue;
       }

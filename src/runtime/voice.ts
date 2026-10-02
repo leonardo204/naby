@@ -114,25 +114,6 @@ export const VOICE_TURN_REWRITE_CAP = 3;
 export const VOICE_TIMEOUT_MS = 15_000;
 
 /**
- * How many observed LANGUAGE deviations buy an explicit language directive in the
- * prompt (§7, "예방으로 전환").
- *
- * THREE, because that is the smallest number that cannot be one bad turn. The
- * point of the switch is that a layer which keeps fixing the same thing should
- * stop needing to: one more sentence up front costs a few tokens on turns that
- * were going to be fine anyway, and saves a whole extra model call on the ones
- * that were not.
- *
- * WHAT IT BUYS, CORRECTED AFTER THE REVIEW. It used to widen the style
- * fingerprint onto turns that had none — which in practice meant SPECIALIST
- * turns, the one audience the line above it explicitly excludes, since an
- * ordinary turn belongs to the persona and already carries the line. So the
- * switch now sharpens the block that is already there instead of moving it
- * somewhere it does not belong: see `renderVoiceLanguageLine`.
- */
-export const VOICE_PREVENTIVE_THRESHOLD = 3;
-
-/**
  * How much PROSE an answer must contain before its language is judged at all.
  *
  * A false "the language is wrong" is the most expensive mistake this detector can
@@ -594,6 +575,38 @@ function dominantEnding(sentences: readonly string[]): keyof StyleEndings | unde
   return counts[top] / sentences.length >= VOICE_ENDING_DOMINANCE ? top : undefined;
 }
 
+/**
+ * Which Korean speech level a sentence is in: `polite` (해요체 `~요/~죠` and
+ * 합니다체 `~니다/~니까`) or `plain` (한다체 `~다`), undefined for anything else.
+ *
+ * NOT `classifyEnding`. That one buckets by the last syllable alone, so `합니다`
+ * and `한다` are both `formal` — which is exactly the distinction the register
+ * check needs, since the plain form is the one a polite answer must not drift to.
+ */
+function sentenceRegister(sentence: string): 'polite' | 'plain' | undefined {
+  const body = sentence.replace(/[^가-힣]+$/u, '');
+  if (/(?:요|죠|니다|니까)$/u.test(body)) return 'polite';
+  if (body.endsWith('다')) return 'plain';
+  return undefined;
+}
+
+/**
+ * The register most of a text's prose sentences are in, or undefined when it has
+ * no Korean prose or no register holds `VOICE_ENDING_DOMINANCE` of the sentences
+ * that have one. Mixed text has no register to preserve, so it is not judged.
+ */
+function dominantRegister(text: string): 'polite' | 'plain' | undefined {
+  const counts = { polite: 0, plain: 0 };
+  for (const sentence of proseSentences(splitSentences(stripNonProse(text)))) {
+    const register = sentenceRegister(sentence);
+    if (register) counts[register] += 1;
+  }
+  const total = counts.polite + counts.plain;
+  if (total === 0) return undefined;
+  const top = counts.polite >= counts.plain ? 'polite' : 'plain';
+  return counts[top] / total > VOICE_ENDING_DOMINANCE ? top : undefined;
+}
+
 /** Is this fingerprint allowed to shape a turn at all? The SAME floor
  *  `renderStyleFingerprintLine` applies, imported rather than restated: a "style"
  *  read off six messages is a description of six messages (§5, last paragraph). */
@@ -720,34 +733,30 @@ export function shouldRestyle(input: {
 }
 
 /**
- * The ONE extra sentence repeated language drift buys (§7), or undefined while the
- * evidence is still one bad turn.
+ * The language directive every persona turn carries (§7).
  *
- * WHY A SENTENCE AND NOT A WIDER AUDIENCE. The observed drift is always the same
- * failure — the raw model answered in the material's language instead of the
- * user's — and the block that was supposed to prevent it is the style line, which
- * ends by subordinating itself ("Match it where it fits; the current request
- * always wins"). That is the right shape for a habit and the wrong shape for a
- * rule, so a model reading a page of English logs ignores it. Once the totals say
- * it has been ignored `VOICE_PREVENTIVE_THRESHOLD` times, the same block says the
- * one thing it was missing, in the imperative.
+ * UNCONDITIONAL, NO LONGER BOUGHT BY DRIFT. It used to appear only after the layer
+ * had corrected the language three times, on the theory that one sentence was not
+ * worth sending to a turn that was going to be fine. The field said otherwise:
+ * the drift is not a property of a user, it is a property of a LONG turn — after
+ * enough English tool output, subagent reports and background-task notifications,
+ * the latest thing the model read is not the user's sentence, and it answers in
+ * the material's language. Every user reaches that point, the first time included,
+ * and the layer cannot catch all of it after the fact (a block followed by more
+ * output is not the step's last). A sentence up front is the cheap half.
  *
- * PURE, AND HERE RATHER THAN IN THE SHELL, for the reason every other prompt
- * fragment in this codebase is: the sentence is a rule about text, the count is an
- * observation about a deployment, and the shell carries one to the other.
+ * It sharpens the style line rather than replacing it: that line ends by
+ * subordinating itself ("the current request always wins"), the right register for
+ * a habit and the wrong one for a rule.
  *
  * IT NAMES NO LANGUAGE. Which language is right is a fact about the turn the model
- * is already holding; naming one here would be this file guessing at it from a
- * counter.
+ * is already holding.
  */
-export function renderVoiceLanguageLine(
-  languageDeviations: number,
-  threshold: number = VOICE_PREVENTIVE_THRESHOLD,
-): string | undefined {
-  if (!Number.isFinite(languageDeviations) || languageDeviations < threshold) return undefined;
+export function renderVoiceLanguageLine(): string {
   return (
     'Answer in the language the user wrote this turn in, even when the material you are ' +
-    'working from — logs, code, quoted documents — is in another language. When they ask for a ' +
+    'working from — logs, code, quoted documents, tool output, subagent reports, ' +
+    'background-task notifications — is in another language. When they ask for a ' +
     'specific language, or for a translation, that language wins instead.'
   );
 }
@@ -860,6 +869,7 @@ export function buildVoicePrompt(input: {
           '- Render the answer in the language the USER wrote in. That is the whole point of this',
           '  call: translate faithfully, sentence for sentence, and change nothing else.',
           '- Code, commands, identifiers, paths, URLs and log lines are NOT translated. Copy them.',
+          '- In Korean, write polite everyday Korean (해요체 or 합니다체), never the plain 한다체.',
         ]
       : [
           '- DO NOT CHANGE THE LANGUAGE OF THE ANSWER. Whatever language it is written in, the',
@@ -869,6 +879,8 @@ export function buildVoicePrompt(input: {
           '  A commit message, a code comment, an identifier, a log line and anything the user',
           '  asked to have in a particular language are all in the language they are meant to be',
           '  in. Translating them is the one edit that is never a style correction.',
+          '- DO NOT CHANGE THE SPEECH LEVEL. A polite Korean answer (~요, ~니다) stays polite and',
+          '  a plain one (~다) stays plain, sentence for sentence.',
         ];
   const system = [
     'You rewrite the SURFACE of an assistant answer. You never change what it says.',
@@ -1290,6 +1302,24 @@ export function verifyVoiceRewrite(
       if (originalLanguage !== undefined && originalLanguage !== rewrittenLanguage) {
         return { ok: false, reason: 'the rewrite changed the answer\'s language' };
       }
+    }
+  }
+
+  // -- REGISTER: style mode only ---------------------------------------------
+  //
+  // A restyle may not move a Korean answer between the polite and the plain
+  // register. Observed in the field: the always-on pupa rewrite turned a 해요체
+  // answer ("지도 조사도 끝났어요") into the plain form ("지도 조사도 마쳤다"),
+  // steered by a fingerprint of how the user TYPES prompts — while the user had
+  // asked, in words, to be answered politely. The register is the one surface
+  // trait a reader notices first, and it is not this layer's to change: who the
+  // answer speaks to was settled by the model that wrote it and the memory it was
+  // given. A translation has no original register to keep, so language mode is
+  // exempt (its prompt names the register instead).
+  if (!translating) {
+    const originalRegister = dominantRegister(original);
+    if (originalRegister !== undefined && dominantRegister(rewritten) !== originalRegister) {
+      return { ok: false, reason: 'the rewrite changed the answer\'s register' };
     }
   }
 

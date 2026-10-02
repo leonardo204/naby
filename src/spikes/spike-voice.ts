@@ -893,9 +893,9 @@ const REALISTIC_PAIRS: Pair[] = [
     styleVerdict: 'ok',
   },
   {
-    name: 'endings only — 합니다 → 한다',
+    name: 'endings within the polite register — 합니다 → 해요',
     before: '세션 스토어는 런타임에 둡니다. 프로바이더를 바꿔도 남아야 하기 때문입니다. 셸은 HTTP 액션만 맡습니다.',
-    after: '세션 스토어는 런타임에 둔다. 프로바이더를 바꿔도 남아야 하기 때문이다. 셸은 HTTP 액션만 맡는다.',
+    after: '세션 스토어는 런타임에 둬요. 프로바이더를 바꿔도 남아야 하기 때문이에요. 셸은 HTTP 액션만 맡아요.',
     mode: 'style',
     styleVerdict: 'ok',
   },
@@ -981,6 +981,25 @@ function checkVerificationModes(): void {
     '(v3) the mode comes from WHY the call was made — never from what came back',
     modesAgree,
     modes.map((m) => `${m.name} -> ${m.got} (expected ${m.expected})`).join('; '),
+  );
+
+  // (v3c) A RESTYLE MAY NOT CHANGE THE SPEECH LEVEL. Field case: the always-on
+  // pupa rewrite turned a 해요체 answer into 한다체, steered by a fingerprint of
+  // how the user types prompts. Polite → plain is refused; the reverse too.
+  const toPlain = verifyVoiceRewrite(
+    '지도 조사도 끝났어요. 웹 검색이 중간에 막혀서 일부만 확인했어요. 확인한 것만 정리할게요.',
+    '지도 조사도 마쳤다. 웹 검색이 중간에 막혀서 일부만 확인했다. 확인된 내용만 정리한다.',
+    STYLE_MODE,
+  );
+  const toPolite = verifyVoiceRewrite(
+    '세션 스토어는 런타임에 둔다. 프로바이더를 바꿔도 남아야 하기 때문이다. 셸은 HTTP 액션만 맡는다.',
+    '세션 스토어는 런타임에 둡니다. 프로바이더를 바꿔도 남아야 하기 때문입니다. 셸은 HTTP 액션만 맡습니다.',
+    STYLE_MODE,
+  );
+  record(
+    '(v3c) a restyle that moves the answer between polite and plain register is refused',
+    toPlain.ok === false && toPolite.ok === false,
+    `polite→plain = ${JSON.stringify(toPlain)}; plain→polite = ${JSON.stringify(toPolite)}`,
   );
 
   // …and the same claim from the other side: a style rewrite that sprinkled Hangul
@@ -1387,6 +1406,67 @@ function readActivityLog(): Record<string, unknown>[] {
     });
 }
 
+// ---------------------------------------------------------------------------
+// (conc) concurrent actors do not decide what the held block was
+// ---------------------------------------------------------------------------
+
+/**
+ * The field sequence (2026-10-02): background agents were running when the main
+ * agent wrote an English paragraph, and a subagent's report arrived 8ms later. The
+ * old rule released the held block verbatim on ANY next event, so the paragraph
+ * went out untranslated. Now only a main-agent tool call releases verbatim.
+ */
+const CONCURRENT_SCRIPT = (): EngineEvent[] => [
+  { kind: 'init', providerId: 'mock', model: 'mock-1' },
+  { kind: 'text', role: 'assistant', text: 'Meanwhile, I will note the decisions.' },
+  { kind: 'subagent_model', agentToolCallId: 'a1', model: 'mock-sub' },
+  { kind: 'tool_request', toolCallId: 'c1', toolName: 'noop', input: {} },
+  { kind: 'gate_result', toolCallId: 'c1', toolName: 'noop', decision: 'allow' },
+  { kind: 'tool_result', toolCallId: 'c1', toolName: 'noop', isError: false, output: { content: 'ok' } },
+  { kind: 'text', role: 'assistant', text: 'The decision is noted.' },
+  { kind: 'result', ok: true, usage: { inputTokens: 10, outputTokens: 5 } },
+  { kind: 'harness', subtype: 'task_notification' },
+  { kind: 'text', role: 'assistant', text: 'Research is stopped.' },
+  { kind: 'text', role: 'assistant', text: '서브에이전트 보고입니다.', agentToolCallId: 'a1' },
+  { kind: 'text', role: 'assistant', text: 'Map research is done.' },
+  { kind: 'result', ok: true, usage: { inputTokens: 10, outputTokens: 5 } },
+];
+
+async function checkConcurrentActors(): Promise<void> {
+  const port = markingPort();
+  const run = await runScripted({ voice: port, script: CONCURRENT_SCRIPT() });
+  const offered = port.calls.map((c) => c.text);
+  const expectedOffered = ['The decision is noted.', 'Research is stopped.', 'Map research is done.'];
+  record(
+    "(conc1) a main block followed by a subagent's text is still offered; a progress note and subagent prose are not",
+    JSON.stringify(offered) === JSON.stringify(expectedOffered),
+    `offered = ${JSON.stringify(offered)}`,
+  );
+
+  const stored = run.stored.filter((t) => t.length > 0);
+  const expectedStored = [
+    'Meanwhile, I will note the decisions.',
+    '«The decision is noted.»',
+    '서브에이전트 보고입니다.',
+    '«Research is stopped.»',
+    '«Map research is done.»',
+  ];
+  record(
+    '(conc2) nothing is lost or duplicated — the held block lands after the concurrent text that passed it',
+    JSON.stringify(stored) === JSON.stringify(expectedStored),
+    `stored = ${JSON.stringify(stored)}`,
+  );
+
+  const kinds = run.streamed.map((e) => e.kind);
+  const firstResult = kinds.indexOf('result');
+  const noted = run.streamed.findIndex((e) => e.kind === 'text' && e.text === '«The decision is noted.»');
+  record(
+    '(conc3) a block restyled at the first result still streams before that result',
+    noted !== -1 && noted < firstResult,
+    `text at ${noted}, first result at ${firstResult}`,
+  );
+}
+
 async function main(): Promise<boolean> {
   checkProseExtraction();
   checkLanguage();
@@ -1406,6 +1486,7 @@ async function main(): Promise<boolean> {
   checkNegationDetection();
   checkTimeout();
   await checkTurnLoop();
+  await checkConcurrentActors();
 
   console.log('\n=== SPIKE-VOICE — the naby layer (P3-M14a, specs/naby-voice-layer.md) ===\n');
   let allPass = true;
