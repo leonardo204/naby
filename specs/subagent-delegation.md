@@ -1,7 +1,7 @@
 ---
 id: subagent-delegation
 type: design
-version: 0.1.2
+version: 0.1.3
 status: draft
 scope: 값싼 내장 서브에이전트(탐색 haiku·구현 sonnet)와 위임 정책으로 메인 대화 기록을 작게 유지하는 것, 서브에이전트가 실제로 쓴 모델을 보이게 하는 것, 엔진 동작을 바꾸는 환경변수를 드러내는 것
 related:
@@ -13,7 +13,7 @@ related:
   - claude-multi-account
   - phase-3-persona-agent
   - settings-ia-reorg
-updated: 2026-09-28
+updated: 2026-10-02
 ---
 
 # 서브에이전트 위임과 모델 관측
@@ -122,6 +122,19 @@ v0.1.1에서 문장 하나가 더 붙었다. 서브에이전트는 이 대화보
 2. `npm run spike:subagent-model`을 실제 로그인으로 돌린다. 한 턴을 보내 `explorer`가 `claude-haiku-*`로 답했는지, 메인이 요청한 모델로 답했는지 확인한다. `CLAUDE_CODE_SUBAGENT_MODEL`을 걸고 한 번 더 돌려 naby가 적은 모델이 이기는지(현재 순서) 본다. 결과를 스파이크 머리말에 버전과 함께 적는다. `spike-subagent-gate`와 같은 방식이고 `spike:all`에는 넣지 않는다.
 3. §3의 환경변수 목록을 바이너리 문자열 검색으로 다시 뽑아 `engineEnvironmentNotes`의 목록과 맞춘다.
 4. 모델 카탈로그 캐시는 SDK 버전으로 이미 무효화된다. 손댈 것 없다.
+5. `npm run spike:bg-agent-tools`를 실제 로그인으로 돌린다(§4.6). 메인 턴이 끝난 뒤의 백그라운드 서브에이전트 도구 호출이 게이트를 거쳐 실행되는지 본다.
+
+### 4.6 백그라운드 서브에이전트의 도구 호출 (0.1.3, 2026-10-02)
+
+**증상.** 서브에이전트가 "사용자가 WebFetch를 거부했다"고 보고하고 조사를 멈춘다. 사용자에게 허용을 묻는 창은 뜬 적이 없고, naby 게이트의 판정 기록도 없다.
+
+**원인.** SDK는 첫 `result`를 받으면 CLI의 stdin을 닫는다. 프롬프트가 문자열이면 곧바로 닫고(`isSingleUserTurn`), 스트리밍 입력이면 스트림이 끝난 뒤 닫는다. 그런데 PreToolUse 훅과 naby MCP 도구 호출은 모두 stdin을 거치는 제어 왕복이다. 그래서 메인 턴이 끝난 뒤에도 돌고 있는 백그라운드 에이전트가 도구를 부르면, CLI는 그 자리에서 거부한다. 거부 문구는 사용자가 거절했을 때와 같은 "The user doesn't want to take this action right now. STOP…"다. 실사용 기록에서 거부는 요청 3~7ms 뒤에 났고, 메인 턴의 첫 `result` 뒤에 나온 호출만 거부됐다. 메인이 에이전트를 이어 가려고 부른 `SendMessage`도 같은 이유로 거부됐다.
+
+**수정.** 엔진은 프롬프트를 항상 스트리밍 입력으로 넘기고, 입력을 CLI가 `session_state_changed: idle`을 보낼 때까지 열어 둔다. `idle`은 백그라운드 에이전트 루프까지 끝났다는 신호다. 이 이벤트는 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`일 때만 나오므로 엔진이 이 변수를 항상 켠다. 그래서 계정을 고르지 않은 턴도 이제 `env`를 넘긴다. 넘기는 값은 상속 환경에 이 변수 하나를 더한 것이다. 안전장치는 둘이다. 상태 이벤트를 한 번도 보내지 않는 CLI면 예전처럼 첫 `result`에서 닫는다. `running`만 보내고 `idle`을 보내지 않는 CLI면, 살아 있는 백그라운드 작업이 없는 상태로 30초 동안 아무것도 오지 않을 때 닫는다. 중단하거나 스트림이 끝나면 즉시 닫는다.
+
+셸의 cockpit 엔진(`shared/sdkLoop.ts`)은 같은 문제를 이미 작업 시작·완료 이벤트로 풀고 있다. naby 런타임 엔진에만 이 처리가 빠져 있었다.
+
+**검증.** `spike:bg-agent-tools`(실제 로그인)가 수정 전 코드에서는 1/4다. 서브에이전트의 WebSearch가 게이트에 닿지 못하고 거부 1건이 난다. 수정 뒤에는 4/4다. 첫 `result`(11.9초) 뒤에 나온 WebSearch(14.4초)가 게이트를 거쳐 실행되고, 마지막 `result` 0.4초 뒤에 실행이 스스로 끝난다. 백그라운드 작업이 없는 평범한 턴도 `result` 0.8초 뒤에 끝난다.
 
 ## 5. 범위 밖
 

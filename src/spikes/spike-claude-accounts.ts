@@ -174,7 +174,7 @@ const {
 const { checkClaudeAuthStatus, getClaudeAuthState, resetClaudeLoginCache } = await import(
   '../engines/claude-login.js'
 );
-const { buildQueryOptions } = await import('../engines/claude-agent-sdk-engine.js');
+const { buildQueryOptions, SESSION_STATE_EVENTS_ENV } = await import('../engines/claude-agent-sdk-engine.js');
 import type { EngineRunInput } from '../runtime/engine.js';
 
 // ---------------------------------------------------------------------------
@@ -378,12 +378,18 @@ async function main(): Promise<void> {
     `env=${JSON.stringify(withAccount.env)}`,
   );
 
-  // ---- 6. no account ⇒ no `env` at all ------------------------------------
+  // ---- 6. no account ⇒ the inherited env, untouched but for the state flag --
+  // The session-state flag is always set (the engine closes the CLI's input on
+  // `idle`), so `env` is now always present — but with no account it must carry
+  // no CLAUDE_CONFIG_DIR and must keep everything inherited.
   const withoutAccount = buildQueryOptions({ ...queryArgs(), env: base });
   record(
-    'no active account ⇒ the options carry NO env key (byte-for-byte the single-account turn)',
-    !('env' in withoutAccount),
-    `keys=${Object.keys(withoutAccount).includes('env') ? 'env present' : 'env absent'}`,
+    'no active account ⇒ the inherited environment plus the session-state flag, and no CLAUDE_CONFIG_DIR',
+    withoutAccount.env?.CLAUDE_CONFIG_DIR === undefined &&
+      withoutAccount.env?.PATH === '/spike/bin' &&
+      withoutAccount.env?.SOME_OTHER === 'kept' &&
+      withoutAccount.env?.[SESSION_STATE_EVENTS_ENV] === '1',
+    `env=${JSON.stringify(withoutAccount.env)}`,
   );
 
   // ---- 7. the isolation probe ---------------------------------------------

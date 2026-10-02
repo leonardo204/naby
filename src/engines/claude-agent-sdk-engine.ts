@@ -360,6 +360,15 @@ export function sdkAgentTools(
   return [...matched.map((n) => `mcp__${MCP_SERVER_NAME}__${n}`), ...unmatched];
 }
 
+/** Makes the CLI emit `system/session_state_changed`, whose `idle` is the
+ *  authoritative "turn over, background agents done" signal (sdk.d.ts). */
+export const SESSION_STATE_EVENTS_ENV = 'CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS';
+
+/** How long the input stays open after a `result`, with no live background task
+ *  and nothing else arriving, before it is closed anyway. A last resort for a CLI
+ *  that reports `running` but never `idle`; the normal close is the `idle` event. */
+export const INPUT_IDLE_FALLBACK_MS = 30_000;
+
 /**
  * The options object handed to `query()` — built HERE, as a pure function, and
  * exported.
@@ -396,24 +405,26 @@ export function buildQueryOptions(args: {
   env?: NodeJS.ProcessEnv;
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
-  // ABSENT MEANS ABSENT. When no account is chosen (or the id resolves to
-  // nothing — no naby home was named, the id is not one we minted), `env` is not
-  // set at all, and the SDK documents that as "the subprocess inherits
-  // process.env": byte-for-byte the behaviour every existing install has today.
-  // The alternative — passing `{...process.env}` unconditionally — would look
-  // equivalent and would not be: it freezes the environment at THIS moment and
-  // hands the child a copy, which is a different thing to reason about for a
-  // change that is supposed to be invisible when unused.
+  // When no account is chosen (or the id resolves to nothing — no naby home was
+  // named, the id is not one we minted), the child gets the inherited environment
+  // unchanged except for the one flag below. With an account it gets that
+  // account's namespace spread over the inherited environment.
   const accountEnv = args.accountId
     ? claudeAccountEnvFor(args.accountId, args.env ?? process.env)
     : undefined;
   return {
-    // The account's namespace, spread over the inherited environment.
-    // `claudeAccountEnv` owns the spread because the SDK REPLACES rather than
-    // merges this object (sdk.d.ts) — a bare `{ CLAUDE_CONFIG_DIR }` here would
-    // launch the CLI with no PATH and no HOME, and the failure would read as
-    // "the model could not start" rather than as the environment bug it is.
-    ...(accountEnv ? { env: accountEnv } : {}),
+    // The SDK REPLACES rather than merges this object (sdk.d.ts) — a bare
+    // `{ CLAUDE_CONFIG_DIR }` here would launch the CLI with no PATH and no HOME,
+    // and the failure would read as "the model could not start" rather than as
+    // the environment bug it is. So both cases spread a full environment.
+    //
+    // SESSION-STATE EVENTS ARE ALWAYS ON. `run` keeps the CLI's stdin open until
+    // the session goes idle (see `buildAgentPrompt`), and `idle` — "the
+    // background-agent loop has exited" — is only emitted under this flag.
+    env: {
+      ...(accountEnv ?? args.env ?? process.env),
+      [SESSION_STATE_EVENTS_ENV]: '1',
+    },
     // NOTE: `tools` is deliberately NOT set. Setting `tools: []` stripped ALL
     // built-in executors, which also killed Task / Skill / delegation — so the
     // harness could never run and its activity could never be shown. Omitting
@@ -1248,30 +1259,47 @@ function extractThinking(content: unknown): string {
 }
 
 /**
- * The prompt for `query()`. Text-only turns stay a plain STRING (byte-identical
- * to before). A turn with images becomes a one-shot `AsyncIterable<SDKUserMessage>`
- * whose content is the rendered text plus an Anthropic base64 image block per
- * attachment — the only prompt shape the SDK accepts images on. The single yield
- * then completes, which ends the streaming input and runs exactly one turn.
+ * The prompt for `query()`.
+ *
+ * WITHOUT `holdOpen` (the legacy shape, still what callers that pass nothing get):
+ * a text-only turn is a plain STRING, and a turn with images is a one-shot
+ * `AsyncIterable<SDKUserMessage>` — the only shape the SDK accepts images on.
+ *
+ * WITH `holdOpen`, every turn is a stream that yields its one user message and
+ * then stays open until `holdOpen` settles. THIS IS WHAT KEEPS BACKGROUND AGENTS
+ * ABLE TO USE TOOLS. The SDK closes the CLI's stdin as soon as the first `result`
+ * arrives — immediately for a string prompt (`isSingleUserTurn`), and after the
+ * stream ends for an iterable. Every PreToolUse hook and every naby MCP call is a
+ * control round trip over that stdin, so once it is closed the CLI refuses each
+ * new tool call on the spot, with the same words it uses for a user's refusal:
+ * "The user doesn't want to take this action right now. STOP…". A background
+ * agent still running after the main turn's first result therefore had its
+ * WebSearch/WebFetch "refused by the user" within milliseconds, without any
+ * prompt ever being shown (field case 2026-10-02). The engine settles `holdOpen`
+ * when the CLI reports the session idle — see `run`.
  */
 export function buildAgentPrompt(
   messages: EngineRunInput['messages'],
+  holdOpen?: Promise<void>,
 ): string | AsyncIterable<SDKUserMessage> {
   const text = renderPrompt(messages);
   const images = lastUserImages(messages);
-  if (!images || images.length === 0) return text;
+  if (holdOpen === undefined && (!images || images.length === 0)) return text;
 
-  const content = [
-    ...(text ? [{ type: 'text' as const, text }] : []),
-    ...images.map((img) => ({
-      type: 'image' as const,
-      source: {
-        type: 'base64' as const,
-        media_type: img.media_type as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
-        data: img.data,
-      },
-    })),
-  ];
+  const content =
+    images && images.length > 0
+      ? [
+          ...(text ? [{ type: 'text' as const, text }] : []),
+          ...images.map((img) => ({
+            type: 'image' as const,
+            source: {
+              type: 'base64' as const,
+              media_type: img.media_type as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif',
+              data: img.data,
+            },
+          })),
+        ]
+      : text;
   const userMessage = {
     type: 'user',
     parent_tool_use_id: null,
@@ -1279,6 +1307,7 @@ export function buildAgentPrompt(
   } as SDKUserMessage;
   return (async function* () {
     yield userMessage;
+    if (holdOpen) await holdOpen;
   })();
 }
 
@@ -1924,8 +1953,32 @@ export class ClaudeAgentSdkEngine implements Engine {
     if (input.signal.aborted) ac.abort();
     else input.signal.addEventListener('abort', () => ac.abort(), { once: true });
 
+    // THE INPUT STAYS OPEN UNTIL THE SESSION IS IDLE (see `buildAgentPrompt`).
+    // Closing it at the first `result` — the SDK's default — left background
+    // agents unable to run a single tool. Closed by, in order of preference:
+    //   1. `session_state_changed: idle` — background agents are done;
+    //   2. a `result` from a CLI that never reported a session state at all
+    //      (the flag stopped working) — exactly the old behaviour;
+    //   3. INPUT_IDLE_FALLBACK_MS of silence after a `result` with no live
+    //      background task — a CLI that says `running` but never `idle`;
+    //   4. abort, or the stream ending for any reason.
+    let releaseInput!: () => void;
+    const inputReleased = new Promise<void>((resolve) => {
+      releaseInput = resolve;
+    });
+    let sawSessionState = false;
+    let liveBackgroundTasks = 0;
+    let idleFallback: ReturnType<typeof setTimeout> | undefined;
+    const closeInput = (): void => {
+      if (idleFallback) clearTimeout(idleFallback);
+      idleFallback = undefined;
+      releaseInput();
+    };
+    if (input.signal.aborted) closeInput();
+    else input.signal.addEventListener('abort', closeInput, { once: true });
+
     const q = query({
-      prompt: buildAgentPrompt(input.messages),
+      prompt: buildAgentPrompt(input.messages, inputReleased),
       // Built by the exported pure function above, so the EXACT object this
       // production path sends can be asserted without a model call.
       options: buildQueryOptions({
@@ -1946,6 +1999,31 @@ export class ClaudeAgentSdkEngine implements Engine {
     const driver = (async () => {
       try {
         for await (const msg of q) {
+          // Anything arriving means the session is not silent: the fallback
+          // close (3) only fires after a quiet spell.
+          if (idleFallback) {
+            clearTimeout(idleFallback);
+            idleFallback = undefined;
+          }
+          if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
+            // Lifecycle bookkeeping for the input, not something to show: it is
+            // consumed here and never becomes a harness chip.
+            sawSessionState = true;
+            if (msg.state === 'idle') closeInput();
+            continue;
+          }
+          if (msg.type === 'system' && msg.subtype === 'background_tasks_changed') {
+            // REPLACE semantics: the payload is every live task. Ambient ones
+            // (watchers) are not work a turn waits on.
+            liveBackgroundTasks = msg.tasks.filter((t) => t.ambient !== true).length;
+          }
+          if (msg.type === 'result') {
+            if (!sawSessionState) closeInput();
+            else if (liveBackgroundTasks === 0) {
+              idleFallback = setTimeout(closeInput, INPUT_IDLE_FALLBACK_MS);
+              idleFallback.unref?.();
+            }
+          }
           if (msg.type === 'system' && msg.subtype === 'init') {
             // `msg.model` is the RESOLVED id — the CLI has already turned
             // `default` / `opus` / an empty option into the model it will run —
@@ -2206,6 +2284,8 @@ export class ClaudeAgentSdkEngine implements Engine {
           code: 'ENGINE_THREW',
         });
       } finally {
+        closeInput();
+        input.signal.removeEventListener('abort', closeInput);
         channel.close();
       }
     })();
