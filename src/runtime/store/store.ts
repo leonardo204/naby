@@ -722,6 +722,13 @@ export type HarnessProvenance = {
    * not copy in (a user-authored row, a set import, a file already in the naby
    * home). Stored in the payload JSON — no column, no migration. */
   importedFrom?: string;
+  /** THIS ROW WAS SET ASIDE IN FAVOUR OF AN ORG PACKAGE (org-harness-sync §4.5).
+   * Set on a user/project copy of an org skill when the user picked "use the org
+   * version": the copy is disabled and carries the package handle here
+   * (`org:altimedia-harness`). It is what lets the kill switch (§4.8) find and
+   * re-enable exactly the copies it displaced, and nothing else. Stored in the
+   * payload JSON like `importedFrom` — no column, no migration (§4.1). */
+  supersededBy?: string;
   /** Interchange format the row came from, for round-trip export. */
   format?: 'claude-skill-md' | 'claude-agent-md' | 'claude-command-md' | 'naby';
   /** epoch ms the item was imported, if it was. */
@@ -763,6 +770,17 @@ export type HarnessItem = {
     instructions: string;
     triggers?: string[];
     toolRefs?: string[];
+    /** HOW THE BODY REACHES A TURN (org-harness-sync §3.2/§3.3). Absent means the
+     *  established behaviour: `instructions` IS the body and is injected on
+     *  trigger. 'on-demand' means `instructions` is only the one-paragraph
+     *  description and the real body is read from a package on disk by the
+     *  `naby_skill_load` tool (M2). Such a row also lists `naby_skill_load` in
+     *  `toolRefs`, so a build without that tool excludes and COUNTS it rather than
+     *  injecting a description as if it were instructions. Payload JSON only. */
+    loadMode?: 'on-demand';
+    /** WHICH ORG PACKAGE holds this skill's files (`altimedia-harness`), for an
+     *  'on-demand' row. Payload JSON only. */
+    packageRef?: string;
   };
   /** kind='subagent': system prompt + optional model; toolRefs stored now,
    * orchestrated in Phase 2.5. */

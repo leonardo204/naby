@@ -429,7 +429,6 @@ export function applyBuiltinHarnessActivation(
 ): BuiltinHarnessActivationResult {
   const userId = opts?.userId ?? DEFAULT_USER_ID;
   const names = BUILTIN_HARNESS_BUNDLES[bundleId] ?? [];
-  const want: HarnessStatus = active ? 'enabled' : 'disabled';
   const out: BuiltinHarnessActivationResult = { changed: [], userOwned: [], missing: [] };
 
   for (const name of names) {
@@ -440,22 +439,48 @@ export function applyBuiltinHarnessActivation(
       out.missing.push(name);
       continue;
     }
-    if (row.status === 'removed') {
-      out.userOwned.push(name);
-      continue;
-    }
-    // Blank counts as absent (the `readPresetUrl` convention), so a half-written
-    // setting cannot freeze an item into "the user owns this" forever.
-    const recorded = store.getSetting(builtinHarnessAutoStatusKey(name))?.trim() || 'disabled';
-    if (row.status !== recorded) {
-      // A human moved this row since we last wrote it. It is theirs now.
-      out.userOwned.push(name);
-      continue;
-    }
-    if (row.status === want) continue;
-    store.setHarnessEnabled(row.id, active);
-    store.setSetting(builtinHarnessAutoStatusKey(name), want);
-    out.changed.push(name);
+    const outcome = applyAutoStatusTransition(store, row, builtinHarnessAutoStatusKey(name), active);
+    if (outcome === 'changed') out.changed.push(name);
+    else if (outcome === 'userOwned') out.userOwned.push(name);
   }
   return out;
+}
+
+/** What one automatic transition did to one row. */
+export type AutoStatusOutcome = 'changed' | 'unchanged' | 'userOwned';
+
+/**
+ * THE AUTO-STATUS RULE, for one row — the body of `applyBuiltinHarnessActivation`,
+ * lifted out so every automatic switch shares one implementation. The org harness
+ * (org-harness-sync §3.2, §4.8) uses it with its own key
+ * (`harness.org.<name>.autoStatus`); the rule itself is not restated anywhere.
+ *
+ *   * A TOMBSTONE is never touched (`setHarnessEnabled` would resurrect it) and
+ *     reports `userOwned`.
+ *   * The row is written only while its status still equals what the automatic
+ *     switch last recorded under `autoStatusKey`. A difference means a human moved
+ *     it; it is `userOwned` from then on.
+ *   * A missing or blank record reads as 'disabled' (see
+ *     `applyBuiltinHarnessActivation` for why).
+ *   * A write records the value written, so the next transition can tell.
+ */
+export function applyAutoStatusTransition(
+  store: Pick<Store, 'setHarnessEnabled' | 'getSetting' | 'setSetting'>,
+  row: HarnessItem,
+  autoStatusKey: string,
+  active: boolean,
+): AutoStatusOutcome {
+  if (row.status === 'removed') return 'userOwned';
+  const want: HarnessStatus = active ? 'enabled' : 'disabled';
+  // Blank counts as absent (the `readPresetUrl` convention), so a half-written
+  // setting cannot freeze an item into "the user owns this" forever.
+  const recorded = store.getSetting(autoStatusKey)?.trim() || 'disabled';
+  if (row.status !== recorded) {
+    // A human moved this row since we last wrote it. It is theirs now.
+    return 'userOwned';
+  }
+  if (row.status === want) return 'unchanged';
+  store.setHarnessEnabled(row.id, active);
+  store.setSetting(autoStatusKey, want);
+  return 'changed';
 }

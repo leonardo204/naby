@@ -15,7 +15,7 @@
 // state.
 
 import { decideMemoryWrite } from '../memory-gate.js';
-import { decideHarnessImport } from '../harness-gate.js';
+import { decideHarnessImport, provenanceForWrite } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 // The "is this the same claim" rule (P3-M8b §5.3) and the search-fold rule
 // (P3-M10 §4) live with the type so both drivers answer them identically.
@@ -852,7 +852,7 @@ export class MemoryStore implements Store {
       name: req.item.name,
       ...(req.item.description !== undefined ? { description: req.item.description } : {}),
       status: decision.status,
-      provenance: req.item.provenance,
+      provenance: provenanceForWrite(req, existing),
       ...(req.item.command !== undefined ? { command: req.item.command } : {}),
       ...(req.item.skill !== undefined ? { skill: req.item.skill } : {}),
       ...(req.item.subagent !== undefined ? { subagent: req.item.subagent } : {}),

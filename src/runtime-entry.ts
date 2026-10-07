@@ -453,6 +453,51 @@ export {
   // roster leaves them out elsewhere (subagent-delegation §4.1).
   subagentAllowedForEngine,
 } from './runtime/harness-seed.js';
+// THE ORG HARNESS (specs/org-harness-sync.md, M1). Package sync, activation, the
+// row reconciliation the engine runs at a turn boundary, and the two §4.5 choices.
+// The shell supplies the skill-hub key and the fetch; nothing here reads the MCP
+// registry.
+export {
+  applyAutoStatusTransition,
+  type AutoStatusOutcome,
+} from './runtime/harness-seed.js';
+export {
+  applyOrgHarnessIfDue,
+  checkOrgHarnessActivation,
+  keepUserCopy,
+  kstDay,
+  listOrgPackageVersions,
+  ORG_HARNESS_ENV_SWITCH,
+  ORG_HARNESS_PACKAGE,
+  ORG_HARNESS_SCOPE_KEY,
+  ORG_HARNESS_SETTING,
+  ORG_SUPERSEDED_BY,
+  orgHarnessAutoStatusKey,
+  orgHarnessKeepUserCopyKey,
+  orgHarnessOnState,
+  orgHarnessOrigin,
+  orgHarnessRoot,
+  readCurrentOrgPackage,
+  readOrgCopyNotices,
+  readOrgHarnessState,
+  runOrgHarnessSync,
+  setOrgHarnessEnabled,
+  syncOrgHarnessPackage,
+  useOrgVersion,
+  type OrgCopyNotice,
+  type OrgHarnessActionResult,
+  type OrgHarnessApplyResult,
+  type OrgHarnessContext,
+  type OrgHarnessFetch,
+  type OrgHarnessOffReason,
+  type OrgHarnessState,
+  type OrgHarnessStore,
+  type OrgHarnessSyncReport,
+  type OrgPackage,
+} from './runtime/org-harness.js';
+// Fixture-only writer + the strict reader, exported so the shell's vitest can
+// build a package zip without a binary fixture in the tree.
+export { buildZip, extractZip, ZipError, type ZipWriteEntry } from './runtime/zip.js';
 export type {
   BuiltinHarnessActivationResult,
   BuiltinHarnessAsset,

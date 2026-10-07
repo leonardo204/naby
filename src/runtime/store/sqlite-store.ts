@@ -36,7 +36,7 @@ import { createRequire } from 'node:module';
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import { logActivity, registerActivityLogStore } from '../activity-log.js';
 import { decideMemoryWrite } from '../memory-gate.js';
-import { decideHarnessImport } from '../harness-gate.js';
+import { decideHarnessImport, provenanceForWrite } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 // The "is this the same claim" rule (P3-M8b §5.3) lives with the type so both
 // drivers reset corroboration on exactly the same edits.
@@ -904,6 +904,9 @@ type HarnessRow = {
  * kind-specific fields. A row written before this existed simply has no key. */
 type HarnessPayload = Pick<HarnessItem, 'command' | 'skill' | 'subagent'> & {
   importedFrom?: string;
+  /** `provenance.supersededBy` (org-harness-sync §4.5) — same reasoning as
+   *  importedFrom: an inert marker nothing indexes, so a JSON key, not a column. */
+  supersededBy?: string;
 };
 
 function toHarnessItem(row: HarnessRow): HarnessItem {
@@ -918,6 +921,8 @@ function toHarnessItem(row: HarnessRow): HarnessItem {
   const payload = JSON.parse(row.payload) as HarnessPayload;
   if (typeof payload.importedFrom === 'string' && payload.importedFrom.length > 0)
     provenance.importedFrom = payload.importedFrom;
+  if (typeof payload.supersededBy === 'string' && payload.supersededBy.length > 0)
+    provenance.supersededBy = payload.supersededBy;
 
   const item: HarnessItem = {
     id: row.id,
@@ -952,6 +957,8 @@ function harnessPayloadOf(item: {
   if (item.subagent !== undefined) payload.subagent = item.subagent;
   if (item.provenance?.importedFrom !== undefined)
     payload.importedFrom = item.provenance.importedFrom;
+  if (item.provenance?.supersededBy !== undefined && item.provenance.supersededBy.length > 0)
+    payload.supersededBy = item.provenance.supersededBy;
   return payload;
 }
 
@@ -2197,7 +2204,8 @@ export class SqliteStore implements Store {
       name: req.item.name,
       ...(req.item.description !== undefined ? { description: req.item.description } : {}),
       status: decision.status,
-      provenance: req.item.provenance,
+      // A refresh keeps the user's `supersededBy` decision (harness-gate.ts).
+      provenance: provenanceForWrite(req, existing),
       ...(req.item.command !== undefined ? { command: req.item.command } : {}),
       ...(req.item.skill !== undefined ? { skill: req.item.skill } : {}),
       ...(req.item.subagent !== undefined ? { subagent: req.item.subagent } : {}),

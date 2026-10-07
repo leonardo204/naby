@@ -1,0 +1,33 @@
+{
+  "name": "altimedia-harness",
+  "displayName": "Altimedia Harness",
+  "version": "0.7.1",
+  "description": "알티미디어 개발자용 공통 AI 하네스 — 통제·측정 훅, 공통 스킬·에이전트, 필수 MCP",
+  "author": {
+    "name": "AX 추진실",
+    "email": "biclaude@altimedia.com"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "altimedia",
+    "harness",
+    "ai-native"
+  ],
+  "defaultEnabled": true,
+  "userConfig": {
+    "SHUB_API_KEY": {
+      "type": "string",
+      "title": "Skill Hub API 키",
+      "description": "https://skills.altimedia.com/profile/api-keys 에서 발급한 shub_ 로 시작하는 키. 설치 확인과 Skill Hub MCP 연결에 씁니다. 건너뛰면 설치가 실패하고 하네스가 꺼집니다.",
+      "required": true,
+      "sensitive": true
+    },
+    "CIC_TOKEN": {
+      "type": "string",
+      "title": "CIC 토큰 (선택)",
+      "description": "사내 Confluence 문서 검색(CIC MCP)에 쓰는 토큰. 비워 두어도 설치됩니다. 나중에 /plugin configure altimedia-harness@altimedia-skills 에서 넣을 수 있습니다.",
+      "required": false,
+      "sensitive": true
+    }
+  }
+}

@@ -185,3 +185,38 @@ export function decideHarnessImport(
   // DOWNGRADE, never upgrade past a request.
   return { behavior: 'allow', status: requested };
 }
+
+/**
+ * The provenance a harness write should actually STORE, given the row it may be
+ * overwriting. Pure; both stores call it from `putHarnessItem`.
+ *
+ * ONE RULE TODAY: a content REFRESH keeps `supersededBy` (org-harness-sync §4.5).
+ * The naby-home scan re-reads a user's copy of an org skill and re-states its
+ * provenance from the file, which knows nothing about the user's choice of "use
+ * the org version". Without this the next edit of that file would silently drop
+ * the marker, and the kill switch (§4.8) would no longer find the copy it has to
+ * give back. A refresh may restate CONTENT, never a decision (invariant 5's
+ * reasoning, applied to this marker).
+ *
+ * Clearing is explicit: a caller that means "no longer superseded" passes
+ * `supersededBy: ''`, which the stores persist as absent. `undefined` means "the
+ * caller did not say", and only then does the existing value carry over.
+ */
+export function provenanceForWrite(
+  req: HarnessImportRequest,
+  existing?: HarnessItem,
+): HarnessItem['provenance'] {
+  const incoming = req.item.provenance;
+  if (
+    req.refresh &&
+    existing?.provenance.supersededBy &&
+    incoming.supersededBy === undefined
+  ) {
+    return { ...incoming, supersededBy: existing.provenance.supersededBy };
+  }
+  if (incoming.supersededBy === '') {
+    const { supersededBy: _drop, ...rest } = incoming;
+    return rest;
+  }
+  return incoming;
+}
