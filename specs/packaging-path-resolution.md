@@ -2,11 +2,11 @@
 id: packaging-path-resolution
 title: 패키징 경로 해석과 릴리스 검증 규약
 type: interface
-version: 1.2.0
+version: 1.2.1
 status: active
 scope: 배포본에서 런타임이 파일과 패키지를 어떻게 찾는지, 그리고 릴리스가 실제로 동작하는지 무엇으로 확인하는지를 정한다. `import.meta.url`이 번들러에 따라 빌드 머신 경로로 굳는 문제와, 그 때문에 로컬 패키징 검증이 무효가 되는 문제를 다룬다. 개발 프로바이더 봉인이 배포 경계에서 어떻게 열리는지도 함께 둔다(키 게이트는 1.2.0에서 제거). 엔진 선택 규칙 자체는 phase-2-2.5-plan이 다룬다.
-related: [phase-1-desktop-shell, chatgpt-oauth-dev-provider, phase-1-contracts, personalized-agent-desktop-app]
-updated: 2026-09-03
+related: [phase-1-desktop-shell, chatgpt-oauth-dev-provider, phase-1-contracts, personalized-agent-desktop-app, source-repository-mirror]
+updated: 2026-10-07
 ---
 
 # 패키징 경로 해석과 릴리스 검증 규약

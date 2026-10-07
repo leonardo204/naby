@@ -26,6 +26,7 @@
 | 구조 | **런타임**(`src/`, 프로바이더 독립 코어)과 **셸**(`shell/`, cockpit submodule) 2레이어. 데이터는 `app.db` 하나 |
 | 빌드 | `npm run build:app`(runtime → shell → electron). 실행은 `npm run electron:dev` |
 | 검증 | 셸 테스트 `cd shell && npm test` · 타입체크 `npm run typecheck`(양 트리) · 스파이크 `npm run spike:<name>` |
+| 저장소 | **정본은 Bitbucket**(`altimedia/ass-naby`, `ass-cockpit`). GitHub(`leonardo204/*`)는 빌드·릴리스용 미러 |
 | DB 경로 | `NABY_DB_PATH` > `NABY_HOME` > `~/.naby/app.db` |
 | 상태 | 개발 중. Phase 3(페르소나 에이전트) **P3-M14a까지 완료** — 신뢰 지표·연속 학습·기억 위생·빠른 진화 모드(단계 계약·모의 체크인)·기억 갱신 4연산·스타일 프로필·설정 IA 재편·나비 레이어(응답 재가공) |
 
@@ -36,6 +37,7 @@
 - **런타임** — 스토어 스키마와 드라이버, 게이트와 정책, 메모리·스킬 주입, 에이전트 모델, 순수 파서. 검증은 `src/spikes/spike-*.ts`로 한다.
 - **셸**(`shell/`) — HTTP 액션(`api/naby.ts`), 엔진 어댑터(`engines/naby.ts`), 외부 채널(`lib/telegram*.ts`), React UI, i18n. 검증은 vitest로 한다.
 - 셸은 별도 저장소(cockpit) submodule이다. **양쪽을 각각 커밋하고**, naby 커밋이 셸 포인터를 함께 옮긴다.
+- **push는 항상 `origin`으로 한다.** push 주소가 Bitbucket·GitHub 둘이라 한 번에 양쪽이 맞춰진다. 셸 먼저, naby 다음. 릴리스는 전과 같이 GitHub 태그 → Actions → GitHub Release(자동 업데이트)다 → [저장소 미러 규약](specs/source-repository-mirror.md)
 
 ### 검증할 때 주의
 
@@ -52,7 +54,7 @@
 
 - `ref-docs/specs/` — **정본.** `sdd.md`의 `{DOC_ROOT}`가 `ref-docs/`이므로 형식상 기준이다. `design|impl|interface|test` 계층을 지킨다. 전략·계약·완료된 Phase가 여기 있다.
 - `specs/` — **진행 중 착수 스펙.** 평면 구조를 허용하되 **frontmatter는 필수**다(id/type/version/status/scope/related/updated). 영향도 추적이 끊기면 트리를 나눈 이점이 사라진다. 안정되면 `ref-docs/specs/<type>/`으로 승격한다.
-- 현재 `specs/`: [페르소나 에이전트](specs/phase-3-persona-agent.md) · [나비 신뢰 지표](specs/phase-3-butterfly-trust-meter.md) · [체크인 원장 계약](specs/phase-3-checkin-contracts.md) · [에이전트 내보내기](specs/phase-3-agent-export.md) · [나비 레이어](specs/naby-voice-layer.md) · [Phase 2/2.5 계획](specs/phase-2-2.5-plan.md) · [패키징 경로 해석](specs/packaging-path-resolution.md)
+- 현재 `specs/`: [페르소나 에이전트](specs/phase-3-persona-agent.md) · [나비 신뢰 지표](specs/phase-3-butterfly-trust-meter.md) · [체크인 원장 계약](specs/phase-3-checkin-contracts.md) · [에이전트 내보내기](specs/phase-3-agent-export.md) · [나비 레이어](specs/naby-voice-layer.md) · [Phase 2/2.5 계획](specs/phase-2-2.5-plan.md) · [패키징 경로 해석](specs/packaging-path-resolution.md) · [저장소 미러 규약](specs/source-repository-mirror.md)
 - 새 스펙을 쓰거나 받았으면 `/spec-guard`로 기존 문서와 대조한다. **스펙을 저장하는 행위 자체가 발동 조건이다.**
 
 ### 문서 구조 (소유권 분리)
@@ -80,4 +82,4 @@
 
 ---
 
-*최종 업데이트: 2026-07-26*
+*최종 업데이트: 2026-10-07*
