@@ -2,11 +2,11 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 type: design
-version: 0.8.0
+version: 0.8.1
 status: active
 scope: 사내 표준 MCP(skill-hub, mcp-atlassian, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를, atlassian은 confluence-upload 스킬을 켠다. 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
-related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation]
-updated: 2026-09-14
+related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync]
+updated: 2026-10-07
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
@@ -99,6 +99,8 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 **원문에서 고친 것.** 두 `.md`는 원문 그대로 두되, naby 안에서 사실이 아닌 부분만 최소로 고쳤다 — 스킬의 설치 도우미가 말하던 `.mcp.json`·`${CIC_HOST}:49820`·healthz 3중 검증은 naby에 없는 절차이므로 System MCP 프리셋 기준 2중 검증으로 바꾸고, 기록 위치 `.claude/confluence.yml`을 `.naby/confluence.yml`로, rating 도구 표기에 naby의 `cic__submit_feedback`을 병기했다. 서브에이전트 `.md`는 무수정이다.
 
 ### 2.7.1 두 번째 번들 — atlassian과 `confluence-upload` (0.7.0에서 추가)
+
+> **변경 예정 (org-harness-sync 0.4.0, draft).** `atlassian` 프리셋은 공식 원격 MCP + OAuth 하나로 바뀌고 API 토큰 방식은 없어진다. 그에 따라 이 절의 `confluence-upload` 번들은 거둔다(org-harness-sync §3.8, §4.4). 그 스펙이 draft를 벗어날 때 이 절을 고친다.
 
 **무엇이 늘었나.** skill-hub의 `confluence-upload` 스킬을 세 번째 내장 아티팩트로 싣는다(`src/runtime/harness-assets/skills/confluence-upload/SKILL.md`). 이 스킬은 confUploader 저장소의 로컬 CLI(`build/bin/confupload-cli`)를 셸로 호출해 마크다운을 Confluence 페이지로 올린다 — Markdown을 Storage Format으로, mermaid 블록을 Macro Pack ADF로 변환하는 일이 본체다. 적재 경로는 §2.7 그대로다: 원문 `.md`를 트리에 두고 생성기가 `generated.ts`에 상수로 굳히며, 스파이크가 바이트 단위로 대조한다.
 

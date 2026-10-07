@@ -2,11 +2,11 @@
 id: harness-standalone
 title: 하네스 단독 소유 — 가져오면 naby 것이 된다
 type: design
-version: 0.2.0
+version: 0.2.1
 status: active
 scope: naby를 벤더 하네스와 상시 연결이 없는 단독 앱으로 만든다. 가져오기의 실체화(파일 복사), naby 전용 스캔, Agent SDK 격리 기본화, 예약 작업의 naby 엔진 고정, 벤더 디렉터리 읽기/쓰기 잔재 제거를 다룬다. 감사에서 나온 위반 V1~V9의 해소 계획이다.
-related: [skill-hub-builtin, phase-1_6-harness-ownership, harness-portability-strategy, phase-3-persona-agent]
-updated: 2026-08-03
+related: [skill-hub-builtin, phase-1_6-harness-ownership, harness-portability-strategy, phase-3-persona-agent, org-harness-sync]
+updated: 2026-10-07
 ---
 
 # 하네스 단독 소유 — 가져오면 naby 것이 된다
