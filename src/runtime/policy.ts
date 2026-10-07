@@ -12,7 +12,10 @@
 // the baseline rather than inventing a decision. The gate is already async
 // (engine.ts), so the M2 bridge drops in here with no signature change.
 
+import { homedir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { GateDecision, ToolCall } from './engine.js';
+import { CASE_INSENSITIVE_FS, isPathInside } from './fs-tools.js';
 import type { DecisionPolicy } from './gate.js';
 import type { HarnessScope, PolicyEffect, PolicyRule } from './store/store.js';
 
@@ -117,15 +120,92 @@ export function backgroundBashRefusal(call: ToolCall): GateDecision | undefined 
   };
 }
 
+/**
+ * The path argument(s) each file-WRITING tool carries, by tool name: ours
+ * (`fs-tools.ts`) and the Agent SDK's built-ins. `run_command` / `Bash` are not
+ * here — a shell line has no path argument to read, and the spec leaves shell
+ * writes to the hook stage (org-harness-sync §5, M3).
+ */
+export const PATH_WRITING_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  write_file: ['path'],
+  edit_file: ['path'],
+  Write: ['file_path'],
+  Edit: ['file_path'],
+  MultiEdit: ['file_path'],
+  NotebookEdit: ['notebook_path'],
+};
+
+/**
+ * THE SECOND SHAPE OF CALL REFUSED BEFORE ANY RULE: a file write into a
+ * write-protected directory (org-harness-sync §3.3 — "the gate allows reads under
+ * `~/.naby/org/`; it does not allow writes").
+ *
+ * WHY THE GATE AND NOT THE EXECUTOR. Our `write_file` is already contained to the
+ * project — but a project opened at `~` or at the naby home contains the org
+ * package, and the Agent SDK's `Write`/`Edit` have no containment at all. The
+ * gate is the one place both engines' writes pass, so the rule lives once, here.
+ *
+ * WHY ABOVE THE RULES. The package is replaced wholesale on the next Skill Hub
+ * version and is verified by sha256 when it lands (§3.1); an edit there is lost
+ * at best and silently diverges from what was verified at worst. That is a fact
+ * about the directory, not a permission a user rule could grant.
+ *
+ * Relative paths resolve against the turn's project directory — where both
+ * engines resolve them. `~/` is expanded, so the obvious spelling is not a way
+ * around it. Case is folded on case-insensitive file systems.
+ */
+export function protectedWriteRefusal(
+  call: ToolCall,
+  opts: { roots: readonly string[]; cwd?: string },
+): GateDecision | undefined {
+  if (opts.roots.length === 0) return undefined;
+  const keys = PATH_WRITING_TOOLS[normalizeToolName(call.toolName)];
+  if (!keys) return undefined;
+  const input = call.input;
+  if (typeof input !== 'object' || input === null) return undefined;
+  for (const key of keys) {
+    const raw = (input as Record<string, unknown>)[key];
+    if (typeof raw !== 'string' || raw.trim() === '') continue;
+    let value = raw.trim();
+    if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
+      value = join(homedir(), value.slice(1));
+    }
+    if (!isAbsolute(value) && !opts.cwd) continue;
+    const abs = isAbsolute(value) ? resolve(value) : resolve(opts.cwd!, value);
+    const root = opts.roots.find((r) => isPathInside(r, abs, { foldCase: CASE_INSENSITIVE_FS }));
+    if (root) {
+      return {
+        behavior: 'deny',
+        reason:
+          `${raw} is inside ${root}, which naby keeps read-only: it holds the org harness package, ` +
+          'replaced as a whole on every Skill Hub update. Read files there with read_file; write your ' +
+          'output into the project instead.',
+      };
+    }
+  }
+  return undefined;
+}
+
 export function realPolicy(deps: {
   rules: readonly PolicyRule[];
   fallback: DecisionPolicy;
   requestApproval?: (call: ToolCall) => Promise<GateDecision>;
+  /** Directories no file-writing tool may write into (`protectedWriteRefusal`).
+   *  The shell passes `<NABY_HOME>/org`. Empty/absent ⇒ nothing changes. */
+  writeProtectedRoots?: readonly string[];
+  /** The turn's project directory, for resolving relative write paths. */
+  cwd?: string;
 }): DecisionPolicy {
   return async (call: ToolCall): Promise<GateDecision> => {
     // Above the rules on purpose — see `backgroundBashRefusal`.
     const refused = backgroundBashRefusal(call);
     if (refused) return refused;
+    // Above the rules for the same kind of reason — see `protectedWriteRefusal`.
+    const protectedRefusal = protectedWriteRefusal(call, {
+      roots: deps.writeProtectedRoots ?? [],
+      ...(deps.cwd ? { cwd: deps.cwd } : {}),
+    });
+    if (protectedRefusal) return protectedRefusal;
     const name = normalizeToolName(call.toolName);
     const effect = resolvePolicyEffect(deps.rules, name);
     if (effect === 'allow') return { behavior: 'allow' };

@@ -97,6 +97,10 @@ export const OBSERVATION_RUNTIME_TOOLS: readonly string[] = [
   'naby_checkin',
   'naby_add_mcp',
   'naby_delegate',
+  // Reads an org skill's SKILL.md from the verified package on disk
+  // (org-harness-sync §3.3). Loading instructions is not acting on them; what the
+  // skill then does goes through its own, separately counted calls.
+  'naby_skill_load',
   // Harness built-ins that inspect or bookkeep. Deliberately NOT added to
   // `OBSERVATION_BUILTINS` in gate.ts: that list is the Phase-1 permission
   // allowlist, and widening what may RUN is a different decision from widening

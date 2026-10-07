@@ -127,13 +127,53 @@ function fail(message: string): ToolOutput {
  * normalisation rather than by looking for '..' in the input — the latter is the
  * check everybody writes and every traversal payload is designed to walk past.
  */
-function resolveInside(cwd: string, raw: unknown): { path: string } | { error: string } {
+/**
+ * Whether `abs` is `root` itself or somewhere beneath it. Both are resolved
+ * first, so `a/../../b` is judged after normalisation.
+ *
+ * THE ONE CONTAINMENT TEST. The workspace sandbox below, the extra read roots,
+ * and the gate's write-protected roots (`policy.ts`, org-harness-sync §3.3) all
+ * ask this same question; a second copy would be the place they drift.
+ *
+ * On a case-insensitive file system (macOS, Windows by default) a protected root
+ * must not be walked around by changing the case of one letter, so `foldCase`
+ * compares case-folded copies. The workspace sandbox leaves it off: it only ever
+ * WIDENS what is refused, and the sandbox has always compared exactly.
+ */
+export function isPathInside(root: string, abs: string, opts: { foldCase?: boolean } = {}): boolean {
+  let r = resolve(root);
+  let a = resolve(abs);
+  if (opts.foldCase) {
+    r = r.toLowerCase();
+    a = a.toLowerCase();
+  }
+  if (a === r) return true;
+  const rel = relative(r, a);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+/** Whether this platform's default file system ignores case (for `foldCase`). */
+export const CASE_INSENSITIVE_FS = process.platform === 'darwin' || process.platform === 'win32';
+
+/**
+ * Resolve a tool's path argument inside the project, or explain the refusal.
+ *
+ * `readRoots` are directories OUTSIDE the project that a read-only tool may also
+ * look into — today only the org harness package (org-harness-sync §3.3: "the
+ * skill folder's reference files are read with the existing read_file"). Only
+ * `read_file` and `list_dir` pass any; the writing tools never do, so this cannot
+ * widen what may be written.
+ */
+function resolveInside(
+  cwd: string,
+  raw: unknown,
+  readRoots: readonly string[] = [],
+): { path: string } | { error: string } {
   const value = typeof raw === 'string' ? raw.trim() : '';
   if (!value) return { error: 'A `path` is required.' };
 
   const abs = isAbsolute(value) ? resolve(value) : resolve(cwd, value);
-  const rel = relative(cwd, abs);
-  const inside = abs === cwd || (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel));
+  const inside = isPathInside(cwd, abs) || readRoots.some((root) => isPathInside(root, abs));
   if (!inside) {
     return {
       error:
@@ -144,8 +184,11 @@ function resolveInside(cwd: string, raw: unknown): { path: string } | { error: s
   return { path: abs };
 }
 
-/** Display form: project-relative, so results read like the user's own paths. */
+/** Display form: project-relative, so results read like the user's own paths. A
+ *  path under an extra read root is shown absolute — a `../../..` chain back to
+ *  the naby home would read as an escape rather than as the package it is. */
 function display(cwd: string, abs: string): string {
+  if (!isPathInside(cwd, abs)) return abs;
   const rel = relative(cwd, abs);
   return rel === '' ? '.' : rel;
 }
@@ -371,10 +414,13 @@ export const runCommandSchema: ToolSchema = {
 // Executors
 // ---------------------------------------------------------------------------
 
-export function makeReadFile(cwd: string): Executor {
+/** What a read-only workspace tool may see besides the project (see `resolveInside`). */
+export type WorkspaceReadOptions = { readRoots?: readonly string[] };
+
+export function makeReadFile(cwd: string, opts: WorkspaceReadOptions = {}): Executor {
   return async (input): Promise<ToolOutput> => {
     const rec = asRecord(input);
-    const target = resolveInside(cwd, rec.path);
+    const target = resolveInside(cwd, rec.path, opts.readRoots);
     if ('error' in target) return fail(target.error);
     if (!existsSync(target.path)) return fail(`No such file: ${display(cwd, target.path)}`);
 
@@ -423,10 +469,10 @@ export function makeReadFile(cwd: string): Executor {
   };
 }
 
-export function makeListDir(cwd: string): Executor {
+export function makeListDir(cwd: string, opts: WorkspaceReadOptions = {}): Executor {
   return async (input): Promise<ToolOutput> => {
     const rec = asRecord(input);
-    const target = resolveInside(cwd, rec.path ?? '.');
+    const target = resolveInside(cwd, rec.path ?? '.', opts.readRoots);
     if ('error' in target) return fail(target.error);
     if (!existsSync(target.path)) return fail(`No such directory: ${display(cwd, target.path)}`);
 
@@ -642,7 +688,33 @@ export function makeEditFile(cwd: string): Executor {
   };
 }
 
-export function makeRunCommand(cwd: string): Executor {
+/**
+ * Extra environment for ONE command, decided from the command line itself — or
+ * undefined for "the inherited environment, unchanged". A value of `undefined`
+ * REMOVES that variable for the command. This is how the org harness's
+ * compatibility layer (org-harness-sync §3.4) hands `CLAUDE_PLUGIN_ROOT` and
+ * friends to a script in its package without putting them in every command.
+ */
+export type CommandEnvFor = (
+  command: string,
+  cwd: string,
+) => Record<string, string | undefined> | undefined;
+
+/** Merge a command's extra env over the process env (`undefined` deletes). */
+export function commandEnvironment(
+  base: NodeJS.ProcessEnv,
+  extra: Record<string, string | undefined> | undefined,
+): NodeJS.ProcessEnv {
+  if (!extra) return base;
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === undefined) delete env[k];
+    else env[k] = v;
+  }
+  return env;
+}
+
+export function makeRunCommand(cwd: string, opts: { envFor?: CommandEnvFor } = {}): Executor {
   return async (input, ctx): Promise<ToolOutput> => {
     const rec = asRecord(input);
     const command = typeof rec.command === 'string' ? rec.command.trim() : '';
@@ -663,7 +735,15 @@ export function makeRunCommand(cwd: string): Executor {
         // Detached so the whole process GROUP can be killed on timeout: a plain
         // kill would take the shell and leave its children running.
         detached: process.platform !== 'win32',
-        env: process.env,
+        // Never throws into the turn: an env hook that fails leaves the command
+        // with the inherited environment, exactly as before it existed.
+        env: commandEnvironment(process.env, (() => {
+          try {
+            return opts.envFor?.(command, cwd);
+          } catch {
+            return undefined;
+          }
+        })()),
       });
 
       let out = '';
@@ -752,12 +832,18 @@ export function makeRunCommand(cwd: string): Executor {
 export function buildWorkspaceTools(opts: {
   cwd: string;
   allowMutations: boolean;
+  /** Directories outside the project `read_file` / `list_dir` may also read
+   *  (the org harness package, org-harness-sync §3.3). Never writable. */
+  readRoots?: readonly string[];
+  /** Per-command extra env for `run_command` (org-harness-sync §3.4). */
+  commandEnv?: CommandEnvFor;
 }): { toolSchemas: ToolSchema[]; executors: Record<string, Executor> } {
   const { cwd } = opts;
+  const readOpts: WorkspaceReadOptions = opts.readRoots ? { readRoots: opts.readRoots } : {};
   const toolSchemas: ToolSchema[] = [readFileSchema, listDirSchema, globSchema, grepSchema];
   const executors: Record<string, Executor> = {
-    read_file: makeReadFile(cwd),
-    list_dir: makeListDir(cwd),
+    read_file: makeReadFile(cwd, readOpts),
+    list_dir: makeListDir(cwd, readOpts),
     glob: makeGlob(cwd),
     grep: makeGrep(cwd),
   };
@@ -766,7 +852,7 @@ export function buildWorkspaceTools(opts: {
     toolSchemas.push(writeFileSchema, editFileSchema, runCommandSchema);
     executors.write_file = makeWriteFile(cwd);
     executors.edit_file = makeEditFile(cwd);
-    executors.run_command = makeRunCommand(cwd);
+    executors.run_command = makeRunCommand(cwd, opts.commandEnv ? { envFor: opts.commandEnv } : {});
   }
 
   return { toolSchemas, executors };

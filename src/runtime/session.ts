@@ -173,6 +173,11 @@ export type RunTurnOptions = {
      *  `userText` reaches here it may be an autonomy continuation prompt or an
      *  `@agent` task string. */
     explicitNames?: string[];
+    /** On-demand (org) skills: the kill switch, the listing budget and the
+     *  preload loader — see ON-DEMAND ROWS in skill-inject.ts. The caller pins it
+     *  once per user turn (org-harness-sync §4.7), so every step of an autonomous
+     *  run lists and loads from the same package. Omit ⇒ never listed. */
+    onDemand?: SkillInjectionQuery['onDemand'];
   };
   /** Called once with what was injected (skills, tokensUsed, droppedForBudget,
    * excludedForTools) so the caller can log/inspect the per-turn skill selection.
@@ -387,6 +392,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       ...(opts.skillInjection.explicitNames !== undefined &&
       opts.skillInjection.explicitNames.length > 0
         ? { explicitNames: opts.skillInjection.explicitNames }
+        : {}),
+      ...(opts.skillInjection.onDemand !== undefined
+        ? { onDemand: opts.skillInjection.onDemand }
         : {}),
     };
     const skillOpts: { userId?: string; orgId?: string } = {};

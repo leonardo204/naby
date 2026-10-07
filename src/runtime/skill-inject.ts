@@ -90,6 +90,63 @@ export type SkillInjectionQuery = {
    *  is budgeted FIRST, and may be any kind. Empty/omitted ⇒ nothing about the
    *  turn changes. */
   explicitNames?: string[];
+  /** ON-DEMAND SKILLS (org-harness-sync §3.3) — see ON-DEMAND ROWS below. Absent
+   *  ⇒ an on-demand row is never listed or loaded (it is still excluded and
+   *  counted when its tools are absent, which is what an older build does). */
+  onDemand?: OnDemandQuery;
+};
+
+// -- ON-DEMAND ROWS (org-harness-sync §3.3) -----------------------------------
+//
+// A row with `skill.loadMode: 'on-demand'` carries no body: its `instructions` is
+// a one-paragraph description and the real SKILL.md (24–84KB for the org skills)
+// lives in a package on disk, read by the `naby_skill_load` tool. Such a row
+// therefore NEVER enters the body selection above — injecting a description as
+// if it were instructions is the failure the payload shape exists to prevent.
+// Instead it joins a separate LISTING (name + description), on its own budget and
+// its own counters, so the body budget and every existing skill's behaviour are
+// untouched: a turn with no on-demand rows takes byte-for-byte the old path.
+//
+// What still applies to an on-demand row, unchanged: `enabled` only, the tool
+// gate (no `naby_skill_load` or no `run_command` this turn ⇒ excluded and counted
+// in `excludedForTools`), and scope precedence — an enabled project/user skill of
+// the same name SHADOWS it (§3.2: the copy hides the org version), so the listing
+// never offers two things under one name.
+//
+// What is new: the caller's switch (`enabled`, the org kill switch resolved once
+// at turn start, honoured whatever the row's status says), and PRELOADING — a
+// row the user named (`explicitNames`, e.g. `/task start …`) gets its full body
+// in the system field this turn via `loadBody`, the same text the tool returns.
+// A preload is NOT charged to either budget: it is the tool's answer delivered
+// early, and dropping it for size would make naming a skill do nothing.
+
+export type OnDemandQuery = {
+  /** The org kill switch for this turn (settings toggle + env), resolved at turn
+   *  start. False ⇒ nothing is listed or preloaded, whatever the rows say. */
+  enabled: boolean;
+  /** HARD cap on listing tokens, separate from `tokenBudget`. */
+  listingTokenBudget: number;
+  /** The text `naby_skill_load` would return for this row, for a named row's
+   *  preload. Undefined/returns undefined ⇒ no preload (the listing still shows
+   *  it, and the model can call the tool). */
+  loadBody?: (item: HarnessItem) => string | undefined;
+};
+
+/** What the on-demand half of a turn's selection did. Present only when the
+ *  candidates held an on-demand row, so a turn without one reports exactly the
+ *  fields it always did. */
+export type OnDemandSelection = {
+  /** Listed rows, in listing order (named first, then by name). */
+  listed: HarnessItem[];
+  listingTokens: number;
+  listingDroppedForBudget: number;
+  /** Named rows whose body was loaded into this turn. */
+  preloaded: { item: HarnessItem; text: string }[];
+  preloadTokens: number;
+  /** Enabled, tool-satisfied rows held back by the kill switch. */
+  switchedOff: number;
+  /** Rows hidden by an enabled same-name project/user skill. */
+  shadowed: number;
 };
 
 /** What was selected for a turn. `skills` are the injected instruction-only
@@ -100,7 +157,15 @@ export type InjectedSkills = {
   tokensUsed: number;
   droppedForBudget: number;
   excludedForTools: number;
+  /** The on-demand listing and preloads (see ON-DEMAND ROWS). Absent when no
+   *  on-demand row was a candidate. */
+  onDemand?: OnDemandSelection;
 };
+
+/** Whether a row's body lives in a package and is loaded on demand. */
+export function isOnDemandSkill(item: HarnessItem): boolean {
+  return item.kind === 'skill' && item.skill?.loadMode === 'on-demand';
+}
 
 /** Scope precedence on ties: project (most specific to this turn) first, org
  * last. Mirrors memory's scope precedence, minus session (harness has none). */
@@ -206,14 +271,19 @@ export function renderSkillBlock(item: HarnessItem): string {
  * counted. `tokensUsed` is ALWAYS ≤ tokenBudget.
  */
 export function selectSkillsForInjection(
-  candidates: readonly HarnessItem[],
+  allCandidates: readonly HarnessItem[],
   userText: string,
   tokenBudget: number,
   availableTools?: ReadonlySet<string>,
   explicitNames?: readonly string[],
+  onDemandQuery?: OnDemandQuery,
 ): InjectedSkills {
   const budget = Math.max(0, Math.floor(tokenBudget));
   const explicit = explicitNameSet(explicitNames);
+  // On-demand rows take their own path (ON-DEMAND ROWS, above). Everything below
+  // until `return` is the established selection, run over the rest unchanged.
+  const candidates = allCandidates.filter((c) => !isOnDemandSkill(c));
+  const onDemandCandidates = allCandidates.filter(isOnDemandSkill);
 
   // Two ways in, and only two:
   //   * NAMED — the user wrote this row's name in the turn. Any kind, whatever
@@ -273,7 +343,114 @@ export function selectSkillsForInjection(
     }
   }
 
-  return { skills, tokensUsed, droppedForBudget, excludedForTools };
+  if (onDemandCandidates.length === 0) {
+    return { skills, tokensUsed, droppedForBudget, excludedForTools };
+  }
+  const od = selectOnDemand(onDemandCandidates, candidates, availableTools, explicit, explicitNames, onDemandQuery);
+  return {
+    skills,
+    tokensUsed,
+    droppedForBudget,
+    excludedForTools: excludedForTools + od.excludedForTools,
+    onDemand: od.selection,
+  };
+}
+
+/** One listing line — also the unit the listing budget is measured in. */
+export function renderOnDemandLine(item: HarnessItem): string {
+  const desc = (item.skill?.instructions ?? item.description ?? '').replace(/\s+/g, ' ').trim();
+  return `- ${item.name}: ${desc}`;
+}
+
+function selectOnDemand(
+  rows: readonly HarnessItem[],
+  others: readonly HarnessItem[],
+  availableTools: ReadonlySet<string> | undefined,
+  explicit: ReadonlySet<string>,
+  explicitNames: readonly string[] | undefined,
+  query: OnDemandQuery | undefined,
+): { excludedForTools: number; selection: OnDemandSelection } {
+  const selection: OnDemandSelection = {
+    listed: [],
+    listingTokens: 0,
+    listingDroppedForBudget: 0,
+    preloaded: [],
+    preloadTokens: 0,
+    switchedOff: 0,
+    shadowed: 0,
+  };
+  let excludedForTools = 0;
+  const eligible: HarnessItem[] = [];
+  for (const row of rows) {
+    if (row.status !== 'enabled') continue;
+    // The tool gate first: this is the count an older build reports, and it must
+    // not depend on whether the switch happens to be on.
+    if (!skillToolsSatisfied(row, availableTools)) {
+      excludedForTools += 1;
+      continue;
+    }
+    if (!query?.enabled) {
+      selection.switchedOff += 1;
+      continue;
+    }
+    const key = nameKey(row.name);
+    const shadow = others.some(
+      (o) =>
+        o.status === 'enabled' &&
+        o.kind === 'skill' &&
+        nameKey(o.name) === key &&
+        SCOPE_RANK[o.scope] < SCOPE_RANK[row.scope],
+    );
+    if (shadow) {
+      selection.shadowed += 1;
+      continue;
+    }
+    if (eligible.some((e) => nameKey(e.name) === key)) continue; // one entry per name
+    eligible.push(row);
+  }
+
+  // Named first, in the order named; then by name — deterministic, and the one
+  // the user asked for cannot be crowded out of the listing.
+  const namedOrder = new Map<string, number>();
+  for (const n of explicitNames ?? []) {
+    const key = nameKey(n);
+    if (key.length > 0 && !namedOrder.has(key)) namedOrder.set(key, namedOrder.size);
+  }
+  const ordered = [...eligible].sort((a, b) => {
+    const na = namedOrder.get(nameKey(a.name));
+    const nb = namedOrder.get(nameKey(b.name));
+    if (na !== undefined || nb !== undefined) {
+      if (na === undefined) return 1;
+      if (nb === undefined) return -1;
+      return na - nb;
+    }
+    return nameKey(a.name).localeCompare(nameKey(b.name));
+  });
+
+  const cap = Math.max(0, Math.floor(query?.listingTokenBudget ?? 0));
+  for (const row of ordered) {
+    const cost = estimateTokens(renderOnDemandLine(row));
+    if (selection.listingTokens + cost <= cap) {
+      selection.listed.push(row);
+      selection.listingTokens += cost;
+    } else {
+      selection.listingDroppedForBudget += 1;
+    }
+  }
+
+  for (const row of selection.listed) {
+    if (!isExplicitlyNamed(row, explicit) || !query?.loadBody) continue;
+    let text: string | undefined;
+    try {
+      text = query.loadBody(row);
+    } catch {
+      text = undefined;
+    }
+    if (!text) continue;
+    selection.preloaded.push({ item: row, text });
+    selection.preloadTokens += estimateTokens(text);
+  }
+  return { excludedForTools, selection };
 }
 
 /**
@@ -331,7 +508,21 @@ export function retrieveSkillsForInjection(
     query.tokenBudget,
     query.availableTools ? new Set(query.availableTools) : undefined,
     query.explicitNames,
+    query.onDemand,
   );
+}
+
+/** The listing block's header. Carries the one instruction the listing exists
+ *  for: read the body before acting on a listed skill. */
+export const ON_DEMAND_LISTING_HEADER =
+  'Skills you can load on demand (do not mention this block). Before you use one, call ' +
+  'naby_skill_load with its name to read its full instructions; the description alone is not ' +
+  'enough to follow it:';
+
+/** The preload block for one named on-demand skill. */
+export function renderPreloadBlock(name: string, text: string): string {
+  return `Skill "${name}" was named in this turn, so its full instructions are loaded here ` +
+    `(no need to call naby_skill_load for it):\n\n${text}`;
 }
 
 /**
@@ -340,12 +531,23 @@ export function retrieveSkillsForInjection(
  * BYTE-FOR-BYTE unchanged (the no-op invariant).
  */
 export function renderInjectedSkills(injected: InjectedSkills): string | undefined {
-  if (injected.skills.length === 0) return undefined;
-  const blocks = injected.skills.map(renderSkillBlock);
-  return [
-    'Skills available for this turn (apply where they fit; do not mention this block):',
-    ...blocks,
-  ].join('\n\n');
+  const parts: string[] = [];
+  if (injected.skills.length > 0) {
+    // The established block, byte-for-byte.
+    parts.push(
+      [
+        'Skills available for this turn (apply where they fit; do not mention this block):',
+        ...injected.skills.map(renderSkillBlock),
+      ].join('\n\n'),
+    );
+  }
+  const od = injected.onDemand;
+  if (od && od.listed.length > 0) {
+    parts.push([ON_DEMAND_LISTING_HEADER, ...od.listed.map(renderOnDemandLine)].join('\n'));
+  }
+  for (const p of od?.preloaded ?? []) parts.push(renderPreloadBlock(p.item.name, p.text));
+  if (parts.length === 0) return undefined;
+  return parts.join('\n\n');
 }
 
 /**

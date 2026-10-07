@@ -9,3 +9,4 @@ Synthetic body for spike-org-harness-migrate. The real SKILL.md is much larger;
 this one only needs to be a stable body that a same-name user copy can match or not.
 
 Run `python3 ${CLAUDE_PLUGIN_ROOT}/skills/task/scripts/main.py` from the project root.
+Since 0.8 the real skills call their scripts as `python3 "${CLAUDE_SKILL_DIR}/scripts/main.py" start`.

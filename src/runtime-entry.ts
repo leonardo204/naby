@@ -126,6 +126,8 @@ export {
 // in for the interim `allowChanges ? allow-all : floor` ternary.
 export {
   realPolicy,
+  protectedWriteRefusal,
+  PATH_WRITING_TOOLS,
   resolvePolicyEffect,
   matchToolPattern,
   normalizeToolName,
@@ -197,6 +199,9 @@ export {
   writeFileSchema,
   editFileSchema,
   runCommandSchema,
+  isPathInside,
+  commandEnvironment,
+  type CommandEnvFor,
 } from './runtime/fs-tools.js';
 
 // THE BACKGROUND-JOB TOOLS — naby layer, not workspace.
@@ -495,6 +500,27 @@ export {
   type OrgHarnessSyncReport,
   type OrgPackage,
 } from './runtime/org-harness.js';
+// THE ORG HARNESS INSIDE ONE TURN (org-harness-sync M2): the per-turn pin, the
+// `naby_skill_load` tool, the §3.4 compatibility layer and the package-command env.
+export {
+  makeOrgSkillLoadTool,
+  ORG_COMMAND_ENV,
+  ORG_KEY_ENV_NAMES,
+  ORG_SKILL_LISTING_TOKEN_BUDGET,
+  orgCommandEnv,
+  orgCompatPreamble,
+  orgHarnessProtectedRoot,
+  orgReadRoots,
+  orgSkillLoadText,
+  orgSkillPreloader,
+  orgTurnListsSkills,
+  pinOrgHarnessTurn,
+  SKILL_LOAD_TOOL_NAME,
+  skillLoadSchema,
+  substituteOrgPlaceholders,
+  type OrgHarnessTurn,
+  type PinOrgHarnessTurnArgs,
+} from './runtime/org-harness-turn.js';
 // Fixture-only writer + the strict reader, exported so the shell's vitest can
 // build a package zip without a binary fixture in the tree.
 export { buildZip, extractZip, ZipError, type ZipWriteEntry } from './runtime/zip.js';
@@ -529,6 +555,11 @@ export {
   composeSystemWithSkills,
   gatherSkillCandidates,
   isInstructionOnly,
+  isOnDemandSkill,
+  ON_DEMAND_LISTING_HEADER,
+  renderOnDemandLine,
+  type OnDemandQuery,
+  type OnDemandSelection,
   renderInjectedSkills,
   renderSkillBlock,
   retrieveSkillsForInjection,

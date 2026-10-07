@@ -2,7 +2,7 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.4.0
+version: 0.5.0
 status: draft
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
 related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution]
@@ -43,7 +43,7 @@ altimedia-harness 0.7.1을 직접 열어 확인한 내용이다(`~/.claude/plugi
 
 **파일 묶음.** 세 스킬은 파일을 10~68개 가진다. Python 스크립트, 참고 문서, 템플릿이고, 본문이 상대 경로로 가리킨다. naby 스킬은 파일이 아니라 `harness_items`의 행이라 이 경로가 존재하지 않는다. 패키지를 디스크에 풀어 두어야 한다(§3.1).
 
-**Claude Code 전제.** 본문과 훅이 `Bash`·`Write`·`Edit` 도구 이름, `${CLAUDE_PLUGIN_ROOT}`·`CLAUDE_PROJECT_DIR` 환경 변수, `.claude/` 경로를 쓴다. 자동 갱신되는 본문은 naby가 손으로 고칠 수 없다(내장 번들과 다른 점). 고치는 대신 호환 계층을 둔다(§3.4).
+**Claude Code 전제.** 본문과 훅이 `Bash`·`Write`·`Edit` 도구 이름, `${CLAUDE_PLUGIN_ROOT}`·`${CLAUDE_SKILL_DIR}`·`CLAUDE_PROJECT_DIR` 환경 변수, `.claude/` 경로를 쓴다. 0.8.x 본문은 스크립트를 `${CLAUDE_SKILL_DIR}`(스킬 폴더) 기준으로 부르고, `${CLAUDE_PLUGIN_ROOT}`는 주로 훅이 쓴다. 자동 갱신되는 본문은 naby가 손으로 고칠 수 없다(내장 번들과 다른 점). 고치는 대신 호환 계층을 둔다(§3.4).
 
 ## 3. 설계
 
@@ -93,9 +93,10 @@ altimedia-harness 0.7.1을 직접 열어 확인한 내용이다(`~/.claude/plugi
 | `Read` / `Write` / `Edit` | `read_file` / `write_file` / `edit_file` |
 | `AskUserQuestion` | 답변 본문으로 묻는다. 되돌리기 어려운 선택은 `naby_checkin`으로 묻는다 |
 | `${CLAUDE_PLUGIN_ROOT}` | 이 패키지의 절대 경로(불러올 때 문자열로 바꿔 넣는다) |
+| `${CLAUDE_SKILL_DIR}` | 그 스킬 폴더의 절대 경로(불러올 때 문자열로 바꿔 넣는다) |
 | `.claude/` | 프로젝트 저장소 안의 파일이면 그대로 쓴다. `~/.claude/` 사용자 설정은 건드리지 않는다 |
 
-**명령을 실행할 때.** 스킬 폴더 아래 스크립트를 실행하는 `run_command`에는 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PROJECT_DIR`(열린 프로젝트), `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`(설정된 경우)을 넣는다. skill-hub API 키는 넣지 않는다. 스크립트가 쓰지 않는 값이다.
+**명령을 실행할 때.** 스킬 폴더 아래 스크립트를 실행하는 `run_command`에는 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_SKILL_DIR`, `CLAUDE_PROJECT_DIR`(열린 프로젝트), `HARNESS_CLIENT=naby`, `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`(설정된 경우)을 넣는다. skill-hub API 키는 넣지 않는다. 스크립트가 쓰지 않는 값이다.
 
 Claude 엔진이 SDK 내장 `Bash`·`Write`·`Edit`를 쓰는 경우에도 이 계층은 같다. 이름 표가 항등 변환이 될 뿐이다.
 
@@ -127,6 +128,8 @@ Claude 엔진이 SDK 내장 `Bash`·`Write`·`Edit`를 쓰는 경우에도 이 �
 | `Stop` | 턴이 끝났을 때 |
 | `PreCompact` | `compaction.ts`가 줄이기 직전, Claude 엔진은 `compact_boundary` 직전 |
 | `SessionEnd` | 탭 닫기, 앱 종료 |
+
+**matcher.** `hooks.json`의 `matcher`는 Claude Code와 같이 **정규식**으로 해석한다. 0.8.0부터 `^mcp__.*__(confluence_(create\|update)_page\|(create\|update)ConfluencePage)$` 같은 식이 들어 있다. 비교 대상은 아래 입력 절의 변환을 마친 Claude Code 철자의 도구 이름이다. 정규식이 잘못됐으면 그 훅 항목만 건너뛰고 로그에 남긴다.
 
 **입력.** 표준 입력에 JSON을 준다. 필드는 `session_id`, `cwd`(열린 프로젝트), `hook_event_name`, `transcript_path`, 도구 이벤트면 `tool_name`·`tool_input`, 서브에이전트 안이면 `agent_id`다.
 
@@ -353,3 +356,39 @@ naby 쪽은 아래 변경을 기다리지 않고 먼저 동작한다. 반영되�
 | A5 | `hooks/hooks.json`에 새 스크립트를 넣을 때 | 변경 기록(CHANGELOG)에 "새 훅 스크립트"를 따로 적는다 | naby는 허용 목록에 있는 스크립트만 돌린다(§3.5). 새 훅은 naby 릴리스에서 검토한 뒤 허용한다 |
 
 참고로 naby가 넘기는 도구 이름은 `mcp__atlassian__createConfluencePage` 꼴이고, Claude Code 플러그인에서는 `mcp__plugin_altimedia-harness_atlassian__createConfluencePage` 꼴이다. A4의 정규식은 둘 다 잡아야 한다.
+
+## 7. 구현 상태
+
+2026-10-07 기준이다.
+
+### 7.1 M1 (naby 40547d9, 셸 e013b9c)
+
+패키지 받기·sha256 확인·풀기·`current` 전환(§3.1), 조직 행 반영과 `org-withdrawn`(§3.2), 활성화(§3.6의 활성화 부분), 기존 사용자 이전(§4.1~4.3, §4.5, §4.8)을 넣었다. `spike:org-harness-migrate`와 셸의 `orgHarness.test.ts`가 확인한다.
+
+### 7.2 M2
+
+아래를 넣었다. `spike:org-harness-load`와 셸 테스트(`nabyOrgHarnessTurn.test.ts` 외)가 확인한다.
+
+- **필요할 때 불러오기(§3.3).** `loadMode: "on-demand"` 행은 본문 선택에 들어가지 않는다. 이름과 description 목록으로만 들어가고, 목록 예산(1500토큰)과 집계는 본문 예산과 따로 센다. 목록 머리말이 "쓰기 전에 `naby_skill_load`를 부르라"고 말한다. 같은 이름의 project·user 스킬이 켜져 있으면 그 이름은 목록에서 뺀다(§3.2의 범위 순위).
+- **`naby_skill_load`.** 두 엔진이 같은 런타임 도구를 쓴다. Claude 엔진에서는 `nabytools` 서버로 보인다. 결과는 §3.4 안내문, 스킬 폴더 절대 경로, 자리표시자를 바꾼 본문이다. 셸이 있는 턴에만 준다. 셸이 있는 턴은 프로젝트가 열려 있고 변경이 허용된 턴이다. Claude 엔진에서는 SDK의 `Bash`를 `run_command`로 본다.
+- **이름으로 부르면 미리 불러 둔다.** 줄 머리에 쓴 `/task start …`도 같다. `/` 팔레트에서 조직 스킬을 고르면 지금처럼 `/task `가 입력된다. 보낼 때 디스패처는 description을 펼치지 않고 그 줄을 그대로 둔다. 엔진이 그 이름을 런타임에 넘기고, 런타임이 본문을 그 턴의 시스템 프롬프트에 넣는다.
+- **끄는 스위치를 주입에서도 지킨다(§4.8).** 턴 시작 때 스위치가 꺼져 있으면 행 상태와 관계없이 목록과 미리 불러오기를 하지 않는다. `naby_skill_load`와 명령 환경 변수는 부를 때마다 스위치를 다시 본다.
+- **턴마다 패키지 경로를 고정한다(§4.7).** 턴 시작 때 한 번 정한 폴더를 목록·불러오기·환경 변수가 끝까지 쓴다. 자율 실행의 모든 단계도 같다. 턴 도중 새 버전이 와도 그 턴은 옛 폴더에서 끝난다(§4.9의 7번).
+- **게이트.** `<NABY_HOME>/org/` 아래 쓰기는 `realPolicy`가 사용자 규칙보다 먼저 거부한다. naby의 `write_file`·`edit_file`과 SDK의 `Write`·`Edit`·`MultiEdit`·`NotebookEdit`가 대상이다. 읽기는 `read_file`·`list_dir`의 프로젝트 경계에 읽기 전용 루트를 더해 허용한다. 경계 판정은 `fs-tools.ts`의 `isPathInside` 하나를 같이 쓴다.
+- **호환 계층(§3.4).** 불러올 때 안내문을 붙이고 `${CLAUDE_PLUGIN_ROOT}`·`${CLAUDE_SKILL_DIR}`를 절대 경로로 바꾼다. `run_command`의 명령 줄이 패키지 폴더나 두 자리표시자를 가리키면 §3.4의 환경 변수를 넣는다. Skill Hub 키 이름의 변수(`CLAUDE_PLUGIN_OPTION_SHUB_API_KEY`, `SHUB_API_KEY`)는 그 명령의 환경에서 지운다. 다른 명령의 환경은 건드리지 않는다.
+- **설정 화면과 알림(§4.5, §4.8).** 설정 → 하네스 맨 위에 조직 하네스 카드를 두었다. 버전, 마지막 확인, 키 상태(확인됨·거부됨·키 없음), 켜고 끄기, 조직 스킬과 켜짐 여부, 같은 이름 사본의 두 선택지("조직 버전 쓰기"·"내 사본 유지")와 사본 종류("고치지 않은 사본"·"직접 고친 사본")를 보여 준다. 새 세션의 첫 턴에는 같은 이름 사본과 키 거부를 하네스 알림으로 한 번 띄운다.
+
+### 7.3 구현하며 확인한 사실
+
+- 0.8.1 본문은 스크립트를 `${CLAUDE_SKILL_DIR}` 기준으로 부른다. 그래서 §2와 §3.4 표에 이 자리표시자를 더했다.
+- 0.8.1에서 `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`을 읽는 스크립트는 `activate.js`뿐이다. pdoc의 `template_source.py`는 `CIC_API_TOKEN`을 읽는다. 지금 넣는 cic 변수는 스킬 스크립트에 닿지 않는다.
+- 셸의 하네스 홈 스캔은 `NABY_HOME`이 아니라 `os.homedir()` 아래 `~/.naby/skills`를 읽는다. 임시 홈으로 띄운 셸도 실제 홈의 스킬을 읽는다. 쓰지는 않는다. 이 문서 범위 밖이지만 §4.9의 릴리스 전 확인 때 주의한다.
+
+### 7.4 남은 일
+
+- **M3.** 훅 실행기(§3.5), Atlassian OAuth 프리셋(§3.8)과 API 토큰에서의 전환(§4.4), 인증 차단과 의존성 점검(§3.6), 인증 유예(§4.6), 이어받은 세션의 `SessionStart`(§4.7)를 넣는다. 함께 정할 것이 셋 있다.
+  - Claude 엔진의 SDK `Bash`에는 §3.4 환경 변수가 아직 들어가지 않는다. 명령마다 환경을 줄 자리가 없다. SDK가 띄우는 프로세스의 환경은 훅 실행기와 함께 다룬다.
+  - 셸 명령(`run_command`·`Bash`)으로 `<NABY_HOME>/org/`에 쓰는 일은 막지 않는다. 경로 인자가 없는 도구라 게이트가 볼 수 없다.
+  - cic 토큰을 `CIC_API_TOKEN`으로도 넣을지 정한다(7.3).
+- **M4.** 집계(§3.7)와 6시간 주기 확인을 넣는다.
+- **M2 증거 중 남은 것.** §5의 "실제 모델로 `/task start` 한 번"은 아직 하지 않았다. 같은 경로(목록, 미리 불러오기, 도구 목록)는 가짜 모델로 셸 테스트가 확인한다.
