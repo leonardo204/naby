@@ -34,7 +34,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCES = [
   { kind: 'skill', path: 'src/runtime/harness-assets/skills/confluence-context/SKILL.md' },
   { kind: 'subagent', path: 'src/runtime/harness-assets/agents/confluence-researcher.md' },
-  { kind: 'skill', path: 'src/runtime/harness-assets/skills/confluence-upload/SKILL.md' },
+  // `confluence-upload` was withdrawn in the OAuth release (org-harness-sync
+  // §4.4): Confluence publishing is the org skill pdoc's job, over the OAuth MCP.
   // The `core` bundle (specs/subagent-delegation.md §4.1): the two cheap
   // subagents that exist to keep the MAIN transcript small. `explorer` pins
   // haiku and `implementer` pins sonnet, because a specific model IS the reason

@@ -141,6 +141,9 @@ export type ActivityKind =
   | 'reflection_run'
   // -- harness / settings ---------------------------------------------------
   | 'harness_change'
+  // One org harness hook run (org-harness-sync §3.5): event, script, outcome and
+  // duration — never the hook's input or output.
+  | 'org_hook'
   | 'setting_change'
   // -- outside channels -----------------------------------------------------
   | 'telegram_in'

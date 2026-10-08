@@ -57,6 +57,7 @@ import type {
   HookCallback,
   HookInput,
   ModelUsage,
+  PreCompactHookInput,
   PreToolUseHookInput,
   PreToolUseHookSpecificOutput,
   SDKUserMessage,
@@ -387,6 +388,13 @@ export function buildQueryOptions(args: {
   input: EngineRunInput;
   mcpServer: SdkMcpServer;
   preToolUse: HookCallback;
+  /**
+   * The compaction port's two SDK-native call sites (org-harness-sync §3.5), when
+   * the turn has a port: `PreCompact` (awaited before the CLI compacts) and
+   * `SessionStart` (the CLI fires it with `source: "compact"` once compaction is
+   * done; any other source is ignored). Absent = exactly the pre-M3 hook set.
+   */
+  compactionHooks?: { preCompact: HookCallback; sessionStart: HookCallback };
   abortController: AbortController;
   onStderr: (data: string) => void;
   /**
@@ -438,7 +446,15 @@ export function buildQueryOptions(args: {
     // THE BUILT-INS WE TAKE BACK are listed further down, on `disallowedTools`,
     // next to the isolation options they belong with. `tools` stays unset (above)
     // so the rest of the harness built-ins stay live.
-    hooks: { PreToolUse: [{ hooks: [preToolUse] }] },
+    hooks: {
+      PreToolUse: [{ hooks: [preToolUse] }],
+      ...(args.compactionHooks
+        ? {
+            PreCompact: [{ hooks: [args.compactionHooks.preCompact] }],
+            SessionStart: [{ hooks: [args.compactionHooks.sessionStart] }],
+          }
+        : {}),
+    },
     // deny is authoritative even here:
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
@@ -1948,6 +1964,45 @@ export class ClaudeAgentSdkEngine implements Engine {
       return { hookSpecificOutput: out };
     };
 
+    // THE COMPACTION PORT, on the SDK's own hook points (org-harness-sync §3.5).
+    // `PreCompact` is awaited before the CLI summarises; the CLI then fires
+    // `SessionStart` with `source: "compact"`, whose `additionalContext` is how a
+    // hook's restored state reaches the model on this engine — the same text the
+    // AI-SDK engine appends to its system prompt. Never throws into the SDK.
+    const port = input.compaction;
+    let compactTrigger: 'auto' | 'manual' = 'auto';
+    const compactionHooks = port
+      ? {
+          preCompact: (async (hookInput: HookInput) => {
+            if (hookInput.hook_event_name !== 'PreCompact') return {};
+            compactTrigger = (hookInput as PreCompactHookInput).trigger === 'manual' ? 'manual' : 'auto';
+            try {
+              await port.before({ trigger: compactTrigger });
+            } catch (e) {
+              console.warn(
+                `[engine:claude-agent-sdk] compaction hook (before) failed: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            return {};
+          }) as HookCallback,
+          sessionStart: (async (hookInput: HookInput) => {
+            if (hookInput.hook_event_name !== 'SessionStart') return {};
+            if ((hookInput as { source?: unknown }).source !== 'compact') return {};
+            let extra: string | undefined;
+            try {
+              extra = await port.after({ trigger: compactTrigger });
+            } catch (e) {
+              console.warn(
+                `[engine:claude-agent-sdk] compaction hook (after) failed: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            return extra && extra.trim()
+              ? { hookSpecificOutput: { hookEventName: 'SessionStart' as const, additionalContext: extra } }
+              : {};
+          }) as HookCallback,
+        }
+      : undefined;
+
     // Forward our abort signal into an AbortController the SDK owns.
     const ac = new AbortController();
     if (input.signal.aborted) ac.abort();
@@ -1985,6 +2040,7 @@ export class ClaudeAgentSdkEngine implements Engine {
         input,
         mcpServer: server,
         preToolUse,
+        ...(compactionHooks ? { compactionHooks } : {}),
         abortController: ac,
         // Absent for every single-account install, which is what keeps this
         // change invisible there (see the note on `buildQueryOptions`).

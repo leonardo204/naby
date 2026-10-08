@@ -29,10 +29,13 @@
 // still read `enabled`. So the pinned `on` decides the listing, and the tool and
 // the env re-check the live switch on every call (off is the safe direction).
 //
-// WHAT IS NOT HERE: the hook runner (§3.5, M3), the Atlassian gate and the deps
-// check (§3.6, M3), metrics (§3.7, M4). The SDK engine's native `Bash` does not
-// get the §3.4 env yet — it has no per-command env seam; M3's hook runner owns
-// env for processes the SDK starts.
+// WHAT IS NOT HERE: the hook runner (§3.5 — org-harness-hooks.ts), the Atlassian
+// gate and the deps check (§3.6 — org-harness-gate.ts), metrics (§3.7, M4). The
+// SDK engine's native `Bash` does NOT get the §3.4 env: the Agent SDK has no
+// per-command env seam (its `env` is the whole CLI process, and a PreToolUse hook
+// can only rewrite the input), and splicing an `export` into the command line
+// would write the cic token into the transcript. Documented as a limitation in
+// the spec (§7.5/§7.6) rather than worked around.
 
 import { join } from 'node:path';
 import type { Executor, ToolOutput, ToolSchema } from './engine.js';
@@ -72,6 +75,9 @@ export const ORG_COMMAND_ENV = {
   projectDir: 'CLAUDE_PROJECT_DIR',
   client: 'HARNESS_CLIENT',
   cicToken: 'CLAUDE_PLUGIN_OPTION_CIC_TOKEN',
+  /** The name pdoc's `template_source.py` reads (7.3). Set beside the plugin
+   *  option name, with the same value (user decision 2026-10-08, §3.4). */
+  cicApiToken: 'CIC_API_TOKEN',
 } as const;
 
 /** Names the Skill Hub key travels under in Claude Code. Removed from a package
@@ -357,7 +363,7 @@ export function orgCommandEnv(
     ...(skillDir ? { [ORG_COMMAND_ENV.skillDir]: skillDir } : {}),
     ...(turn.projectDir ? { [ORG_COMMAND_ENV.projectDir]: turn.projectDir } : {}),
     [ORG_COMMAND_ENV.client]: ORG_HARNESS_CLIENT,
-    ...(cic ? { [ORG_COMMAND_ENV.cicToken]: cic } : {}),
+    ...(cic ? { [ORG_COMMAND_ENV.cicToken]: cic, [ORG_COMMAND_ENV.cicApiToken]: cic } : {}),
   };
   for (const k of ORG_KEY_ENV_NAMES) env[k] = undefined;
   return env;

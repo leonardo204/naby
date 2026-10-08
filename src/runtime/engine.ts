@@ -669,7 +669,30 @@ export type EngineRunInput = {
    * payload of their own to size (the Claude Agent SDK compacts itself) ignore it.
    */
   rollingSummary?: RollingSummaryPort;
+  /**
+   * WHEN THE ENGINE COMPACTS (org-harness-sync §3.5: `PreCompact`, and the
+   * `SessionStart` with `source: "compact"` that follows). Both engines call it at
+   * THEIR compaction point — the AI-SDK engine around a new fold of its own
+   * payload, the Agent SDK engine from its native `PreCompact` / `SessionStart`
+   * (source `compact`) hooks — so a consumer sees the same two calls whichever
+   * engine ran.
+   *
+   * OPTIONAL, and its absence is the whole pre-M3 behaviour. Must not throw.
+   */
+  compaction?: CompactionPort;
   signal: AbortSignal;
+};
+
+/** See `EngineRunInput.compaction`. */
+export type CompactionPort = {
+  /** Awaited BEFORE the engine compacts. */
+  before(info: { trigger: 'auto' | 'manual' }): Promise<void>;
+  /**
+   * Awaited AFTER it compacted. A returned string is extra system context for the
+   * rest of this run (a hook re-injecting state the summary dropped); undefined
+   * adds nothing.
+   */
+  after(info: { trigger: 'auto' | 'manual' }): Promise<string | undefined>;
 };
 
 /**

@@ -3,7 +3,7 @@
 // THE BUILT-IN HARNESS — the artifacts that ship WITH naby, and the switches that
 // turn them on (skill-hub-builtin §2.7).
 //
-// WHAT SHIPS, IN THREE BUNDLES.
+// WHAT SHIPS, IN TWO BUNDLES.
 //
 //   `core`: `explorer` (subagent, haiku) and `implementer` (subagent, sonnet) —
 //   the two cheap delegates that exist to keep the MAIN transcript small
@@ -20,10 +20,8 @@
 //   subagent has nobody to delegate to, and the subagent without the skill is
 //   never called.
 //
-//   `atlassian`: `confluence-upload` (skill) drives the confUploader CLI so a
-//   markdown file becomes a Confluence page with its tables, links and mermaid
-//   diagrams intact. It is READ's opposite number and it hangs off a different
-//   credential, which is why it is a second bundle rather than a third cic item.
+//   (`atlassian` — the `confluence-upload` skill — shipped until the OAuth
+//   release and is withdrawn there; see atlassian-migration.ts.)
 //
 // A BUNDLE IS THE UNIT, NOT THE ITEM. Every rule below is stated over a bundle id,
 // so a third server with its own harness is one entry in BUILTIN_HARNESS_BUNDLES
@@ -79,22 +77,12 @@ export type { BuiltinHarnessAsset };
  *  the bundle names its items. Nothing branches on the string anywhere else. */
 export const CIC_HARNESS_BUNDLE_ID = 'cic';
 
-/** The bundle id the `atlassian` System MCP preset switches.
- *
- *  WHY ATLASSIAN AND NOT CIC. `confluence-upload` drives the confUploader CLI with
- *  `CONFLUENCE_BASE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` — the same
- *  three values the atlassian preset already collects (`CONFLUENCE_URL`,
- *  `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN`, systemMcp.ts). A user who has
- *  configured atlassian has, by construction, a Confluence account and a token;
- *  a user who has only cic has a READ index and may have neither. So the atlassian
- *  credential is the honest opt-in signal for a skill that WRITES pages.
- *
- *  NOTE what this does NOT claim: naby does not hand those stored values to the
- *  skill. They live in the mcp-atlassian entry's `env` and reach that stdio process
- *  only — `run_command` gets the app's own environment. The preset proves the user
- *  HAS Confluence access; the skill still asks for the values it needs (which is
- *  what its body says). */
-export const ATLASSIAN_HARNESS_BUNDLE_ID = 'atlassian';
+// THE `atlassian` BUNDLE IS GONE (org-harness-sync §4.4). It held one skill,
+// `confluence-upload`, which drove a CLI with the API token the old atlassian
+// preset collected. Atlassian is browser OAuth now, so neither the token nor the
+// "preset configured = opt-in" signal exists; Confluence publishing is the org
+// skill pdoc's job. Existing rows are withdrawn by atlassian-migration.ts when the
+// user signs in, and new installs never receive the skill.
 
 /**
  * The bundle that is MEANT TO BE ALWAYS ACTIVE — `explorer` and `implementer`
@@ -199,7 +187,6 @@ export function subagentAllowedForEngine(
  */
 export const BUILTIN_HARNESS_BUNDLES: Readonly<Record<string, readonly string[]>> = {
   [CIC_HARNESS_BUNDLE_ID]: ['confluence-context', 'confluence-researcher'],
-  [ATLASSIAN_HARNESS_BUNDLE_ID]: ['confluence-upload'],
   [CORE_HARNESS_BUNDLE_ID]: ['explorer', 'implementer'],
 };
 

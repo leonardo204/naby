@@ -160,6 +160,11 @@ export type McpEntry =
       headers?: Record<string, string>;
       timeoutMs?: number;
       status?: McpStatus;
+      /** `oauth` = the server signs in through the browser (org-harness-sync
+       *  §3.8). The tokens are NOT in this row: they live in the runtime's OAuth
+       *  store (`mcp-oauth.ts`), keyed by `name`, and `loadMcpToolset` attaches
+       *  them per connect. Absent = static `headers` only, as before. */
+      auth?: 'oauth';
     };
 
 /** True when an MCP entry should be loaded into the live toolset — everything

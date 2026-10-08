@@ -2,11 +2,11 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.5.0
+version: 0.6.0
 status: draft
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
 related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution]
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 # 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
@@ -96,9 +96,9 @@ altimedia-harness 0.7.1을 직접 열어 확인한 내용이다(`~/.claude/plugi
 | `${CLAUDE_SKILL_DIR}` | 그 스킬 폴더의 절대 경로(불러올 때 문자열로 바꿔 넣는다) |
 | `.claude/` | 프로젝트 저장소 안의 파일이면 그대로 쓴다. `~/.claude/` 사용자 설정은 건드리지 않는다 |
 
-**명령을 실행할 때.** 스킬 폴더 아래 스크립트를 실행하는 `run_command`에는 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_SKILL_DIR`, `CLAUDE_PROJECT_DIR`(열린 프로젝트), `HARNESS_CLIENT=naby`, `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`(설정된 경우)을 넣는다. skill-hub API 키는 넣지 않는다. 스크립트가 쓰지 않는 값이다.
+**명령을 실행할 때.** 스킬 폴더 아래 스크립트를 실행하는 `run_command`에는 `CLAUDE_PLUGIN_ROOT`, `CLAUDE_SKILL_DIR`, `CLAUDE_PROJECT_DIR`(열린 프로젝트), `HARNESS_CLIENT=naby`, cic 토큰(설정된 경우)을 넣는다. cic 토큰은 `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`과 `CIC_API_TOKEN` 두 이름으로 같은 값을 넣는다. 앞의 것은 플러그인 옵션 이름이고, 뒤의 것은 pdoc의 `template_source.py`가 실제로 읽는 이름이다(사용자 결정, 2026-10-08). 훅에도 같은 두 이름으로 넣는다(§3.5). skill-hub API 키는 넣지 않는다. 스크립트가 쓰지 않는 값이다.
 
-Claude 엔진이 SDK 내장 `Bash`·`Write`·`Edit`를 쓰는 경우에도 이 계층은 같다. 이름 표가 항등 변환이 될 뿐이다.
+Claude 엔진이 SDK 내장 `Bash`·`Write`·`Edit`를 쓰는 경우에도 이름 표는 같다. 항등 변환이 될 뿐이다. 다만 SDK의 `Bash`에는 위 환경 변수를 넣지 못한다. 명령마다 환경을 줄 자리가 SDK에 없다(7.5, 7.6).
 
 ### 3.5 훅 실행기
 
@@ -115,36 +115,48 @@ Claude 엔진이 SDK 내장 `Bash`·`Write`·`Edit`를 쓰는 경우에도 이 �
 | `scripts/deps-check.js` | 실행하지 않고 naby가 구현한다(§3.6) | 안내를 Claude Code 화면 형식으로 낸다 |
 | 그 밖의 새 스크립트 | 실행하지 않는다. 설정 화면에 "naby가 아직 지원하지 않는 훅"으로 표시한다 | 새 훅은 naby 릴리스에서 검토한 뒤 허용 목록에 넣는다 |
 
-훅은 **sha256을 확인한 조직 패키지에서만** 실행한다. 사용자가 `~/.claude`에서 가져온 훅이나 하네스 세트에 든 훅은 지금처럼 세기만 한다(phase-1_6 계약 §4를 이 범위만큼 좁혀 개정한다).
+훅은 **sha256을 확인한 조직 패키지에서만** 실행한다. 명령은 `node <패키지>/scripts/<이름>.js` 꼴이어야 하고 스크립트가 그 패키지의 `scripts/` 안에 있어야 한다. `node`가 아닌 명령과 naby 시점이 없는 이벤트(`Notification` 등)도 "지원하지 않음"이다. 사용자가 `~/.claude`에서 가져온 훅이나 하네스 세트에 든 훅은 지금처럼 세기만 한다(phase-1_6 계약 §4).
 
-**시점 대응.**
+**시점 대응.** 모든 자리가 엔진과 무관하다. 그래서 두 엔진에서 같은 이벤트가 난다.
 
 | Claude Code 이벤트 | naby 시점 |
 |---|---|
-| `SessionStart` | 세션의 첫 턴 직전. compact 뒤 재시작이면 `source: "compact"` |
-| `UserPromptSubmit` | 사용자 메시지를 받고 엔진에 넘기기 전 |
-| `PreToolUse` | 게이트가 도구 호출을 판정하기 직전 |
-| `PostToolUse` | 도구가 끝난 뒤 |
-| `Stop` | 턴이 끝났을 때 |
-| `PreCompact` | `compaction.ts`가 줄이기 직전, Claude 엔진은 `compact_boundary` 직전 |
-| `SessionEnd` | 탭 닫기, 앱 종료 |
+| `SessionStart` | 이 프로세스에서 처음 보는 세션의 첫 턴, 시스템 프롬프트를 만들기 직전. 새로 만든 세션은 `source: "startup"`, 앱을 다시 시작한 뒤 이어받은 세션은 `source: "resume"`(§4.7)이다. 접은(compact) 뒤에는 `source: "compact"`로 한 번 더 부른다 |
+| `UserPromptSubmit` | 사용자 메시지를 받고 엔진에 넘기기 전. 사용자가 쓴 그대로의 글을 넘긴다 |
+| `PreToolUse` | 게이트가 도구 호출을 판정하기 직전. 두 엔진 모두 모든 도구(SDK 내장 도구 포함) 앞에서 같은 게이트 함수를 부른다 |
+| `PostToolUse` | 실행된 도구의 결과가 나온 뒤. 거부된 호출에는 오지 않는다. 기다리지 않는다 |
+| `Stop` | 자율 실행의 모든 단계를 포함한 실행 전체가 끝났을 때 한 번. 기다리지 않는다 |
+| `PreCompact` | 엔진이 접기 직전. AI-SDK 엔진은 새로 접을 때, Claude 엔진은 SDK의 `PreCompact` 훅에서 부른다 |
+| `SessionEnd` | 탭 닫기(세션을 지우기 직전)와 앱 종료. 이 프로세스에서 `SessionStart`를 거친 세션이 대상이다 |
 
-**matcher.** `hooks.json`의 `matcher`는 Claude Code와 같이 **정규식**으로 해석한다. 0.8.0부터 `^mcp__.*__(confluence_(create\|update)_page\|(create\|update)ConfluencePage)$` 같은 식이 들어 있다. 비교 대상은 아래 입력 절의 변환을 마친 Claude Code 철자의 도구 이름이다. 정규식이 잘못됐으면 그 훅 항목만 건너뛰고 로그에 남긴다.
+**matcher.** 비었거나 `*`면 모든 대상에 걸린다. `Write|Edit`처럼 영문자·숫자·`_`·`|`만 있으면 그중 하나와 정확히 같을 때 걸린다. 그 밖에는 **정규식**으로 검사한다(Claude Code와 같은 규칙). 0.8.0부터 `^mcp__.*__(confluence_(create\|update)_page\|(create\|update)ConfluencePage)$` 같은 식이 들어 있다. 비교 대상은 도구 이벤트면 아래 입력 절의 변환을 마친 Claude Code 철자의 도구 이름, `SessionStart`는 `source`, `PreCompact`는 `trigger`, `SessionEnd`는 `reason`이다. 정규식이 잘못됐으면 그 훅 항목만 건너뛰고 로그에 남긴다.
 
-**입력.** 표준 입력에 JSON을 준다. 필드는 `session_id`, `cwd`(열린 프로젝트), `hook_event_name`, `transcript_path`, 도구 이벤트면 `tool_name`·`tool_input`, 서브에이전트 안이면 `agent_id`다.
+**입력.** 표준 입력에 JSON을 준다. 모든 이벤트에 `session_id`, `cwd`(열린 프로젝트), `hook_event_name`, `transcript_path`가 있고, 서브에이전트 안이면 `agent_id`가 붙는다. 이벤트마다 `source`(`SessionStart`), `prompt`(`UserPromptSubmit`), `tool_name`·`tool_input`(도구 이벤트), `tool_response`(`PostToolUse`), `trigger`(`PreCompact`), `reason`(`SessionEnd`)을 더한다.
 
-- `tool_name`과 `tool_input`은 Claude Code 형식으로 바꾼다. `run_command` → `Bash`(`command`), `write_file` → `Write`(`file_path`), `edit_file` → `Edit`(`file_path`)다. MCP 도구는 `mcp__<server>__<tool>` 철자로 넘긴다. 이 변환이 빠지면 훅이 오류 없이 아무것도 하지 않으므로, 스파이크가 표 전체를 검사한다.
-- `transcript_path`는 그 세션을 Claude Code 형식 JSONL로 내보낸 파일 경로다(`~/.naby/transcripts/<session>.jsonl`). `PreCompact`와 `SessionEnd` 때 새로 쓴다.
+- `tool_name`과 `tool_input`은 Claude Code 형식으로 바꾼다. `run_command` → `Bash`(`command`), `write_file` → `Write`(`file_path`, 절대 경로), `edit_file` → `Edit`(`file_path`·`old_string`·`new_string`), `read_file` → `Read`(`file_path`)다. MCP 도구는 `mcp__<server>__<tool>` 철자로 넘긴다. SDK 내장 도구와 naby 런타임 도구는 그대로 넘긴다. 이 변환이 빠지면 훅이 오류 없이 아무것도 하지 않으므로, 스파이크가 표 전체를 검사한다.
+- `naby_delegate`의 중첩 턴 안 호출에는 `agent_id`(`naby-delegate-<이름>`)를 붙인다.
+- `transcript_path`는 그 세션을 Claude Code 형식 JSONL로 내보낸 파일 경로다(`<NABY_HOME>/transcripts/<session>.jsonl`). `PreCompact`와 `SessionEnd` 때 새로 쓴다.
 
-**실행.** `node`로 시작하는 명령은 앱 자신의 실행 파일을 `ELECTRON_RUN_AS_NODE=1`로 띄워 실행한다. 사용자 PC에 Node.js가 없어도 된다. Python은 사용자 PC의 것을 쓴다(`run-skill-hook.js`가 찾는다). 환경 변수는 §3.4와 같다.
+**실행.** `node`로 시작하는 명령은 앱 자신의 실행 파일(`NABY_APP_EXECUTABLE`, 없으면 `process.execPath`)을 `ELECTRON_RUN_AS_NODE=1`로 띄워 실행한다. 사용자 PC에 Node.js가 없어도 된다. Python은 사용자 PC의 것을 쓴다(`run-skill-hook.js`가 찾는다). 훅은 열린 프로젝트 폴더에서 돈다. 훅의 환경 변수는 앱의 환경에 아래를 더하고 뺀 것이다.
+
+| 변수 | 값 |
+|---|---|
+| `CLAUDE_PLUGIN_ROOT` | 턴이 고정한 패키지 폴더 |
+| `CLAUDE_PROJECT_DIR` | 열린 프로젝트(없으면 넣지 않는다) |
+| `HARNESS_CLIENT` | `naby` |
+| `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`, `CIC_API_TOKEN` | cic 토큰(설정된 경우만) |
+| `HARNESS_METRICS_TOKEN` | 활성화(§3.6)로 받은 집계 토큰. 없으면 대신 `HARNESS_METRICS_DISABLED=1`을 넣는다 |
+| `ELECTRON_RUN_AS_NODE` | `1` |
+| `CLAUDE_PLUGIN_OPTION_SHUB_API_KEY`, `SHUB_API_KEY` | 지운다. Skill Hub 키는 훅에 가지 않는다 |
 
 **출력 처리.**
 
 | 출력 | 처리 |
 |---|---|
-| `hookSpecificOutput.additionalContext` | 그 턴의 시스템 프롬프트에 붙인다 |
+| `hookSpecificOutput.additionalContext` | 그 턴의 시스템 프롬프트에 붙인다. `SessionStart`·`UserPromptSubmit`과 compact 뒤의 `SessionStart`가 대상이다. 도구 이벤트·`Stop`·`PreCompact`의 것은 이미 보낸 프롬프트에 붙일 수 없어 훅 로그에만 남긴다(7.6) |
 | `permissionDecision: "ask"` | naby 승인 UI로 보낸다. 사유 문구를 그대로 보여 준다 |
 | `permissionDecision: "deny"` | 게이트가 거부한다 |
+| `permissionDecision: "allow"` | 의견 없음으로 본다. 게이트가 그대로 판정한다. 훅은 게이트를 조이기만 하고 풀지 못한다 |
 | `async: true` | 기다리지 않는다 |
 | 시간 초과, 실행 실패, 0이 아닌 종료 코드 | 무시하고 턴을 계속한다. 훅 로그에만 남긴다 |
 
@@ -165,8 +177,10 @@ Windows에서는 Python을 `py -3`까지 찾고(`run-skill-hook.js`가 이미 �
 
 **인증 차단 (`gate.js` 대체).** 조직 하네스가 켜져 있고 Atlassian OAuth가 준비되지 않았으면 프롬프트를 막고 설정 화면으로 안내한다.
 
-- "준비됨"은 `atlassian` 프리셋(§3.8)에 OAuth 토큰이 있고, 마지막 갱신이 "다시 로그인 필요"로 끝나지 않은 상태다. 플러그인의 `gate.js`가 토큰이 있는지만 보는 것과 같은 기준이다. 이전 방식(API 토큰)이 남아 있는 상태는 "준비됨"이 아니다(§4.4).
-- 한 번 확인되면 하루 동안 다시 보지 않는다. 설정 화면과 `/` 명령은 막지 않는다. 막힌 동안에도 인증할 수 있어야 한다.
+- "준비됨"은 `atlassian` 프리셋(§3.8)에 등록 정보와 OAuth 토큰이 있고, 상태가 "다시 로그인 필요"가 아닌 상태다. "다시 로그인 필요"는 갱신이 그 계열 오류로 끝났을 때와, 연결했는데 도구 목록에 `getConfluencePage`가 없을 때 걸린다(§3.8). 이전 방식(API 토큰)이 남아 있는 상태는 "준비됨"이 아니다(§4.4).
+- 한 번 확인되면 하루 동안 다시 보지 않는다.
+- 설정 화면은 막지 않는다. `/`로 시작하는 줄 중 naby 명령은 막지 않고, 조직 스킬을 부르는 줄(`/task` 등)은 막는다. 막힌 동안에도 인증할 수 있어야 한다.
+- 막힌 프롬프트는 모델에 가지 않고 새 세션도 만들지 않는다. 알림(`atlassian-required`)과 오류 결과만 낸다.
 - 끄는 방법은 `HARNESS_GATE=0` 환경 변수 하나다. 플러그인과 같다.
 
 **의존성 점검 (`deps-check.js` 대체).** 세션 시작 때 Python 3과 PyYAML이 있는지 본다. 없으면 설정 화면의 조직 하네스 카드에 설치 방법을 띄운다. 프롬프트는 막지 않는다.
@@ -194,10 +208,12 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 
 **OAuth 흐름.** `@ai-sdk/mcp` 2.0.15의 `authProvider`(`OAuthClientProvider`)를 구현해 `mcp.ts`의 http 연결에 넘긴다. 구현은 런타임(`src/runtime/mcp-oauth.ts`)에 둔다. 브라우저를 여는 일만 셸이 한다.
 
-1. Atlassian 인증 서버 정보를 받아 동적 클라이언트 등록을 한다. 등록 결과는 저장해 다시 쓴다.
-2. PKCE로 인증 주소를 만들고, `127.0.0.1`의 임시 포트로 돌아오는 주소를 둔다. 시스템 브라우저로 연다.
-3. 돌아온 코드를 토큰으로 바꾸고, 액세스 토큰과 갱신 토큰을 기존 MCP 비밀값과 같은 곳에 저장한다.
-4. 턴마다 MCP에 연결할 때 `authProvider`가 토큰을 준다. 만료됐으면 갱신한다.
+1. Atlassian 인증 서버 정보를 받아 동적 클라이언트 등록을 한다(공개 클라이언트, `token_endpoint_auth_method: none`). 등록 결과는 저장해 다시 쓴다.
+2. PKCE(S256)로 인증 주소를 만들고, `127.0.0.1`의 임시 포트로 돌아오는 주소를 둔다. 시스템 브라우저로 연다.
+3. 돌아온 코드를 토큰으로 바꾼다.
+4. 턴마다 MCP에 연결할 때 `authProvider`가 토큰을 준다. 만료 60초 전부터 미리 갱신한다.
+
+**저장하는 곳.** 클라이언트 등록 정보(`client_id`, 돌아오는 주소), 인증 서버 정보, 액세스 토큰·갱신 토큰, 상태("연결됨"·"다시 로그인 필요")를 app.db의 `settings`에 서버별 JSON 하나(`mcp.oauth.<server>`, Atlassian은 `mcp.oauth.atlassian`)로 둔다. 기존 MCP 비밀값(`mcp_servers` 행의 헤더·환경 변수)과 같은 데이터베이스, 같은 보호 수준이다. 행 안에 두지 않은 까닭은 §4.4가 로그인을 마친 뒤에야 행을 바꾸기 때문이다. 로그인 시점에는 아직 API 토큰 행이 있고, 토큰은 그 전에 있어야 한다. 두 엔진이 이 값 하나만 읽는다. 이 값은 어떤 화면 응답에도 나가지 않는다.
 
 **갱신에서 지킬 것.** ChatGPT OAuth(`src/providers/chatgpt-oauth.ts`)에서 겪은 문제를 그대로 막는다.
 
@@ -205,9 +221,18 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 - 탭 여러 개가 동시에 갱신하지 않도록 한 번에 하나만 갱신한다(single-flight). 나머지는 그 결과를 기다린다.
 - 갱신이 "다시 로그인 필요" 계열 오류로 끝나면 토큰을 지우고 상태를 "다시 로그인 필요"로 바꾼다. 인증 차단(§3.6)이 이 상태를 본다. 네트워크 오류는 다시 로그인으로 보지 않는다.
 
+**"다시 로그인 필요"가 되는 경우.** 상태는 하나이고, 인증 차단·설정 카드의 로그인 버튼·세션 시작 알림이 모두 이 상태를 따른다.
+
+| 신호 | 토큰과 등록 정보 |
+|---|---|
+| 갱신이 `invalid_grant`·`invalid_client`·`unauthorized_client`(와 `refresh_token_reused` 등)로 끝났다 | 토큰을 지운다. `invalid_client` 계열이면 등록 정보도 지우고, 다음 로그인 때 새로 등록한다 |
+| 연결은 됐는데 도구 목록에 `getConfluencePage`가 없다 | 둘 다 그대로 둔다. 다시 로그인할 때 저장된 등록을 그대로 쓴다 |
+
+두 번째는 Atlassian이 죽은 토큰에 401 대신 200과 공개 도구 몇 개만 주기 때문에 둔 규칙이다(7.5, 사용자 결정 2026-10-08). 이때 그 연결은 실패로 처리해 줄어든 도구로 턴을 돌리지 않는다. 갱신을 다시 시도하지 않고, 다음 연결부터는 네트워크 없이 바로 "다시 로그인 필요"로 거절한다. 턴 안의 연결은 어느 경우에도 브라우저를 열지 않고 동적 등록도 하지 않는다.
+
 **내장 `confluence-upload` 스킬을 거둔다.** 이 스킬은 API 토큰을 셸 환경 변수로 받는 CLI를 부르고, `atlassian` 프리셋(API 토큰)을 켜짐 신호로 썼다(skill-hub-builtin §2.7.1). OAuth로 통일하면 둘 다 성립하지 않는다. Confluence 발행은 조직 스킬 pdoc이 OAuth MCP로 맡는다. 거두는 방법은 §4.4에 있다.
 
-**확인할 것.** Atlassian 조직 관리자가 원격 MCP 사용을 막아 두었으면 연결이 실패한다. 사내에서는 Claude Code 플러그인이 같은 서버로 인증하고 있으므로 열려 있다고 보지만, naby의 동적 등록 클라이언트가 같은 대우를 받는지는 M3 첫 작업으로 실제 계정에서 확인한다. 막혀 있으면 §4.4의 전환을 멈추고 이 절을 다시 연다.
+**확인했다(2026-10-08).** Atlassian 조직 관리자가 원격 MCP 사용을 막아 두었으면 연결이 실패한다. naby의 동적 등록 클라이언트로 사내 계정 로그인과 동의가 끝까지 되었고 조직 정책에 막히지 않았다(`spike:mcp-oauth-live`, 7.5). §4.4의 전환은 그대로 진행한다.
 
 ## 4. 기존 사용자 이전 — 업그레이드하면 끊김 없이 넘어온다
 
@@ -329,7 +354,7 @@ task·pdoc·ctx는 Skill Hub에 개별 스킬로도 올라와 있다. 기존 사
 |---|---|---|
 | M1 | 패키지 받기·검증·풀기(§3.1), 행 반영(§3.2), 활성화(§3.6), 기존 사용자 이전(§4.1~4.3, 4.5, 4.8) | 스파이크: sha256 불일치 거부, 중단 시 이전 버전 유지, 재실행 무변화, 사용자가 끈 행 유지, 빠진 스킬 `org-withdrawn`, `spike:org-harness-migrate` 1~6·8 |
 | M2 | 필요할 때 불러오기(§3.3), 호환 계층(§3.4) | 스파이크: 목록만 예산에 들어감, `naby_skill_load` 결과에 경로 치환과 안내문, `~/.naby/org` 쓰기 거부. 실제 모델로 `/task start` 한 번 |
-| M3 | 훅 실행기(§3.5), Atlassian OAuth 프리셋(§3.8), 인증 차단·의존성 점검(§3.6), API 토큰에서 OAuth로 전환(§4.4), 인증 유예(§4.6), 세션 이어받기(§4.7) | 스파이크: 시점 7개 발생, 도구 이름 변환 표 전체, OAuth 갱신 single-flight·rotation 선저장·재로그인 판정(가짜 인증 서버), 실제 계정으로 `atlassian-cloud` 연결 1회, `ask`가 승인 UI로 감, 허용 목록 밖 훅 미실행, 실패한 훅이 턴을 막지 않음, `SessionEnd` 5초 상한 |
+| M3 | 훅 실행기(§3.5), Atlassian OAuth 프리셋(§3.8), 인증 차단·의존성 점검(§3.6), API 토큰에서 OAuth로 전환(§4.4), 인증 유예(§4.6), 세션 이어받기(§4.7) | 스파이크: 시점 7개 발생, 도구 이름 변환 표 전체, OAuth 갱신 single-flight·rotation 선저장·재로그인 판정(가짜 인증 서버), 실제 계정으로 `atlassian` 연결 1회(2026-10-08 완료, 7.5), `ask`가 승인 UI로 감, 허용 목록 밖 훅 미실행, 실패한 훅이 턴을 막지 않음, `SessionEnd` 5초 상한 |
 | M4 | 집계(§3.7), 6시간 주기 갱신, 턴 도중 교체(§4.7) | `HARNESS_METRICS_DRYRUN=1`로 단계별 페이로드 확인, 두 엔진에서 같은 이벤트 수 |
 
 엔진 턴 루프를 건드리므로 각 단계에서 `npm run spike:autonomy`와 `npm run spike:02`를 먼저 돌린다. 스파이크와 셸 테스트는 `NABY_DB_PATH`·`NABY_HOME`을 임시 경로로 둔다. 실제 `~/.naby`에 조직 패키지를 풀지 않는다.
@@ -359,7 +384,7 @@ naby 쪽은 아래 변경을 기다리지 않고 먼저 동작한다. 반영되�
 
 ## 7. 구현 상태
 
-2026-10-07 기준이다.
+2026-10-08 기준이다.
 
 ### 7.1 M1 (naby 40547d9, 셸 e013b9c)
 
@@ -381,14 +406,63 @@ naby 쪽은 아래 변경을 기다리지 않고 먼저 동작한다. 반영되�
 ### 7.3 구현하며 확인한 사실
 
 - 0.8.1 본문은 스크립트를 `${CLAUDE_SKILL_DIR}` 기준으로 부른다. 그래서 §2와 §3.4 표에 이 자리표시자를 더했다.
-- 0.8.1에서 `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`을 읽는 스크립트는 `activate.js`뿐이다. pdoc의 `template_source.py`는 `CIC_API_TOKEN`을 읽는다. 지금 넣는 cic 변수는 스킬 스크립트에 닿지 않는다.
+- 0.8.1에서 `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`을 읽는 스크립트는 `activate.js`뿐이다. pdoc의 `template_source.py`는 `CIC_API_TOKEN`을 읽는다. 그래서 M3부터 두 이름으로 같은 값을 넣는다(§3.4).
 - 셸의 하네스 홈 스캔은 `NABY_HOME`이 아니라 `os.homedir()` 아래 `~/.naby/skills`를 읽는다. 임시 홈으로 띄운 셸도 실제 홈의 스킬을 읽는다. 쓰지는 않는다. 이 문서 범위 밖이지만 §4.9의 릴리스 전 확인 때 주의한다.
 
-### 7.4 남은 일
+### 7.4 M3
 
-- **M3.** 훅 실행기(§3.5), Atlassian OAuth 프리셋(§3.8)과 API 토큰에서의 전환(§4.4), 인증 차단과 의존성 점검(§3.6), 인증 유예(§4.6), 이어받은 세션의 `SessionStart`(§4.7)를 넣는다. 함께 정할 것이 셋 있다.
-  - Claude 엔진의 SDK `Bash`에는 §3.4 환경 변수가 아직 들어가지 않는다. 명령마다 환경을 줄 자리가 없다. SDK가 띄우는 프로세스의 환경은 훅 실행기와 함께 다룬다.
-  - 셸 명령(`run_command`·`Bash`)으로 `<NABY_HOME>/org/`에 쓰는 일은 막지 않는다. 경로 인자가 없는 도구라 게이트가 볼 수 없다.
-  - cic 토큰을 `CIC_API_TOKEN`으로도 넣을지 정한다(7.3).
+아래를 넣었다. `spike:org-harness-hooks`, `spike:mcp-oauth`, `spike:org-harness-gate`와 셸 테스트(`nabyOrgHarnessM3.test.ts`, `api/naby.test.ts`의 Atlassian 묶음, `harnessPillAtlassian.test.ts`, `orgHarnessView.test.ts` 외)가 확인한다. 실제 계정 로그인은 사람이 돌리는 `spike:mcp-oauth-live`로 확인했다(7.5). 설계 본문(§3.5, §3.6, §3.8)에 옮긴 내용은 여기 다시 적지 않고, 구현이 정한 세부만 남긴다.
+
+**훅 실행기(§3.5).** 런타임 `org-harness-hooks.ts`에 두었다. 설계 본문에 더해 구현이 정한 것은 아래다.
+
+- 분류는 셋이다. "실행", "naby가 대신함"(`activate.js`·`gate.js`·`deps-check.js`), "지원하지 않음"이다. 마지막 것은 설정 카드에 목록으로 보인다.
+- `hooks.json`의 명령은 `command`+`args` 꼴(0.7.1이 쓰는 꼴)과 한 줄 문자열 꼴을 모두 읽는다.
+- 여러 훅은 동시에 띄운다. `PreToolUse`의 판정이 여럿이면 deny > ask > allow 순으로 고른다. 시간 초과는 SIGTERM 뒤 SIGKILL로 끝낸다. 실패·시간 초과·0이 아닌 종료는 훅 로그(메모리 기록과 활동 로그 `org_hook`)에만 남는다.
+
+**호출 자리.** 셸 엔진(`engines/naby.ts`)이 `SessionStart`·`UserPromptSubmit`을 시스템 프롬프트를 만들기 직전에, `PreToolUse`를 게이트 함수 안에서, `PostToolUse`를 엔진의 `tool_result` 이벤트에서, `Stop`을 실행 루프가 끝난 뒤에 부른다. `PreCompact`와 compact 뒤 `SessionStart`는 새 엔진 계약 `EngineRunInput.compaction`이다. AI-SDK 엔진은 새로 접을 때, Claude 엔진은 SDK의 `PreCompact` 훅과 `source: "compact"`의 `SessionStart` 훅에서 부른다. `PreCompact` 전에 전사본을 쓴다. `SessionEnd`는 탭 닫기면 `/api/project-state`가 세션을 지우기 전에(전사본도 그 전에 쓴다), 앱 종료면 Electron의 `before-quit` 정리 단계에서 전역 키로 셸 함수를 불러 낸다. 정리 시간 한도는 5초에서 10초로 늘렸다.
+
+**`ask`.** 훅의 `ask`는 기존 승인 프롬프트로 간다. 사유 문구를 그대로 보여 주고, `source: 'hook'`이 붙은 요청에는 "항상 허용/차단" 버튼을 내지 않는다. 그 버튼은 도구 전체에 대한 규칙을 쓰기 때문이다. 사용자가 거부하면 게이트가 거부하고, 허용하면 정책 게이트가 이어서 판정한다.
+
+**Atlassian OAuth(§3.8).** 런타임 `mcp-oauth.ts`에 두었다. 설계 본문에 더해 구현이 정한 것은 아래다.
+
+- Claude 엔진도 MCP 도구를 `nabytools`로 다시 내보내므로 SDK에 원격 MCP나 bearer 헤더를 따로 주지 않는다. 저장소 하나로 충분하다.
+- 등록 때의 포트가 비어 있으면 그 포트를 다시 쓰고, 잠시 기다려도 바쁘면 다른 포트로 새로 등록한다. 브라우저는 셸의 클라이언트가 `window.open`으로 연다. Electron 창 열기 처리기가 시스템 브라우저로 넘긴다. 로그인을 취소하거나 실패하면 그 전의 토큰과 등록을 되돌려 놓는다.
+- 라이브러리가 401 뒤에 하는 갱신은 전송의 `fetch`에서 가로채 naby의 한 번에 하나 갱신으로 보낸다. 이미 바뀐 갱신 토큰을 들고 온 호출은 네트워크 없이 저장된 값을 받는다.
+- 턴 안의 연결에서는 동적 등록 요청을 `fetch`에서 막는다. 등록 정보 없이 토큰만 있는 기록은 "연결됨"으로 보지 않는다.
+- 줄어든 도구 목록 판정은 `mcp.ts`가 도구 목록을 받은 직후에 한다. 서버별 필수 도구 표(`MCP_OAUTH_REQUIRED_TOOLS`, Atlassian은 `getConfluencePage`)에 없는 목록이면 상태를 "다시 로그인 필요"(`reloginReason: reduced-toolset`)로 바꾸고 연결을 닫는다. 토큰과 등록 정보는 그대로다. 두 엔진의 턴, 설정의 연결 확인이 모두 이 자리를 거친다.
+
+**프리셋과 전환(§3.8, §4.4).** 셸 `systemMcp.ts`의 `atlassian` 프리셋은 입력란이 없는 `oauth` 프리셋이 되었다. `systemMcp.set`은 거절하고(`systemMcp.oauthUseLogin`), `systemMcp.remove`는 로그인 정보도 지운다. 로그인은 `atlassian.login`·`atlassian.cancelLogin` 동작으로 한다. 전환은 런타임 `atlassian-migration.ts`가 한다. 로그인이 끝났을 때 도는 턴이 없으면 바로, 있으면 다음 턴 경계에서 같은 이름의 행을 http + OAuth 행으로 바꾼다. 에이전트가 제안한(`proposed`) 행은 바꾸지 않는다. 바꿀 때 `confluence-upload`를 거두고, 옛 도구 이름(`atlassian__confluence_…`, `atlassian__jira_…`)을 가리키는 권한 규칙과 하네스 행을 세어 보고서(`atlassian.oauth.migration`)로 남긴다. `confluence-upload` 원문과 `atlassian` 번들은 이 버전에서 지웠다. 사용자가 손대지 않았는지는 자동 상태 기록, 내장 출처, 출하 본문의 sha256(1.20~1.39에 한 판만 나갔다)으로 판단한다.
+
+**인증 차단과 유예, 의존성 점검(§3.6, §4.6).** 런타임 `org-harness-gate.ts`에 두었다. 설계 본문에 더해 구현이 정한 것은 아래다.
+
+- 차단은 셸 엔진이 세션을 만들기 전에 판정한다.
+- 유예 시작일은 차단이 처음 걸릴 때 `harness.org.gateGraceStartedAt`에 남긴다. 그때 이미 대화가 있던 설치는 업그레이드로 보고(`harness.org.gateGraceKind = upgrade`) `harness.org.gateGraceDays`(기본 7)일을 준다. 대화가 없던 설치는 새 설치로 보고 바로 막는다.
+- 새 세션의 첫 턴에 `atlassian-grace:<남은 날>`, API 토큰 행이 남아 있으면 `atlassian-migrate`, 로그인이 "다시 로그인 필요"면 `atlassian-relogin` 알림을 띄운다.
+- 의존성 점검은 세션마다 한 번 뒤에서 돈다. `run-skill-hook.js`와 같은 순서(`HARNESS_PYTHON`, `python3`, Windows의 `py -3`, `python`)로 Python 3을 찾고 `import yaml`을 해 본다. 통과하면 하루 동안 다시 하지 않고, 실패하면 다음 세션에 다시 한다.
+
+**계약 개정.** "훅은 sha256을 확인한 조직 패키지의 허용 목록 스크립트만 실행한다"를 phase-1_6 계약 §4(0.3.0)와 harness-standalone(각주)에 반영했다.
+
+**설정 화면.** 조직 하네스 카드에 Atlassian 칸(상태, 로그인·다시 로그인 버튼, 기다림·취소, 유예와 차단 안내, 전환 보고서와 옛 도구 이름 목록, 남겨 둔 `confluence-upload` 안내), 의존성 칸, 지원하지 않는 훅 목록을 더했다. System MCP 목록의 Atlassian 줄도 입력란 대신 같은 로그인 버튼을 쓴다. 문구는 영어와 한국어로 넣었다.
+
+### 7.5 M3에서 확인한 사실
+
+- **발견(2026-10-08, 실서버).** `/.well-known/oauth-protected-resource`(와 `/v1/mcp`를 붙인 경로)는 404이고, `/v1/mcp`의 401에는 `resource_metadata`가 없다. `@ai-sdk/mcp`는 이때 MCP 주소를 인증 서버로 보고 `/.well-known/oauth-authorization-server/v1/mcp`(404)를 거쳐 루트 `/.well-known/oauth-authorization-server`를 읽는다. 그 `issuer`가 출처(`https://mcp.atlassian.com`)라 라이브러리가 기대하는 값과 맞는다. naby 쪽 우회는 필요 없었다. `spike:mcp-oauth`의 가짜 서버가 같은 응답을 재현한다.
+- **잘못된 토큰에도 200이 온다.** 인증 헤더가 없으면 401이지만, 엉터리 bearer 토큰을 보내면 `initialize`가 200으로 답하고 도구 4개(`getContentFormatGuide`, Teamwork Graph 3개)만 준다. 그래서 "401이 오면 갱신한다"에 기댈 수 없다. naby는 만료 전에 미리 갱신하는 것을 주 경로로 둔다. 실계정에서도 같았다(아래).
+- **실제 계정으로 연결된다(2026-10-08, `spike:mcp-oauth-live` 통과).** naby의 동적 등록 클라이언트로 사내 계정 로그인과 동의가 끝까지 됐고 조직 정책에 막히지 않았다. 도구 32개가 보이고 pdoc이 부르는 `getConfluencePage`·`searchConfluenceUsingCql`·`createConfluencePage`가 모두 있다. 접근 토큰 수명은 약 7.9시간(28320초)이고 `scope`는 비어 온다. 강제 갱신 뒤에도 도구 32개가 그대로 보이고, 갱신 토큰은 갱신할 때마다 바뀐다(rotation). 엉터리 토큰을 넣으면 도구 4개만 오고 naby 상태는 "연결됨"으로 남았다. 사용자 결정(2026-10-08)으로 이 경우를 "다시 로그인 필요"로 보게 바꿨다(§3.8, 7.4). §3.8 마지막 문단의 확인은 이것으로 끝났다.
+- **`metrics-emit.js`는 토큰이 없으면 Claude Code의 활성화 캐시를 읽는다.** `HARNESS_METRICS_TOKEN`이 없으면 `~/.cache/altimedia-harness/activation.json`으로 간다. naby는 그 파일을 읽지 않기로 했으므로(§3.6) 집계 토큰이 없을 때는 `HARNESS_METRICS_DISABLED=1`을 넣는다.
+- **`metrics-emit.js`는 `SessionStart`의 `compact`만 거른다.** `resume`은 새 세션으로 센다. §4.7을 지키려고 이어받은 세션의 `SessionStart`에서는 naby가 `metrics-emit.js`만 띄우지 않는다. task 훅은 그대로 돈다.
+- **Claude Agent SDK에는 명령마다 환경을 줄 자리가 없다.** `query`의 `env`는 CLI 프로세스 전체에 걸리고, `PreToolUse` 훅의 출력은 `updatedInput`뿐이다. 명령 줄을 고쳐 `export`를 끼워 넣는 방법은 cic 토큰을 전사본에 남기므로 쓰지 않았다. "깨끗한 자리가 없으면 기록만 한다"는 사용자 결정을 따랐다.
+- **0.7.1의 `hooks.json`은 명령을 `command: "node"` + `args`로 쓴다.** 한 줄 문자열이 아니다. 실행기는 둘 다 읽는다.
+- **개발 중 실서버에 닿은 일.** M3 개발 중 한 번, 스파이크와 셸 테스트가 가짜 OAuth 기록 때문에 실제 `atlassian` 행을 만들어 실서버에 동적 등록 1건과 실패하는 갱신 요청을 보냈다. 동의나 로그인은 없었다. 원인은 등록 정보 없는 토큰을 "연결됨"으로 본 판정이었다. 지금은 등록 정보가 있어야 "연결됨"이고, 턴 안에서는 동적 등록을 막으며, 해당 스파이크와 테스트는 실서버에 닿지 않는다.
+
+### 7.6 남은 일
+
+- **Claude 엔진의 SDK `Bash`에는 §3.4 환경 변수가 들어가지 않는다.** 본문 안의 경로는 불러올 때 절대 경로로 바뀌므로 대부분의 스크립트는 돈다. 다만 cic 토큰을 환경 변수로 읽는 pdoc의 템플릿 받기는 Claude 엔진에서 토큰 없이 돈다. AI-SDK 엔진의 `run_command`에는 들어간다.
+- **셸 명령으로 `<NABY_HOME>/org/`에 쓰는 일은 막지 않는다.** 명령 줄을 해석하지 않기로 한 결정이다(사용자 결정, 2026-10-08).
+- **도구 이벤트의 `additionalContext`.** `PreToolUse`·`PostToolUse`·`Stop`·`PreCompact`가 준 맥락은 이미 보낸 프롬프트에 붙일 수 없어 훅 로그에만 남긴다. 다음 자율 단계에 넘길지는 정하지 않았다.
+- **훅 `ask` 뒤 정책 `ask`.** 같은 호출에 정책 규칙도 `ask`면 승인 창이 두 번 뜬다. 훅 것이 먼저다.
+- **Claude 엔진 실턴.** 훅이 두 엔진에서 같은 자리를 거친다는 것은 구조(공용 게이트·이벤트·압축 계약)와 `buildQueryOptions` 검사로 확인했다. 로그인한 Claude 엔진으로 훅이 도는 턴은 아직 돌리지 않았다.
+- **Windows 패키징본.** `ELECTRON_RUN_AS_NODE`로 훅을 띄우는 경로와 `py -3`은 Windows 패키징본에서 따로 확인한다(§3.5 마지막 문단).
+- **유예의 "기존 사용자" 판정.** 차단이 처음 걸릴 때 대화가 있었는지로 본다. 새로 설치하고 Skill Hub 키를 넣기 전에 대화를 한 사용자도 유예를 받는다.
 - **M4.** 집계(§3.7)와 6시간 주기 확인을 넣는다.
 - **M2 증거 중 남은 것.** §5의 "실제 모델로 `/task start` 한 번"은 아직 하지 않았다. 같은 경로(목록, 미리 불러오기, 도구 목록)는 가짜 모델로 셸 테스트가 확인한다.

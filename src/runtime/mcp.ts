@@ -34,6 +34,12 @@ import type { ChildProcess } from 'node:child_process';
 import { createMCPClient } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport as StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import type { Executor, JsonSchema, ToolOutput, ToolSchema } from './engine.js';
+import {
+  checkMcpOAuthToolset,
+  McpOAuthRequiredError,
+  mcpOAuthTransportAuth,
+  type McpOAuthConnectContext,
+} from './mcp-oauth.js';
 import type { McpEntry } from './store/store.js';
 
 // ---------------------------------------------------------------------------
@@ -272,7 +278,13 @@ class GracefulStdioTransport extends StdioMCPTransport {
   }
 }
 
-async function openClient(entry: McpEntry): Promise<McpClient> {
+/** What a connect may need beyond the entry itself. Today: the OAuth token store
+ *  for an `auth: 'oauth'` entry (org-harness-sync §3.8). */
+export type McpConnectOptions = {
+  oauth?: McpOAuthConnectContext;
+};
+
+async function openClient(entry: McpEntry, opts?: McpConnectOptions): Promise<McpClient> {
   if (entry.transport === 'stdio') {
     return createMCPClient({
       transport: new GracefulStdioTransport({
@@ -280,6 +292,27 @@ async function openClient(entry: McpEntry): Promise<McpClient> {
         ...(entry.args ? { args: entry.args } : {}),
         ...(entry.env ? { env: entry.env } : {}),
       }),
+      clientName: 'naby',
+    });
+  }
+  // BROWSER-OAUTH ENTRIES. The provider reads and refreshes the token store; a
+  // missing or dead sign-in throws here — before any network — so the turn gets
+  // the ordinary "server unavailable" failure entry and a Settings badge, never
+  // a browser tab. With no OAuth context at all (a caller that predates this)
+  // the same refusal applies: connecting without the token would only 401.
+  if (entry.auth === 'oauth') {
+    if (!opts?.oauth) {
+      throw new Error(`MCP server "${entry.name}" signs in with OAuth, and this caller passed no token store`);
+    }
+    const oauth = mcpOAuthTransportAuth(entry.name, opts.oauth);
+    return createMCPClient({
+      transport: {
+        type: entry.transport,
+        url: entry.url,
+        ...(entry.headers ? { headers: entry.headers } : {}),
+        authProvider: oauth.authProvider,
+        fetch: oauth.fetch,
+      },
       clientName: 'naby',
     });
   }
@@ -301,12 +334,29 @@ async function openClient(entry: McpEntry): Promise<McpClient> {
  * invokes an executor without first awaiting the gate — so there is no arrangement
  * of these two values that results in an ungated MCP call.
  */
-export async function connectMcpServer(entry: McpEntry): Promise<McpConnection> {
-  const client = await openClient(entry);
+export async function connectMcpServer(entry: McpEntry, opts?: McpConnectOptions): Promise<McpConnection> {
+  const client = await openClient(entry, opts);
   const timeout = timeoutFor(entry);
 
   // listTools(), NOT tools(). See the header.
   const listed = await client.listTools();
+
+  // A BROWSER-OAUTH server that answered with a reduced tool set is NOT signed in
+  // (Atlassian serves a public subset to a dead token instead of a 401). The
+  // status becomes "re-login needed" — tokens and registration kept — and this
+  // connect fails like any other unsigned connect, so no turn runs on the subset.
+  if (entry.transport !== 'stdio' && entry.auth === 'oauth' && opts?.oauth) {
+    const check = checkMcpOAuthToolset(
+      opts.oauth.store,
+      entry.name,
+      listed.tools.map((t) => t.name),
+      (opts.oauth.now ?? Date.now)(),
+    );
+    if (check.reduced) {
+      await client.close().catch(() => undefined);
+      throw new McpOAuthRequiredError(entry.name, 'relogin');
+    }
+  }
 
   const toolSchemas: ToolSchema[] = [];
   const executors: Record<string, Executor> = {};
@@ -402,13 +452,14 @@ export type McpLoadResult = {
  */
 export async function loadMcpToolset(
   entries: readonly McpEntry[],
+  opts?: McpConnectOptions,
 ): Promise<McpLoadResult> {
   const connections: McpConnection[] = [];
   const failures: { name: string; message: string }[] = [];
 
   for (const entry of entries) {
     try {
-      connections.push(await connectMcpServer(entry));
+      connections.push(await connectMcpServer(entry, opts));
     } catch (e) {
       failures.push({
         name: entry.name,

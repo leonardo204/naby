@@ -2,11 +2,11 @@
 id: harness-standalone
 title: 하네스 단독 소유 — 가져오면 naby 것이 된다
 type: design
-version: 0.2.1
+version: 0.2.2
 status: active
 scope: naby를 벤더 하네스와 상시 연결이 없는 단독 앱으로 만든다. 가져오기의 실체화(파일 복사), naby 전용 스캔, Agent SDK 격리 기본화, 예약 작업의 naby 엔진 고정, 벤더 디렉터리 읽기/쓰기 잔재 제거를 다룬다. 감사에서 나온 위반 V1~V9의 해소 계획이다.
 related: [skill-hub-builtin, phase-1_6-harness-ownership, harness-portability-strategy, phase-3-persona-agent, org-harness-sync]
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 # 하네스 단독 소유 — 가져오면 naby 것이 된다
@@ -38,7 +38,7 @@ updated: 2026-10-07
 
 ### 2.3 Agent SDK 격리 기본화 (V3, CRITICAL)
 
-- `settingSources: []`를 **무조건** 적용한다(isolated 구분 삭제). `~/.claude`·`<cwd>/.claude`의 settings·훅·CLAUDE.md가 naby 턴에 로드되지 않는다.
+- `settingSources: []`를 **무조건** 적용한다(isolated 구분 삭제). `~/.claude`·`<cwd>/.claude`의 settings·훅·CLAUDE.md가 naby 턴에 로드되지 않는다.[^org-hooks]
 - SDK 네이티브 스킬/서브에이전트/커맨드 로드도 막는다(SDK 옵션으로 명시적으로 끄거나, 끄는 옵션이 없으면 가능한 수단을 조사해 적용하고 한계를 기록한다).
 - 자격증명 읽기(`~/.claude/.credentials.json`)와 SDK 내부 세션 저장은 유지된다 — §1의 인증/엔진 내부 예외.
 - 결과: 스킬·기억·지침의 유일한 전달 경로가 naby 주입이 된다. dev-claude 이중 전달 비대칭(V9)이 뿌리에서 해소된다.
@@ -107,3 +107,5 @@ updated: 2026-10-07
 - **SDK 네이티브 서브에이전트.** `~/.claude/agents/*.md`의 로드를 끄는 문서화된 옵션이 없다. 다만 위임된 서브에이전트의 모든 도구 호출도 그 턴의 PreToolUse 게이트를 지나므로 정책을 넘지는 못한다.
 - **`skills: []`는 컨텍스트 필터다.** SDK 문서가 "샌드박스가 아니다 — 파일은 디스크에 남고 Read/Bash로 닿는다"고 못 박는다. 모델이 스스로 경로를 읽는 것까지 막지는 않는다(그 읽기는 게이트를 지난다).
 - **자격증명과 엔진 내부 저장은 그대로다.** §1의 예외이며 이번 작업의 대상이 아니었다.
+
+[^org-hooks]: naby 턴에서 훅을 실행하는 것은 naby의 조직 하네스 훅 실행기 하나뿐이다. sha256을 확인한 조직 패키지의 허용 목록 스크립트만 돌린다(org-harness-sync §3.5, phase-1_6 계약 §4).

@@ -204,6 +204,12 @@ export async function boot(opts: BootOptions = {}): Promise<BootResult> {
   mkdirSync(nabyHome, { recursive: true });
   process.env.NABY_DB_PATH ??= dbPath;
   process.env.NABY_HOME ??= nabyHome;
+  // THE `node` THE ORG HARNESS HOOKS RUN ON (org-harness-sync §3.5): this very
+  // executable, started with ELECTRON_RUN_AS_NODE=1, so a user without Node.js
+  // still gets the hooks. Named explicitly rather than inferred from
+  // `process.execPath` in the shell, so a server that ever moves to a helper
+  // process still launches the app binary.
+  process.env.NABY_APP_EXECUTABLE ??= process.execPath;
 
   // THE NABY HARNESS HOME (skill-hub-builtin §2.5). `~/.naby/{skills,commands,
   // agents}` is where an install driven by this product belongs — a file there is

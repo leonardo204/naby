@@ -11,6 +11,7 @@
 
 import { applyActivityLogSettings, logActivity } from './activity-log.js';
 import type {
+  CompactionPort,
   Engine,
   EngineEvent,
   Executor,
@@ -67,6 +68,9 @@ export type RunTurnOptions = {
    * aborts the turn. */
   onEvent?: (ev: EngineEvent) => void;
   signal?: AbortSignal;
+  /** The engine's compaction hook point (org-harness-sync §3.5), passed through
+   *  to `EngineRunInput.compaction` unchanged. Absent = no change. */
+  compaction?: CompactionPort;
 
   // -- the naby layer (P3-M14a, specs/naby-voice-layer.md §4.1, §8) ----------
   //
@@ -633,6 +637,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       toolSchemas,
       gate,
       executors,
+      ...(opts.compaction ? { compaction: opts.compaction } : {}),
       // -- ROLLING COMPACTION'S STORAGE (session-context-management §2.3) ----
       //
       // The engine that builds its own payload (AI-SDK) needs somewhere to keep

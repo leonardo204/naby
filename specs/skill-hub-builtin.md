@@ -2,22 +2,22 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 type: design
-version: 0.8.1
+version: 0.9.0
 status: active
-scope: 사내 표준 MCP(skill-hub, mcp-atlassian, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를, atlassian은 confluence-upload 스킬을 켠다. 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
+scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync]
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 
-> 상태: 설계 확정(2026-08-12, 0.6.0에서 §2.7을 가산 — cic 프리셋과 내장 하네스 번들. 자격값 저장이 곧 번들의 스위치이고, 사용자가 손으로 끈 것은 이기지 않는다. 0.6.1에서 내장 스킬을 트리거 게이팅으로 바꿈 — 1722토큰짜리 문서가 항상-켜짐이면 매 턴 예산의 86%를 먹는다. 0.7.0에서 두 번째 번들 `confluence-upload`를 atlassian 프리셋에 붙이고, 번들 단위로 규칙을 일반화했다). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
+> 상태: 설계 확정(2026-08-12, 0.6.0에서 §2.7을 가산 — cic 프리셋과 내장 하네스 번들. 자격값 저장이 곧 번들의 스위치이고, 사용자가 손으로 끈 것은 이기지 않는다. 0.6.1에서 내장 스킬을 트리거 게이팅으로 바꿈 — 1722토큰짜리 문서가 항상-켜짐이면 매 턴 예산의 86%를 먹는다. 0.7.0에서 두 번째 번들 `confluence-upload`를 atlassian 프리셋에 붙이고, 번들 단위로 규칙을 일반화했다. 0.9.0에서 atlassian을 공식 원격 MCP + 브라우저 OAuth 프리셋으로 바꾸고 `confluence-upload`를 거뒀다 — org-harness-sync §3.8, §4.4). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
 
 ## 1. 배경과 원칙
 
 - skill-hub는 HTTP MCP다: `https://skills.altimedia.com/mcp` + `Authorization: Bearer shub_...`. 런타임 MCP 로더는 http+headers를 이미 끝까지 지원하므로(`src/runtime/mcp.ts`), 이 작업은 **새 전송 경로가 아니라 프리셋 UX**다.
 - 원칙: **사용자가 아는 것은 토큰뿐이다.** URL·transport·헤더 이름은 제품이 안다. 일반 MCP 추가 폼과 달리 skill-hub 입력은 토큰 필드 하나다.
-- 토큰 저장은 기존 MCP 관례를 따른다 — `mcp_servers.payload`의 headers에 저장하고, 읽기는 키 이름만 노출(redact). 텔레그램 봇 토큰과 같은 등급이며 vault 승격은 이 스펙의 범위 밖이다.
+- 토큰 저장은 기존 MCP 관례를 따른다 — `mcp_servers.payload`의 headers에 저장하고, 읽기는 키 이름만 노출(redact). 브라우저 OAuth 프리셋(atlassian)은 예외로, 토큰과 클라이언트 등록 정보를 `settings`의 `mcp.oauth.<server>`에 둔다(org-harness-sync §3.8). 텔레그램 봇 토큰과 같은 등급이며 vault 승격은 이 스펙의 범위 밖이다.
 
 ## 2. 설계
 
@@ -26,8 +26,8 @@ updated: 2026-10-07
 `lib/systemMcp.ts`가 선언적 레지스트리를 소유한다. 프리셋 하나는 다음을 선언한다: 서버 이름, 표시명·설명 i18n 키, **필드 정의**(id·라벨 키·secret 여부·placeholder), 그리고 `build(fields, urlOverride?)` 순수 조립 함수. UI와 API는 레지스트리를 순회할 뿐 프리셋별 분기를 갖지 않는다 — 세 번째 프리셋은 선언 하나로 늘어난다.
 
 - **skill-hub**: 필드 `token`(secret). `{transport:'http', url:'https://skills.altimedia.com/mcp', headers:{Authorization:'Bearer <token>'}}`. 토큰은 trim + `Bearer ` 중복 정규화. URL은 설정 `skillHub.url`로 덮어쓸 수 있다(UI 미노출).
-- **atlassian**: 필드 `username`(회사 이메일), `apiToken`(secret). `{transport:'stdio', command:<uvx 절대경로>, args:['mcp-atlassian'], env:{CONFLUENCE_URL:'https://altimedia.atlassian.net/wiki', CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN}}`. URL은 설정 `atlassian.confluenceUrl`로 덮어쓸 수 있다. Jira env는 후속(§4).
-  - **stdio의 함정은 PATH다.** 패키징된 Electron의 자식 프로세스는 로그인 셸 PATH를 물려받지 않으므로, 저장 시점에 서버가 `uvx` 절대경로를 해석해(`command -v` 로그인 셸 폴백 + 잘 알려진 경로 후보) 엔트리에 굳힌다. 해석 실패면 저장을 거부하고 uv 설치 안내를 답한다 — 연결 테스트에서야 죽는 것보다 낫다.
+- **atlassian**(0.9.0부터): 필드가 없는 브라우저 OAuth 프리셋(`oauth: true`)이다. `{transport:'http', url:'https://mcp.atlassian.com/v1/mcp', auth:'oauth'}`. 입력란 대신 로그인 버튼이 있고(`atlassian.login`), `systemMcp.set`은 거절한다. Confluence와 Jira 도구가 함께 온다. 자세한 흐름과 API 토큰 행에서의 전환은 org-harness-sync §3.8, §4.4가 정본이다.
+  - 0.8.x까지는 필드 `username`·`apiToken`과 `uvx mcp-atlassian` stdio 엔트리였다(저장 때 `uvx` 절대경로를 해석해 굳혔다). 그 행이 남은 설치는 사용자가 로그인할 때까지 그대로 돌고, 로그인 뒤 같은 이름의 OAuth 행으로 바뀐다. `uvx` 경로 해석(`lib/commandPath.ts`)은 런처를 선언하는 프리셋을 위해 남아 있다.
 - 연결 판정 `readSystemMcpStatus(store)`: 프리셋별 `{configured, status}` 맵. 같은 질문에 답하는 함수를 UI가 따로 만들지 않는다.
 
 ### 2.2 API — 비밀값은 서버로만 간다
@@ -40,7 +40,7 @@ updated: 2026-10-07
 
 ### 2.3 온보딩 스텝
 
-- 프로바이더 스텝 **다음**에 System MCP 스텝 하나: 프리셋별 입력 블록(skill-hub 토큰 / Atlassian 이메일+토큰)을 세로로 나열하고, 각각 연결(저장→테스트, 도구 수 표시)과 독립적 성공 표시. "나중에 하기"로 건너뛰어도 온보딩은 완료된다.
+- 프로바이더 스텝 **다음**에 System MCP 스텝 하나: 프리셋별 입력 블록(skill-hub 토큰 / Atlassian 브라우저 로그인 버튼 / cic 토큰)을 세로로 나열하고, 각각 연결(저장→테스트, 도구 수 표시)과 독립적 성공 표시. "나중에 하기"로 건너뛰어도 온보딩은 완료된다.
 - 위저드의 기존 완료 판정(`onboarding.complete`)은 건드리지 않는다 — System MCP는 온보딩 필수 조건이 아니다.
 
 ### 2.4 설정 System MCP 카드
@@ -100,7 +100,7 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 
 ### 2.7.1 두 번째 번들 — atlassian과 `confluence-upload` (0.7.0에서 추가)
 
-> **변경 예정 (org-harness-sync 0.4.0, draft).** `atlassian` 프리셋은 공식 원격 MCP + OAuth 하나로 바뀌고 API 토큰 방식은 없어진다. 그에 따라 이 절의 `confluence-upload` 번들은 거둔다(org-harness-sync §3.8, §4.4). 그 스펙이 draft를 벗어날 때 이 절을 고친다.
+> **회수됨 (0.9.0, 2026-10-08).** 이 절은 기록으로 남긴다. `atlassian` 프리셋이 공식 원격 MCP + 브라우저 OAuth 하나로 바뀌어 API 토큰도, "프리셋 설정 = 옵트인" 신호도 없어졌다. 그래서 `confluence-upload` 원문과 `atlassian` 번들을 지웠고, 새 설치에는 들어가지 않는다. 이미 시드된 행은 사용자가 Atlassian에 로그인할 때 거둔다 — 손대지 않은 행은 `removed` + 출처 `builtin-withdrawn:confluence-upload`, 사용자가 손댄 행은 그대로 둔다. Confluence 발행은 조직 스킬 pdoc이 OAuth MCP로 맡는다. 정본은 org-harness-sync §3.8, §4.4다. 아래의 트리거·예산(3000) 설명 중 예산 상한은 그대로 남는다.
 
 **무엇이 늘었나.** skill-hub의 `confluence-upload` 스킬을 세 번째 내장 아티팩트로 싣는다(`src/runtime/harness-assets/skills/confluence-upload/SKILL.md`). 이 스킬은 confUploader 저장소의 로컬 CLI(`build/bin/confupload-cli`)를 셸로 호출해 마크다운을 Confluence 페이지로 올린다 — Markdown을 Storage Format으로, mermaid 블록을 Macro Pack ADF로 변환하는 일이 본체다. 적재 경로는 §2.7 그대로다: 원문 `.md`를 트리에 두고 생성기가 `generated.ts`에 상수로 굳히며, 스파이크가 바이트 단위로 대조한다.
 
@@ -163,5 +163,5 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 
 - 온보딩 스텝의 노출 조건. 1차는 항상 노출(건너뛰기 가능)로 시작한다. 사내 배포가 아닌 사용자에게 숨길지는 배포 대상이 넓어질 때 정한다.
 - 토큰 만료/401의 사용자 알림. 지금은 턴 로그의 연결 실패 경고뿐이다 — 프리셋 행의 테스트 버튼이 1차 진단 수단이다.
-- Atlassian Jira env(JIRA_URL 등) 추가와 stdio 서버의 턴별 프로세스 스폰 비용(현재 MCP는 턴마다 연결·해제 — stdio 프리셋이 늘면 캐싱을 검토한다).
-- uvx 미설치 사용자를 위한 자동 설치 안내(또는 동봉). 1차는 저장 거부 + 안내 문구다.
+- ~~Atlassian Jira env 추가~~ — 0.9.0의 OAuth 프리셋은 Jira 도구를 함께 받아 필요 없어졌다. stdio 서버의 턴별 프로세스 스폰 비용(현재 MCP는 턴마다 연결·해제 — stdio 프리셋이 늘면 캐싱을 검토한다)은 남는다.
+- ~~uvx 미설치 사용자를 위한 자동 설치 안내~~ — 0.9.0부터 내장 프리셋 중 uvx를 쓰는 것이 없다.

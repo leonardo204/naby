@@ -393,7 +393,36 @@ app.on('before-quit', (event) => {
 // app. A clean release of the SQLite handle is worth waiting a moment for; it
 // is not worth trapping the user in a process they cannot close. WAL makes an
 // abrupt close survivable, so on timeout we log and quit anyway.
-const TEARDOWN_TIMEOUT_MS = 5_000;
+const TEARDOWN_TIMEOUT_MS = 10_000;
+
+/**
+ * APP QUIT IS A SESSION END (org-harness-sync §1, §3.5). The shell registers an
+ * "end every live session" function under this global key (the runtime's
+ * `ORG_HARNESS_QUIT_HOOK_KEY`); it runs the org harness's SessionEnd hooks and
+ * is capped at 5 s, so the teardown budget above is that cap plus the old 5 s.
+ * A global rather than an import: the Next server bundles its own copy of the
+ * runtime, and only `globalThis` is shared between the two.
+ */
+const ORG_HARNESS_QUIT_HOOK_KEY = 'naby.orgHarness.sessionEndOnQuit';
+const ORG_SESSION_END_CAP_MS = 5_000;
+
+async function runOrgHarnessSessionEnd(): Promise<void> {
+  const fn = (globalThis as unknown as Record<symbol, (() => Promise<void>) | undefined>)[
+    Symbol.for(ORG_HARNESS_QUIT_HOOK_KEY)
+  ];
+  if (typeof fn !== 'function') return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      fn().catch((err: unknown) => console.error('[shutdown] org harness SessionEnd', err)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ORG_SESSION_END_CAP_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 let teardownDone = false;
 app.on('before-quit', (event) => {
@@ -415,8 +444,10 @@ app.on('before-quit', (event) => {
     finish();
   }, TEARDOWN_TIMEOUT_MS);
 
-  void bootResult
-    .shutdown()
+  // SessionEnd first (it needs the server's store), then the teardown.
+  const result = bootResult;
+  void runOrgHarnessSessionEnd()
+    .then(() => result.shutdown())
     .catch((err: unknown) => console.error('[shutdown]', err))
     .finally(() => {
       clearTimeout(timer);

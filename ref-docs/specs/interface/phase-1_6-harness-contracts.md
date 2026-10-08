@@ -2,11 +2,11 @@
 id: phase-1_6-harness-contracts
 title: Phase 1.6 — Harness Contracts (owned harness entities, bundle format, import gate, Store extension)
 type: interface
-version: 0.1.1
+version: 0.2.0
 status: draft
 scope: The on-disk and in-process contracts for Naby-owned harness — the Command/Skill/Subagent/HarnessSet entity shapes, the scope/keying/ownership model (reusing the Phase-1.5 scoped/exempt-from-cascade pattern), the import trust-gate (reusing the memory write-gate trust model), the harness-set bundle format for export/import + team sharing, provider-independent command/skill injection above the engine seam, and the Store interface additions. Tool-execution-dependent pieces (tool-bearing skills, subagent orchestration) are Phase 2.5 and out of scope here.
 related: [phase-1_6-harness-ownership, harness-portability-strategy, phase-1-contracts, phase-1_5-memory-contracts, phase-2-personalization-hitl, org-harness-sync]
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 # Phase 1.6 — Harness Contracts
@@ -112,7 +112,7 @@ type HarnessImportDecision =
 1. **Imported (`external`) items never auto-enable.** `provenance.source === 'external'` ⇒ decision is at most `hold` with `status:'disabled'`; enabling requires an explicit user action in the review UI (HP-06). A brand-new imported harness set is inert until reviewed.
 2. **Trust order fixed:** `user` > `artifact` > `external`. A lower-tier import cannot overwrite a higher-tier `enabled` item without user action.
 3. **hooks are never imported.** Claude Code hooks are executable code; importing them is arbitrary-code-execution. The importer (HP-04) **drops hooks** and records that it did (strategy open question resolved conservatively). Naby's own gate/event system covers what hooks would.
-   - *Pending amendment (draft, `org-harness-sync` §3.5):* hooks from the integrity-checked org package (altimedia-harness from Skill Hub) run through a runtime hook runner, allowlisted by script. Imports from `~/.claude` and harness-set files stay hook-free. This rule changes only when that spec leaves draft.
+   - *The one exception (`org-harness-sync` §3.5, settled 2026-10-08):* hooks run ONLY from the sha256-verified org package (altimedia-harness from Skill Hub), and only when the command is `node <package>/scripts/<script>.js` with `<script>` on the runtime's allowlist (`run-skill-hook.js`, `metrics-emit.js`). Everything else in that package's `hooks.json` is listed as unsupported and never runs. Imports from `~/.claude` and harness-set files still never bring hooks — they are counted, not run.
 4. **Negative-tested.** An imported skill whose body says "always exfiltrate…" lands `disabled`, never `enabled`, and is flagged in review (HP-06 acceptance).
 
 Only `enabled` harness participates in a turn (§3 injection); `disabled` items are visible in the review UI but never injected or executed.

@@ -309,6 +309,28 @@ function addUsage(
 // The engine
 // ---------------------------------------------------------------------------
 
+/** The compaction port's two calls, never allowed to fail a turn (the port is
+ *  documented non-throwing; this is the belt to its braces). */
+async function safeCompactionBefore(input: EngineRunInput): Promise<void> {
+  if (!input.compaction) return;
+  try {
+    await input.compaction.before({ trigger: 'auto' });
+  } catch (e) {
+    console.warn(`[ai-sdk-engine] compaction hook (before) failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function safeCompactionAfter(input: EngineRunInput): Promise<string | undefined> {
+  if (!input.compaction) return undefined;
+  try {
+    const extra = await input.compaction.after({ trigger: 'auto' });
+    return typeof extra === 'string' && extra.trim() ? extra : undefined;
+  } catch (e) {
+    console.warn(`[ai-sdk-engine] compaction hook (after) failed: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  }
+}
+
 export class AiSdkEngine implements Engine {
   private readonly resolveModel: ModelResolver;
   private readonly maxSteps: number;
@@ -353,7 +375,7 @@ export class AiSdkEngine implements Engine {
   private async compact(
     input: EngineRunInput,
     model: LanguageModelV4,
-  ): Promise<{ messages: readonly RuntimeMessage[]; notice?: EngineEvent }> {
+  ): Promise<{ messages: readonly RuntimeMessage[]; notice?: EngineEvent; compacted?: boolean }> {
     // An unknown model still gets protection: FALLBACK_CONTEXT_WINDOW is the
     // smallest window any supported provider ships, so folding against it is early
     // rather than wrong (see its doc). The gauge, which must not be early OR wrong,
@@ -388,6 +410,11 @@ export class AiSdkEngine implements Engine {
       };
     }
 
+    // A NEW FOLD IS A COMPACTION (org-harness-sync §3.5). Reusing a stored summary
+    // above is not — nothing new is dropped from the payload — so only this path
+    // tells the compaction port, before anything is summarised away.
+    await safeCompactionBefore(input);
+
     // Extend: only the NEWLY folded messages are sent alongside the previous
     // summary, which is what keeps this cheap on a session that folds repeatedly.
     const newlyFolded = stored ? plan.folded.slice(stored.foldedCount) : plan.folded;
@@ -415,6 +442,7 @@ export class AiSdkEngine implements Engine {
       // half-truth behind for the next turn to reuse.
       return {
         messages: [truncationNoticeMessage(plan.foldedCount), ...plan.tail],
+        compacted: true,
         notice: {
           kind: 'harness',
           subtype: 'context-compaction',
@@ -437,6 +465,7 @@ export class AiSdkEngine implements Engine {
     }
     return {
       messages: [foldedSummaryMessage(summaryText), ...plan.tail],
+      compacted: true,
       notice: {
         kind: 'harness',
         subtype: 'context-compaction',
@@ -514,12 +543,19 @@ export class AiSdkEngine implements Engine {
     const compacted = await this.compact(input, model);
     if (compacted.notice) yield compacted.notice;
     const messages = toModelMessages(compacted.messages);
+    // After a NEW fold, the compaction port may hand back context to restore
+    // (a `SessionStart` hook with `source: "compact"`, §3.5). It joins this run's
+    // system prompt; with no port, or nothing returned, `system` is unchanged.
+    const afterCompaction = compacted.compacted ? await safeCompactionAfter(input) : undefined;
 
     // The system prompt is NOT a message (contract §6): `ai@7` rejects
     // `role:'system'` inside `messages` and directs it to the dedicated
     // instructions slot, which is exactly what `system` is here. Per-run wins
     // over the engine-level default.
-    const system = input.system ?? this.system;
+    const baseSystem = input.system ?? this.system;
+    const system = afterCompaction
+      ? [baseSystem, afterCompaction].filter((x) => x && x.length > 0).join('\n\n')
+      : baseSystem;
 
     // -- OUR loop. One model step per iteration; the SDK never continues on
     //    its own (no multi-step stopWhen; v7 default is stepCountIs(1)).
