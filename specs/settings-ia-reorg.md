@@ -1,7 +1,7 @@
 ---
 id: settings-ia-reorg
 type: design
-version: 0.1.0
+version: 0.1.1
 status: implemented
 scope: 설정 모달의 정보 구조 재편 — 의도별 내비게이션 재그룹(일반/프로바이더/연결/나비/기억/하네스/권한/정보), 기억 결정 대기함(내비 배지는 IA-3c에서 뗐다), 성장 패널의 대시보드 분리(리포트 오버레이), 프로바이더 탭 분할. 개별 기능의 동작은 바꾸지 않는다 — 배치와 노출만 바꾼다.
 related:
@@ -10,7 +10,8 @@ related:
   - phase-3-persona-agent
   - phase-3-butterfly-trust-meter
   - skill-hub-builtin
-updated: 2026-08-04
+  - chat-connection-status
+updated: 2026-10-08
 ---
 
 # 설정 정보 구조 재편
@@ -156,3 +157,7 @@ IA-3a의 툴팁으로도 배지는 읽히지 않았다. 사용자는 기억 행�
 | `npm run build:app` | 런타임·셸·일렉트론 빌드 성공 |
 
 **IA-3c 추가 검증(같은 날, 배지 제거분).** `cd shell && npm test` 71 파일 · **1439 통과**(배지 불변식 8개를 5개로 교체, 로케일 키 검사 2개 삭제, 빠른 성장 개시 턴 13개 추가). `npx tsc --noEmit`(셸) 오류 4개·루트 29개로 **양쪽 다 기준선과 동일**하고, `npm run lint` 오류 132개도 그대로다.
+
+## 변경 이력
+
+- 0.1.1(2026-10-08): `related`에 chat-connection-status를 더했다. 채팅 상태 줄이 설정 창을 하네스 칸으로 바로 연다(`OpenSettings`의 `section`). 칸 구성은 바꾸지 않았다.

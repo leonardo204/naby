@@ -71,6 +71,7 @@ import { applyAutoStatusTransition } from './harness-seed.js';
 import { DEFAULT_USER_ID } from './memory-inject.js';
 import type { HarnessItem, HarnessStatus, Store } from './store/store.js';
 import { extractZip, ZipError } from './zip.js';
+import { isOrgHookScriptWaiting, orgHookScriptsWaiting, type OrgHookScript } from './org-harness-hook-scripts.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -137,6 +138,12 @@ export const ORG_HARNESS_SETTING = {
   restoredCopies: 'harness.org.restoredCopies',
   /** JSON {at, outcome, version?, detail?} — the last package check. */
   lastSync: 'harness.org.lastSync',
+  /** JSON OrgUpdateNotice — the latest version change and whether the user was
+   *  told (§3.1 "silent update, one notice per version"). */
+  updateNotice: 'harness.org.updateNotice',
+  /** JSON OrgUpdateLogEntry[] — recent version changes with the hooks each one
+   *  added that wait for a naby release (§3.5), newest first, capped. */
+  updateLog: 'harness.org.updateLog',
 } as const;
 
 export function orgHarnessAutoStatusKey(name: string): string {
@@ -403,6 +410,17 @@ export function readCurrentOrgPackage(home: string): OrgPackage | undefined {
   return { version: ptr.version, sha256: ptr.sha256, dir, skills: readPackageSkills(dir) };
 }
 
+/** The `current` version, checked the same way as `readCurrentOrgPackage` but
+ *  without reading any skill — for callers that poll (the chat status bar). */
+export function currentOrgPackageVersion(home: string): string | undefined {
+  const root = orgHarnessRoot(home);
+  const ptr = readPointer(root);
+  if (!ptr) return undefined;
+  const marker = readMarker(join(root, ptr.version));
+  if (!marker || marker.sha256 !== ptr.sha256 || marker.version !== ptr.version) return undefined;
+  return ptr.version;
+}
+
 /** Versions present on disk (complete or not) — for spikes and diagnostics. */
 export function listOrgPackageVersions(home: string): string[] {
   const root = orgHarnessRoot(home);
@@ -451,6 +469,9 @@ export type OrgPackageSyncResult = {
   current?: string;
   /** The version the marketplace offered, when it got that far. */
   offered?: string;
+  /** On 'updated': the version that was current before the flip (absent on a
+   *  first install). */
+  previous?: string;
   detail?: string;
 };
 
@@ -877,7 +898,12 @@ async function syncOnce(args: {
   // 6. Keep current + one previous — and any folder a running turn or hook
   //    still leases (§4.7); that one goes when its last lease is released.
   collectOrgPackageRoot(root, now());
-  return { outcome: 'updated', current: entry.version, offered: entry.version };
+  return {
+    outcome: 'updated',
+    current: entry.version,
+    offered: entry.version,
+    ...(before?.version ? { previous: before.version } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,6 +1447,167 @@ export function setOrgHarnessEnabled(
 }
 
 // ---------------------------------------------------------------------------
+// The update notice (§3.1 "silent update", §3.5 "new hooks wait")
+// ---------------------------------------------------------------------------
+//
+// A new version installs silently — the sync never asks. What the user gets is
+// ONE notice per version, after the fact: "the org harness was updated to vX",
+// plus a line when that version's hooks.json names scripts naby does not run yet
+// (not on the allowlist, and not one of the three naby re-implements). Those
+// hooks are installed with the package and simply wait for a naby release that
+// reviews them (appendix A5).
+//
+//   ONCE ACROSS RESTARTS AND WINDOWS. The notice lives in `settings`; the popup
+//   shows while `notifiedAt` is absent, and the ack writes it. Every window reads
+//   the same row, so dismissing in one dismisses everywhere.
+//
+//   FIRST INSTALL IS QUIET. With no previous version there is nothing that was
+//   "updated" — the Settings card already shows the version and the hooks naby
+//   does not run. No notice, no log entry.
+//
+//   "NEW" IS AGAINST THE PREVIOUS VERSION. A waiting hook the previous version
+//   already had was announced then. If the previous notice was never seen, its
+//   waiting hooks that are still waiting carry over, so two quick updates do not
+//   swallow the first one's line.
+//
+//   READ AGAINST THIS BUILD'S ALLOWLIST. A hook a later naby release allowlisted
+//   no longer "waits"; readers filter, so an old notice never says otherwise.
+
+export type OrgUpdateNotice = {
+  version: string;
+  /** The version before this one. */
+  previous: string;
+  /** Scripts this version added that wait for a naby release (§3.5). */
+  newHooks: OrgHookScript[];
+  detectedAt: number;
+  /** When the user dismissed the popup; absent = still to be shown. */
+  notifiedAt?: number;
+};
+
+export type OrgUpdateLogEntry = {
+  version: string;
+  previous: string;
+  newHooks: OrgHookScript[];
+  at: number;
+};
+
+/** How many version changes the Settings card keeps. */
+export const ORG_UPDATE_LOG_MAX = 10;
+
+function isHookList(v: unknown): v is OrgHookScript[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (h) =>
+        h &&
+        typeof (h as OrgHookScript).script === 'string' &&
+        Array.isArray((h as OrgHookScript).events) &&
+        (h as OrgHookScript).events.every((e) => typeof e === 'string'),
+    )
+  );
+}
+
+function stillWaiting(hooks: readonly OrgHookScript[]): OrgHookScript[] {
+  return hooks.filter((h) => isOrgHookScriptWaiting(h.script));
+}
+
+/** The stored notice (seen or not), filtered against this build's allowlist. */
+export function readOrgUpdateNotice(store: Pick<Store, 'getSetting'>): OrgUpdateNotice | undefined {
+  const n = readJsonSetting<OrgUpdateNotice>(store, ORG_HARNESS_SETTING.updateNotice);
+  if (!n || !isSafeVersion(n.version) || typeof n.previous !== 'string' || !isHookList(n.newHooks)) return undefined;
+  return { ...n, newHooks: stillWaiting(n.newHooks) };
+}
+
+/** The notice the popup should show now, or undefined. */
+export function pendingOrgUpdateNotice(store: Pick<Store, 'getSetting'>): OrgUpdateNotice | undefined {
+  const n = readOrgUpdateNotice(store);
+  return n && n.notifiedAt === undefined ? n : undefined;
+}
+
+/** Recent version changes, newest first, filtered against this build's allowlist. */
+export function readOrgUpdateLog(store: Pick<Store, 'getSetting'>): OrgUpdateLogEntry[] {
+  const log = readJsonSetting<OrgUpdateLogEntry[]>(store, ORG_HARNESS_SETTING.updateLog);
+  if (!Array.isArray(log)) return [];
+  return log
+    .filter((e) => e && isSafeVersion(e.version) && typeof e.previous === 'string' && isHookList(e.newHooks))
+    .map((e) => ({ ...e, newHooks: stillWaiting(e.newHooks) }));
+}
+
+/**
+ * Record that `version` replaced `previous` (§3.1). Called by the sync right
+ * after the `current` flip, while both folders are on disk. Returns the notice
+ * written, or undefined when there is nothing to tell (first install, same
+ * version re-published, or this version was already recorded). Never throws.
+ */
+export function recordOrgHarnessUpdate(
+  store: Pick<Store, 'getSetting' | 'setSetting'>,
+  args: {
+    home: string;
+    version: string;
+    previous?: string;
+    now?: () => number;
+    log?: (line: string) => void;
+  },
+): OrgUpdateNotice | undefined {
+  try {
+    const { version, previous } = args;
+    if (!previous || previous === version || !isSafeVersion(version) || !isSafeVersion(previous)) return undefined;
+    const existing = readOrgUpdateNotice(store);
+    if (existing && existing.version === version) return undefined;
+    const root = orgHarnessRoot(args.home);
+    const waitingNow = orgHookScriptsWaiting(join(root, version));
+    const before = new Set(orgHookScriptsWaiting(join(root, previous)).map((h) => h.script));
+    const added = waitingNow.filter((h) => !before.has(h.script));
+    // An unseen notice is folded in: its hooks that still wait stay announced,
+    // and "updated from" keeps naming the version the user last saw.
+    const carried =
+      existing && existing.notifiedAt === undefined
+        ? waitingNow.filter((h) => existing.newHooks.some((o) => o.script === h.script))
+        : [];
+    const newHooks = [...added];
+    for (const h of carried) if (!newHooks.some((x) => x.script === h.script)) newHooks.push(h);
+    const at = (args.now ?? Date.now)();
+    const notice: OrgUpdateNotice = {
+      version,
+      previous: existing && existing.notifiedAt === undefined ? existing.previous : previous,
+      newHooks,
+      detectedAt: at,
+    };
+    store.setSetting(ORG_HARNESS_SETTING.updateNotice, JSON.stringify(notice));
+    const log = readOrgUpdateLog(store).filter((e) => e.version !== version);
+    log.unshift({ version, previous, newHooks: added, at });
+    store.setSetting(ORG_HARNESS_SETTING.updateLog, JSON.stringify(log.slice(0, ORG_UPDATE_LOG_MAX)));
+    const say = args.log ?? ((line: string) => console.log(`[org-harness] ${line}`));
+    say(`updated ${previous} -> ${version}`);
+    if (added.length > 0) {
+      say(
+        `v${version} installs ${added.length} hook(s) naby does not run yet (waiting for a naby release): ` +
+          added.map((h) => `${h.script} (${h.events.join(', ')})`).join('; '),
+      );
+    }
+    return notice;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The popup was dismissed (or "details" was chosen). Only the notice for
+ * `version` is marked, so a stale window acking an older popup cannot hide a
+ * newer one. True when something was written.
+ */
+export function ackOrgUpdateNotice(
+  store: Pick<Store, 'getSetting' | 'setSetting'>,
+  version: string,
+  now: () => number = Date.now,
+): boolean {
+  const raw = readJsonSetting<OrgUpdateNotice>(store, ORG_HARNESS_SETTING.updateNotice);
+  if (!raw || raw.version !== version || raw.notifiedAt !== undefined) return false;
+  store.setSetting(ORG_HARNESS_SETTING.updateNotice, JSON.stringify({ ...raw, notifiedAt: now() }));
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // The whole background pass
 // ---------------------------------------------------------------------------
 
@@ -1438,6 +1625,8 @@ export type OrgHarnessSyncReport = {
   /** Absent when `applyNow` was false (a turn was running); the next turn
    *  boundary applies instead. */
   apply?: OrgHarnessApplyResult;
+  /** The update notice this pass recorded (a new version replaced an old one). */
+  notice?: OrgUpdateNotice;
 };
 
 /**
@@ -1492,8 +1681,19 @@ export async function runOrgHarnessSync(
       ...(pkg.detail ? { detail: pkg.detail } : {}),
     };
     store.setSetting(ORG_HARNESS_SETTING.lastSync, JSON.stringify(last));
+    // Installed silently above; the one-per-version notice is recorded here, the
+    // same place for the boot pass, the six-hour re-check and "check now".
+    const notice =
+      pkg.outcome === 'updated' && pkg.current
+        ? recordOrgHarnessUpdate(store, {
+            home: ctx.home,
+            version: pkg.current,
+            ...(pkg.previous ? { previous: pkg.previous } : {}),
+            ...(ctx.now ? { now: ctx.now } : {}),
+          })
+        : undefined;
     const a = apply();
-    return { activation, package: pkg, ...(a ? { apply: a } : {}) };
+    return { activation, package: pkg, ...(notice ? { notice } : {}), ...(a ? { apply: a } : {}) };
   } catch (e) {
     // Belt and braces: every step above already turns failure into an outcome.
     return {
@@ -1644,13 +1844,39 @@ export type OrgHarnessState = {
   rows: { name: string; status: HarnessStatus; origin: string; withdrawn: boolean }[];
   copyNotices: OrgCopyNotice[];
   keepUserCopy: string[];
+  /** The latest version change (seen or not), §3.1. */
+  updateNotice: OrgUpdateNotice | null;
+  /** Recent version changes and the hooks each added that wait (§3.5). */
+  updateLog: OrgUpdateLogEntry[];
 };
+
+/** The few fields a poller needs (the chat status bar): no rows, no skill
+ *  bodies, no hooks.json. Same meanings as the matching `OrgHarnessState` fields. */
+export type OrgHarnessStatus = Pick<OrgHarnessState, 'configured' | 'on' | 'offReason' | 'auth' | 'lastSync'> & {
+  version?: string;
+};
+
+function orgHarnessAuth(store: Pick<Store, 'getSetting'>, ctx: OrgHarnessContext): OrgHarnessState['auth'] {
+  const rec = readJsonSetting<OrgHarnessActivationRecord>(store, ORG_HARNESS_SETTING.activation);
+  return ctx.apiKey && rec && rec.keyHash === orgHarnessKeyHash(ctx.apiKey) ? rec.status : 'unknown';
+}
+
+export function readOrgHarnessStatus(store: OrgHarnessStore, ctx: OrgHarnessContext): OrgHarnessStatus {
+  const state = orgHarnessOnState(store, ctx);
+  const version = currentOrgPackageVersion(ctx.home);
+  return {
+    configured: Boolean(ctx.apiKey),
+    on: state.on,
+    ...(state.on ? {} : { offReason: state.reason }),
+    auth: orgHarnessAuth(store, ctx),
+    lastSync: readJsonSetting<OrgHarnessLastSync>(store, ORG_HARNESS_SETTING.lastSync) ?? null,
+    ...(version ? { version } : {}),
+  };
+}
 
 export function readOrgHarnessState(store: OrgHarnessStore, ctx: OrgHarnessContext): OrgHarnessState {
   const state = orgHarnessOnState(store, ctx);
-  const rec = readJsonSetting<OrgHarnessActivationRecord>(store, ORG_HARNESS_SETTING.activation);
-  const auth: OrgHarnessState['auth'] =
-    ctx.apiKey && rec && rec.keyHash === orgHarnessKeyHash(ctx.apiKey) ? rec.status : 'unknown';
+  const auth = orgHarnessAuth(store, ctx);
   const pkg = readCurrentOrgPackage(ctx.home);
   const rows = orgRows(store);
   const names = new Set<string>([...rows.map((r) => r.name), ...(pkg?.skills.map((s) => s.name) ?? [])]);
@@ -1673,5 +1899,7 @@ export function readOrgHarnessState(store: OrgHarnessStore, ctx: OrgHarnessConte
     keepUserCopy: [...names]
       .filter((n) => (store.getSetting(orgHarnessKeepUserCopyKey(n)) ?? '').trim() === 'true')
       .sort(),
+    updateNotice: readOrgUpdateNotice(store) ?? null,
+    updateLog: readOrgUpdateLog(store),
   };
 }

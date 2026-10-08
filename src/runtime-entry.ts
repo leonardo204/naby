@@ -495,10 +495,21 @@ export {
   readCurrentOrgPackage,
   readOrgCopyNotices,
   readOrgHarnessState,
+  readOrgHarnessStatus,
+  currentOrgPackageVersion,
+  type OrgHarnessStatus,
   runOrgHarnessSync,
   setOrgHarnessEnabled,
   syncOrgHarnessPackage,
   useOrgVersion,
+  ackOrgUpdateNotice,
+  pendingOrgUpdateNotice,
+  readOrgUpdateLog,
+  readOrgUpdateNotice,
+  recordOrgHarnessUpdate,
+  ORG_UPDATE_LOG_MAX,
+  type OrgUpdateLogEntry,
+  type OrgUpdateNotice,
   type OrgCopyNotice,
   type OrgHarnessActionResult,
   type OrgHarnessApplyResult,
@@ -510,6 +521,14 @@ export {
   type OrgHarnessSyncReport,
   type OrgPackage,
 } from './runtime/org-harness.js';
+// The hooks a package names and which of them wait for a naby release (§3.1,
+// §3.5) — a leaf module the sync and the runner share.
+export {
+  isOrgHookScriptWaiting,
+  listOrgHookScripts,
+  orgHookScriptsWaiting,
+  type OrgHookScript,
+} from './runtime/org-harness-hook-scripts.js';
 // THE ORG HARNESS INSIDE ONE TURN (org-harness-sync M2): the per-turn pin, the
 // `naby_skill_load` tool, the §3.4 compatibility layer and the package-command env.
 export {

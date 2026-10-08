@@ -27,6 +27,15 @@
 //              last release collects it, leaving current + one previous; release
 //              is idempotent; an unleased old version is collected at once; a
 //              lease older than the cap no longer protects its folder
+//   notice     (§3.1, §3.5 silent update + one notice per version) a first
+//              install records nothing; an update records one pending notice and
+//              a log entry; the ack marks only that version, once; a re-run does
+//              not re-raise it; hooks a version adds outside the allowlist (and
+//              outside the three naby re-implements) are listed and logged by
+//              name, and the runner still does not run them; an unseen notice
+//              carries its waiting hooks into the next one; a seen one does not;
+//              readers drop hooks this build's allowlist now covers; the state a
+//              fresh store reads (a restart) is the same; the log is capped
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
@@ -41,6 +50,7 @@ process.env.NABY_HOME = join(SPIKE_ROOT, 'process-home');
 process.env.NABY_DB_PATH = join(SPIKE_ROOT, 'process-home', 'app.db');
 
 import {
+  ackOrgUpdateNotice,
   collectOrgHarnessGarbage,
   leasedOrgPackageDirs,
   leaseOrgPackageDir,
@@ -51,12 +61,19 @@ import {
   ORG_PACKAGE_LEASE_MAX_AGE_MS,
   orgHarnessRecheckDelay,
   orgHarnessRoot,
+  ORG_UPDATE_LOG_MAX,
+  pendingOrgUpdateNotice,
   readCurrentOrgPackage,
+  readOrgHarnessState,
+  readOrgUpdateLog,
+  readOrgUpdateNotice,
+  recordOrgHarnessUpdate,
   resetOrgPackageLeasesForTests,
   runOrgHarnessSync,
   startOrgHarnessRecheck,
   type OrgHarnessFetch,
 } from '../runtime/org-harness.js';
+import { readOrgHookConfig } from '../runtime/org-harness-hooks.js';
 import { pinOrgHarnessTurn } from '../runtime/org-harness-turn.js';
 import { SqliteStore } from '../runtime/store/sqlite-store.js';
 import { buildZip, type ZipWriteEntry } from '../runtime/zip.js';
@@ -75,7 +92,10 @@ const DOWNLOAD = 'https://hub.test/api/v1/plugins/altimedia-harness/download';
 const BOOTSTRAP = 'https://hub.test/api/v1/harness/bootstrap';
 const HOUR = 60 * 60 * 1000;
 
-function fixtureEntries(version: string): ZipWriteEntry[] {
+/** Rewrites a parsed hooks.json (adds hooks a new version might ship). */
+type HooksTransform = (hooks: Record<string, unknown[]>) => void;
+
+function fixtureEntries(version: string, hooksTransform?: HooksTransform): ZipWriteEntry[] {
   const out: ZipWriteEntry[] = [];
   const walk = (dir: string): void => {
     for (const name of readdirSync(dir).sort()) {
@@ -91,6 +111,11 @@ function fixtureEntries(version: string): ZipWriteEntry[] {
         plugin.version = version;
         data = JSON.stringify(plugin, null, 2);
       }
+      if (rel === 'hooks/hooks.json' && hooksTransform) {
+        const parsed = JSON.parse(data.toString('utf8')) as { hooks: Record<string, unknown[]> };
+        hooksTransform(parsed.hooks);
+        data = JSON.stringify(parsed, null, 2);
+      }
       out.push({ name: rel, data });
     }
   };
@@ -102,7 +127,7 @@ type Hub = {
   fetch: OrgHarnessFetch;
   calls: string[];
   offline: boolean;
-  publish(version: string, opts?: { badSha?: boolean; brokenZip?: boolean }): void;
+  publish(version: string, opts?: { badSha?: boolean; brokenZip?: boolean; hooks?: HooksTransform }): void;
 };
 
 function fakeHub(): Hub {
@@ -111,7 +136,7 @@ function fakeHub(): Hub {
     calls: [],
     offline: false,
     publish(version, opts = {}) {
-      const zip = opts.brokenZip ? Buffer.from('not a zip at all') : buildZip(fixtureEntries(version));
+      const zip = opts.brokenZip ? Buffer.from('not a zip at all') : buildZip(fixtureEntries(version, opts.hooks));
       const sha = createHash('sha256').update(zip).digest('hex');
       offered = { version, zip, sha: opts.badSha ? '0'.repeat(64) : sha };
     },
@@ -405,11 +430,214 @@ async function leaseChecks(): Promise<void> {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// 4. The update notice (§3.1 silent update, §3.5 new hooks wait)
+// ---------------------------------------------------------------------------
+
+/** The hooks a "future" Skill Hub version might add: two new scripts (one in the
+ *  args form, one as a one-line string), a native script on another event and
+ *  an allowlisted one on an event naby has no moment for — only the first two
+ *  are "new hooks waiting for naby". */
+const addHooks: HooksTransform = (hooks) => {
+  (hooks.SessionStart ??= []).push({
+    hooks: [{ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/scripts/remind.js'], timeout: 5 }],
+  });
+  (hooks.PostToolUse ??= []).push({
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/new-audit.js" --quiet' }],
+  });
+  (hooks.Stop ??= []).push({
+    hooks: [{ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/scripts/activate.js'] }],
+  });
+  (hooks.Notification ??= []).push({
+    hooks: [{ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/scripts/metrics-emit.js'] }],
+  });
+};
+
+async function noticeChecks(): Promise<void> {
+  const c = freshCase('notice');
+  const names = (hooks: { script: string }[] | undefined) => (hooks ?? []).map((h) => h.script).join(',');
+
+  c.hub.publish('2.0.0');
+  const first = await pass(c);
+  record(
+    '[notice] a first install records no notice and no log entry (quiet first install)',
+    first.package?.outcome === 'updated' &&
+      first.notice === undefined &&
+      readOrgUpdateNotice(c.store) === undefined &&
+      readOrgUpdateLog(c.store).length === 0,
+    JSON.stringify({ pkg: first.package, notice: first.notice }),
+  );
+
+  c.hub.publish('2.0.1');
+  const second = await pass(c);
+  const n1 = pendingOrgUpdateNotice(c.store);
+  record(
+    '[notice] an update records one pending notice (version, previous, no new hooks) and a log entry',
+    second.package?.outcome === 'updated' &&
+      second.package.previous === '2.0.0' &&
+      n1?.version === '2.0.1' &&
+      n1.previous === '2.0.0' &&
+      n1.newHooks.length === 0 &&
+      n1.notifiedAt === undefined &&
+      readOrgUpdateLog(c.store).map((e) => e.version).join() === '2.0.1',
+    JSON.stringify({ pkg: second.package, n1, log: readOrgUpdateLog(c.store) }),
+  );
+
+  const again = await pass(c);
+  record(
+    '[notice] a re-run on the same version records nothing new',
+    again.package?.outcome === 'current' && again.notice === undefined && pendingOrgUpdateNotice(c.store)?.version === '2.0.1',
+  );
+
+  const wrong = ackOrgUpdateNotice(c.store, '2.0.0');
+  const ok = ackOrgUpdateNotice(c.store, '2.0.1', () => 1234);
+  const twice = ackOrgUpdateNotice(c.store, '2.0.1');
+  record(
+    '[notice] the ack marks only the named version, once; the notice is then not pending',
+    !wrong && ok && !twice && pendingOrgUpdateNotice(c.store) === undefined && readOrgUpdateNotice(c.store)?.notifiedAt === 1234,
+    JSON.stringify({ wrong, ok, twice, stored: readOrgUpdateNotice(c.store) }),
+  );
+
+  // Restart: a fresh store over the same database reads the same thing.
+  const reopened = new SqliteStore({ path: join(c.home, 'app.db') });
+  record(
+    '[notice] a fresh store (a restart, another window) sees it as already shown',
+    pendingOrgUpdateNotice(reopened) === undefined && readOrgUpdateNotice(reopened)?.version === '2.0.1',
+  );
+
+  c.hub.publish('2.0.2', { hooks: addHooks });
+  const third = await pass(c);
+  const n2 = pendingOrgUpdateNotice(c.store);
+  const n2events = Object.fromEntries((n2?.newHooks ?? []).map((h) => [h.script, h.events.join('|')]));
+  record(
+    '[notice] new scripts outside the allowlist are listed with their events; native and allowlisted ones are not',
+    third.notice?.version === '2.0.2' &&
+      names(n2?.newHooks) === 'remind.js,new-audit.js' &&
+      n2events['remind.js'] === 'SessionStart' &&
+      n2events['new-audit.js'] === 'PostToolUse',
+    JSON.stringify(n2),
+  );
+  const cfg = readOrgHookConfig(join(orgHarnessRoot(c.home), '2.0.2'));
+  const disp = (script: string) => cfg.entries.filter((e) => e.script === script).map((e) => e.disposition);
+  record(
+    '[notice] the waiting hooks are installed but the runner still does not run them',
+    existsSync(join(orgHarnessRoot(c.home), '2.0.2', 'hooks', 'hooks.json')) &&
+      disp('remind.js').join() === 'unsupported' &&
+      disp('new-audit.js').join() === 'unsupported' &&
+      !cfg.entries.some((e) => e.disposition === 'run' && /remind|new-audit/.test(e.script)),
+    JSON.stringify({ remind: disp('remind.js'), audit: disp('new-audit.js') }),
+  );
+
+  // Unseen, then another update that keeps the same hooks: they carry over.
+  c.hub.publish('2.0.3', { hooks: addHooks });
+  await pass(c);
+  const n3 = pendingOrgUpdateNotice(c.store);
+  const log3 = readOrgUpdateLog(c.store);
+  record(
+    '[notice] an unseen notice carries its waiting hooks and its "from" version into the next one',
+    n3?.version === '2.0.3' &&
+      n3.previous === '2.0.1' &&
+      names(n3.newHooks) === 'remind.js,new-audit.js' &&
+      log3.map((e) => e.version).join() === '2.0.3,2.0.2,2.0.1' &&
+      log3[0]!.newHooks.length === 0 &&
+      names(log3[1]!.newHooks) === 'remind.js,new-audit.js',
+    JSON.stringify({ n3, log3 }),
+  );
+
+  ackOrgUpdateNotice(c.store, '2.0.3');
+  c.hub.publish('2.0.4', { hooks: addHooks });
+  await pass(c);
+  const n4 = pendingOrgUpdateNotice(c.store);
+  record(
+    '[notice] after the ack, the same waiting hooks are not announced again',
+    n4?.version === '2.0.4' && n4.previous === '2.0.3' && n4.newHooks.length === 0,
+    JSON.stringify(n4),
+  );
+
+  // Readers re-check against this build's allowlist.
+  c.store.setSetting(
+    ORG_HARNESS_SETTING.updateNotice,
+    JSON.stringify({
+      version: '2.0.4',
+      previous: '2.0.3',
+      newHooks: [
+        { script: 'metrics-emit.js', events: ['Stop'] },
+        { script: 'remind.js', events: ['SessionStart'] },
+      ],
+      detectedAt: 1,
+    }),
+  );
+  record(
+    '[notice] a hook this build allowlists no longer reads as waiting',
+    names(readOrgUpdateNotice(c.store)?.newHooks) === 'remind.js',
+    JSON.stringify(readOrgUpdateNotice(c.store)),
+  );
+
+  // The UI state carries both; nothing secret rides along.
+  const state = readOrgHarnessState(c.store, { home: c.home, apiKey: KEY, env: {} });
+  record(
+    '[notice] the org harness state carries the notice and the log, no key',
+    state.updateNotice?.version === '2.0.4' &&
+      state.updateLog.length === 4 &&
+      !JSON.stringify(state).includes(KEY) &&
+      !JSON.stringify(state).includes('hmt_recheck'),
+    JSON.stringify({ notice: state.updateNotice, log: state.updateLog.length }),
+  );
+
+  // The log line names the scripts.
+  const lines: string[] = [];
+  const d = freshCase('notice-log');
+  d.hub.publish('3.0.0');
+  await pass(d);
+  d.hub.publish('3.0.1', { hooks: addHooks });
+  await pass(d, {});
+  // Re-record through the function directly to capture its log output.
+  d.store.setSetting(ORG_HARNESS_SETTING.updateNotice, '');
+  const direct = recordOrgHarnessUpdate(d.store, {
+    home: d.home,
+    version: '3.0.1',
+    previous: '3.0.0',
+    log: (l) => lines.push(l),
+  });
+  record(
+    '[notice] the waiting hooks are logged by name with their events',
+    names(direct?.newHooks) === 'remind.js,new-audit.js' &&
+      lines.some((l) => l.includes('remind.js (SessionStart)') && l.includes('new-audit.js (PostToolUse)')),
+    JSON.stringify(lines),
+  );
+  record(
+    '[notice] no previous (first install), the same version, or a version already recorded: nothing recorded',
+    recordOrgHarnessUpdate(d.store, { home: d.home, version: '3.0.1' }) === undefined &&
+      recordOrgHarnessUpdate(d.store, { home: d.home, version: '3.0.1', previous: '3.0.1' }) === undefined &&
+      recordOrgHarnessUpdate(d.store, { home: d.home, version: '3.0.1', previous: '3.0.0' }) === undefined,
+  );
+
+  // The log keeps the newest ORG_UPDATE_LOG_MAX.
+  const e = freshCase('notice-cap');
+  e.hub.publish('4.0.0');
+  await pass(e);
+  for (let i = 1; i <= ORG_UPDATE_LOG_MAX + 2; i += 1) {
+    e.hub.publish(`4.0.${i}`);
+    await pass(e);
+  }
+  const capped = readOrgUpdateLog(e.store);
+  record(
+    `[notice] the log keeps the newest ${ORG_UPDATE_LOG_MAX}, newest first`,
+    capped.length === ORG_UPDATE_LOG_MAX &&
+      capped[0]!.version === `4.0.${ORG_UPDATE_LOG_MAX + 2}` &&
+      capped[ORG_UPDATE_LOG_MAX - 1]!.version === '4.0.3',
+    JSON.stringify(capped.map((x) => x.version)),
+  );
+}
+
 async function main(): Promise<void> {
   try {
     await clockChecks();
     await passChecks();
     await leaseChecks();
+    await noticeChecks();
   } catch (e) {
     record('spike ran to completion', false, e instanceof Error ? (e.stack ?? e.message) : String(e));
   }

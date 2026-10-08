@@ -1,7 +1,7 @@
 ---
 id: session-context-management
 type: design
-version: 0.5.0
+version: 0.5.1
 status: active
 scope: 세션 컨텍스트 창 관리 — 상태 바의 창 사용률 게이지와 임계 안내, "새 탭에서 이어가기"(요약 인계 + 세션 스코프 환경 승계), ai-sdk 엔진의 롤링 요약 자동 컴팩션. Agent SDK 엔진의 자체 컴팩션은 건드리지 않고 표시만 한다.
 related:
@@ -10,7 +10,8 @@ related:
   - naby-activity-log
   - telegram-chat
   - model-auto-routing
-updated: 2026-10-02
+  - chat-connection-status
+updated: 2026-10-08
 ---
 
 # 세션 컨텍스트 관리
@@ -146,3 +147,7 @@ updated: 2026-10-02
 
 - **되읽은 세션은 다음 턴까지 게이지가 없다.** 창 점유량은 턴이 보고하는 실측이고, 트랜스크립트를 다시 읽는다고 되살아나지 않는다. 개정된 §2.1도 이 부분은 그대로다 — 바뀐 것은 **분모**를 근사할 수 있다는 것이지, 측정하지 않은 **분자**를 지어낸다는 것이 아니다.
 - **Agent SDK 엔진에는 컴팩션을 넣지 않았다**(§3). 표시만 한다.
+
+## 변경 이력
+
+- 0.5.1(2026-10-08): `related`에 chat-connection-status를 더했다. 입력창 둘레에 줄이 하나 늘었다. 85% 배너는 입력창 위, 연결 상태 줄은 입력창 아래다. 이 문서의 동작은 바꾸지 않았다.

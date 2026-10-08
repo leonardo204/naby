@@ -48,6 +48,7 @@ import { logActivity } from './activity-log.js';
 import type { RuntimeMessage } from './engine.js';
 import { CASE_INSENSITIVE_FS } from './fs-tools.js';
 import { leaseOrgPackageDir, ORG_HARNESS_CLIENT } from './org-harness.js';
+import { ORG_HOOK_ALLOWLIST, ORG_HOOK_NATIVE, splitHookCommand } from './org-harness-hook-scripts.js';
 import { ORG_COMMAND_ENV, ORG_KEY_ENV_NAMES } from './org-harness-turn.js';
 import type { SessionRef } from './store/store.js';
 
@@ -67,11 +68,12 @@ export const ORG_HOOK_EVENTS = [
 ] as const;
 export type OrgHookEvent = (typeof ORG_HOOK_EVENTS)[number];
 
-/** Scripts naby runs as they are (§3.5). A new script joins only in a naby
- *  release, after review (appendix A5). */
-export const ORG_HOOK_ALLOWLIST: readonly string[] = ['run-skill-hook.js', 'metrics-emit.js'];
-/** Scripts naby replaces with its own implementation (§3.6) — never run. */
-export const ORG_HOOK_NATIVE: readonly string[] = ['activate.js', 'gate.js', 'deps-check.js'];
+// The allowlist (scripts naby runs as they are, §3.5 — a new script joins only
+// in a naby release, after review, appendix A5), the native list (scripts naby
+// replaces, §3.6 — never run) and the command splitter live in a leaf module so
+// the package sync can use them too (new-hook detection, §3.1) without an import
+// cycle. Re-exported here so existing callers keep their import path.
+export { ORG_HOOK_ALLOWLIST, ORG_HOOK_NATIVE, splitHookCommand } from './org-harness-hook-scripts.js';
 
 /** §3.5: SessionEnd waits this long in total, then lets the app go. */
 export const ORG_SESSION_END_CAP_MS = 5_000;
@@ -124,36 +126,6 @@ export type OrgHookConfig = {
   entries: OrgHookEntry[];
   problems: string[];
 };
-
-/** Shell-like split of a one-string command (`node "${CLAUDE_PLUGIN_ROOT}/x.js" a`):
- *  whitespace separates, single and double quotes group, nothing else is special. */
-export function splitHookCommand(command: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let quote: '"' | "'" | undefined;
-  let any = false;
-  for (const ch of command) {
-    if (quote) {
-      if (ch === quote) quote = undefined;
-      else cur += ch;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      any = true;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (cur || any) out.push(cur);
-      cur = '';
-      any = false;
-      continue;
-    }
-    cur += ch;
-  }
-  if (cur || any) out.push(cur);
-  return out;
-}
 
 function substituteRoot(arg: string, pkgDir: string): string {
   return arg.replace(/\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT\b/g, () => pkgDir);
