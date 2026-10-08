@@ -47,7 +47,7 @@ import { randomBytes } from 'node:crypto';
 import { logActivity } from './activity-log.js';
 import type { RuntimeMessage } from './engine.js';
 import { CASE_INSENSITIVE_FS } from './fs-tools.js';
-import { ORG_HARNESS_CLIENT } from './org-harness.js';
+import { leaseOrgPackageDir, ORG_HARNESS_CLIENT } from './org-harness.js';
 import { ORG_COMMAND_ENV, ORG_KEY_ENV_NAMES } from './org-harness-turn.js';
 import type { SessionRef } from './store/store.js';
 
@@ -79,6 +79,9 @@ export const ORG_SESSION_END_CAP_MS = 5_000;
 export const ORG_HOOK_DEFAULT_TIMEOUT_MS = 60_000;
 /** Output kept from one hook; more is cut (a hook is not a log channel). */
 const MAX_HOOK_STDOUT_BYTES = 1024 * 1024;
+/** stderr kept per hook run, in the in-memory hook log only (diagnostics: why a
+ *  hook failed, or what `HARNESS_METRICS_DRYRUN=1` would have sent). */
+const MAX_HOOK_STDERR_BYTES = 4 * 1024;
 /** Additional context from one hook, at most (the system prompt has a budget). */
 const MAX_CONTEXT_CHARS = 10_000;
 /** Grace between SIGTERM and SIGKILL when a hook overruns its timeout. */
@@ -91,6 +94,8 @@ export const ORG_METRICS_TOKEN_ENV = 'HARNESS_METRICS_TOKEN';
 export const ORG_METRICS_DISABLED_ENV = 'HARNESS_METRICS_DISABLED';
 /** pdoc's `template_source.py` reads the cic token under this name (7.3). */
 export const ORG_CIC_API_TOKEN_ENV = 'CIC_API_TOKEN';
+/** The team code `metrics-emit.js` reports (§3.7). */
+export const ORG_HARNESS_TEAM_ENV = 'HARNESS_TEAM';
 
 // ---------------------------------------------------------------------------
 // Parsing hooks.json
@@ -508,7 +513,34 @@ export type OrgHookEnvArgs = {
   projectDir?: string;
   cicToken?: string;
   metricsToken?: string;
+  /** The open project's `HARNESS_TEAM` (`orgProjectHarnessTeam`). Wins over the
+   *  one in `base`; absent leaves `base`'s value (or none) in place. */
+  team?: string;
 };
+
+/**
+ * `env.HARNESS_TEAM` of the open project's Claude Code settings (§3.7, user
+ * decision 2026-10-08): `.claude/settings.local.json` wins over
+ * `.claude/settings.json`. In Claude Code the team repository sets the team
+ * code there; naby reads THAT ONE KEY and nothing else from those files, never
+ * writes them, and treats a missing file, invalid JSON or a non-string value as
+ * "not set". Undefined without a project.
+ */
+export function orgProjectHarnessTeam(projectDir: string | undefined): string | undefined {
+  if (!projectDir) return undefined;
+  const read = (name: string): string | undefined => {
+    try {
+      const raw = JSON.parse(readFileSync(join(projectDir, '.claude', name), 'utf8')) as {
+        env?: Record<string, unknown>;
+      };
+      const v = raw && typeof raw === 'object' ? raw.env?.[ORG_HARNESS_TEAM_ENV] : undefined;
+      return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return read('settings.local.json') ?? read('settings.json');
+}
 
 /** The env for every org hook. Never carries the Skill Hub key. Pure. */
 export function orgHookEnv(args: OrgHookEnvArgs): Record<string, string> {
@@ -519,6 +551,9 @@ export function orgHookEnv(args: OrgHookEnvArgs): Record<string, string> {
   if (args.projectDir) env[ORG_COMMAND_ENV.projectDir] = args.projectDir;
   else delete env[ORG_COMMAND_ENV.projectDir];
   env[ORG_COMMAND_ENV.client] = ORG_HARNESS_CLIENT;
+  // Team: the project's value first, then the process env's (already in `base`),
+  // else unset — the script then reports "unassigned".
+  if (args.team) env[ORG_HARNESS_TEAM_ENV] = args.team;
   delete env[ORG_COMMAND_ENV.cicToken];
   delete env[ORG_CIC_API_TOKEN_ENV];
   if (args.cicToken) {
@@ -637,6 +672,13 @@ export type OrgHookLogEntry = {
   outcome: 'ok' | 'failed' | 'timeout' | 'async' | 'skipped' | 'matcher-error';
   ms?: number;
   detail?: string;
+  /** The session the hook ran for (absent on runner-level entries). */
+  sessionId?: string;
+  /** The package folder the hook ran from (`CLAUDE_PLUGIN_ROOT`). */
+  pkgDir?: string;
+  /** The first few KB of the hook's stderr. IN MEMORY ONLY — never written to
+   *  the activity log (a hook's stderr is its own business). */
+  stderr?: string;
 };
 
 const HOOK_LOG_CAP = 200;
@@ -656,7 +698,10 @@ function recordHook(entry: OrgHookLogEntry): void {
     );
   }
   // The durable trace: the activity log (no-op unless a naby home is configured).
-  logActivity('org_hook', { ...entry });
+  // Without stderr: that stays in memory.
+  const { stderr: _stderr, ...durable } = entry;
+  void _stderr;
+  logActivity('org_hook', { ...durable });
 }
 
 /** The recent hook outcomes, newest last (diagnostics, spikes). */
@@ -700,7 +745,7 @@ export type OrgHookDispatchResult = {
   capped?: boolean;
 };
 
-type ProcResult = { code: number | null; stdout: string; timedOut: boolean; error?: string; ms: number };
+type ProcResult = { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string; ms: number };
 
 function runProcess(
   spawnImpl: SpawnFn,
@@ -720,12 +765,14 @@ function runProcess(
     });
   } catch (e) {
     return {
-      done: Promise.resolve({ code: null, stdout: '', timedOut: false, error: e instanceof Error ? e.message : String(e), ms: 0 }),
+      done: Promise.resolve({ code: null, stdout: '', stderr: '', timedOut: false, error: e instanceof Error ? e.message : String(e), ms: 0 }),
     };
   }
   const done = new Promise<ProcResult>((resolveDone) => {
     let stdout = '';
     let bytes = 0;
+    let stderr = '';
+    let errBytes = 0;
     let timedOut = false;
     let finished = false;
     const timer = setTimeout(() => {
@@ -749,18 +796,21 @@ function runProcess(
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      resolveDone({ ...r, ms: now() - started });
+      resolveDone({ ...r, stderr: r.stderr.slice(0, MAX_HOOK_STDERR_BYTES), ms: now() - started });
     };
     child.stdout?.on('data', (d: Buffer) => {
       if (bytes >= MAX_HOOK_STDOUT_BYTES) return;
       bytes += d.length;
       stdout += d.toString('utf8');
     });
-    child.stderr?.on('data', () => {
-      /* drained, not kept: stderr is a hook's own log */
+    child.stderr?.on('data', (d: Buffer) => {
+      // Always drained (a full pipe would stall the hook); only the head is kept.
+      if (errBytes >= MAX_HOOK_STDERR_BYTES) return;
+      errBytes += d.length;
+      stderr += d.toString('utf8');
     });
-    child.on('error', (e) => finish({ code: null, stdout, timedOut, error: e.message }));
-    child.on('close', (code) => finish({ code, stdout, timedOut }));
+    child.on('error', (e) => finish({ code: null, stdout, stderr, timedOut, error: e.message }));
+    child.on('close', (code) => finish({ code, stdout, stderr, timedOut }));
     child.stdin?.on('error', () => {
       /* a hook that does not read stdin closes it early: not an error */
     });
@@ -869,15 +919,26 @@ export function createOrgHookRunner(opts: OrgHookRunnerOptions): OrgHookRunner {
       }
     }
     const waits: Promise<void>[] = [];
+    const everything: Promise<void>[] = [];
     let decision: OrgHookDecision | undefined;
     const rank = { allow: 1, ask: 2, deny: 3 } as const;
+    // THE FOLDER IS LEASED WHILE ANY OF THESE PROCESSES RUNS (§4.7, M4). An async
+    // hook (metrics-emit at Stop) outlives the turn that started it, and it reads
+    // `${CLAUDE_PLUGIN_ROOT}` files after it starts — the package GC must not
+    // delete its folder in between. Released when the last one exits.
+    const releaseLease = leaseOrgPackageDir(config.pkgDir);
+    const tag = (r: ProcResult) => ({
+      sessionId: call.sessionId,
+      pkgDir: config.pkgDir,
+      ...(r.stderr.trim() ? { stderr: r.stderr } : {}),
+    });
     for (const e of entries) {
       result.started += 1;
       const proc = runProcess(spawnImpl, executable, e.args, { cwd, env: opts.env, stdin, timeoutMs: e.timeoutMs }, now);
       const settle = proc.done.then((r) => {
         if (r.timedOut) {
           result.timedOut += 1;
-          recordHook({ at: now(), event: call.event, script: e.script, outcome: 'timeout', ms: r.ms });
+          recordHook({ at: now(), event: call.event, script: e.script, outcome: 'timeout', ms: r.ms, ...tag(r) });
           return;
         }
         if (r.error || r.code !== 0) {
@@ -889,32 +950,35 @@ export function createOrgHookRunner(opts: OrgHookRunnerOptions): OrgHookRunner {
             outcome: 'failed',
             ms: r.ms,
             detail: r.error ?? `exit ${String(r.code)}`,
+            ...tag(r),
           });
           return;
         }
         if (e.async) {
-          recordHook({ at: now(), event: call.event, script: e.script, outcome: 'async', ms: r.ms });
+          recordHook({ at: now(), event: call.event, script: e.script, outcome: 'async', ms: r.ms, ...tag(r) });
           return;
         }
         result.ok += 1;
-        recordHook({ at: now(), event: call.event, script: e.script, outcome: 'ok', ms: r.ms });
+        recordHook({ at: now(), event: call.event, script: e.script, outcome: 'ok', ms: r.ms, ...tag(r) });
         const out = parseOrgHookOutput(call.event, r.stdout);
         if (out.additionalContext) result.additionalContext.push(out.additionalContext);
         if (out.decision && (!decision || rank[out.decision.behavior] > rank[decision.behavior])) {
           decision = { ...out.decision, script: e.script };
         }
       });
+      const quiet = settle.catch(() => {});
+      everything.push(quiet);
       if (e.async) {
         // `async: true` — not waited for (§3.5). Tracked so a spike or the quit
         // path can tell when they are gone.
         result.asyncStarted += 1;
-        const tracked = settle.catch(() => {});
-        inflightAsync.add(tracked);
-        void tracked.finally(() => inflightAsync.delete(tracked));
+        inflightAsync.add(quiet);
+        void quiet.finally(() => inflightAsync.delete(quiet));
       } else {
-        waits.push(settle.catch(() => {}));
+        waits.push(quiet);
       }
     }
+    void Promise.all(everything).finally(releaseLease);
     await Promise.all(waits);
     if (decision) result.decision = decision;
     return result;
@@ -1012,6 +1076,14 @@ export function orgSessionStartSource(sessionId: string, isNew: boolean): 'start
 
 export function noteOrgSessionStarted(info: OrgHookSessionInfo): void {
   liveSessions.set(info.sessionId, info);
+}
+
+/** A later turn of a live session pinned `pkgDir` (a newer version arrived
+ *  between turns, §4.7): its SessionEnd runs from the folder its LAST turn used.
+ *  No-op for a session that has not started in this process. */
+export function touchOrgSession(sessionId: string, pkgDir: string): void {
+  const s = liveSessions.get(sessionId);
+  if (s && s.pkgDir !== pkgDir) liveSessions.set(sessionId, { ...s, pkgDir });
 }
 
 /** Take a session off the live list (it ends now). Undefined when it never

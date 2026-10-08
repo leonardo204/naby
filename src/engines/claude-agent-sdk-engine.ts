@@ -145,6 +145,10 @@ type AgentSdk = {
   tool: typeof import('@anthropic-ai/claude-agent-sdk').tool;
 };
 
+/** The SDK surface `ClaudeAgentSdkEngine` drives — what its `sdk` constructor
+ *  option must provide (a spike's scripted stand-in; production never passes it). */
+export type ClaudeAgentSdkModule = AgentSdk;
+
 /**
  * Every place the SDK is allowed to be found, in order.
  *
@@ -1718,7 +1722,15 @@ export class ClaudeAgentSdkEngine implements Engine {
   // than letting the header name one account while the answer spends another.
   //
   // Undefined is the ordinary case and means "the one sign-in this computer has".
-  constructor(private readonly opts: { accountId?: string } = {}) {}
+  //
+  // `sdk` IS A DEPENDENCY, NOT A FLAG EITHER: the SDK module to drive instead of
+  // the lazily loaded real one. Production never passes it. A spike passes a
+  // scripted stand-in (org-harness-sync M4: the same scripted turn through both
+  // engines, to prove the org hooks fire identically) so that everything this
+  // class does with the SDK's messages and hook callbacks — the gate on
+  // PreToolUse, tool_result mapping, subagent attribution — runs for real
+  // without a sign-in, a CLI process or a model call.
+  constructor(private readonly opts: { accountId?: string; sdk?: ClaudeAgentSdkModule } = {}) {}
 
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
     // The SDK is loaded HERE, inside run(), so that constructing the engine is
@@ -1727,7 +1739,7 @@ export class ClaudeAgentSdkEngine implements Engine {
     // fails as a surfaced EngineEvent rather than a thrown module-load error.
     let sdk: AgentSdk;
     try {
-      sdk = await loadAgentSdk();
+      sdk = this.opts.sdk ?? (await loadAgentSdk());
     } catch (e) {
       yield {
         kind: 'error',

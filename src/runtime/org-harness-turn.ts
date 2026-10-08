@@ -11,7 +11,9 @@
 //     `naby_skill_load` call and every `run_command` env of that turn use THAT
 //     folder, even if a background sync flips `current` halfway through: M1 keeps
 //     the previous version on disk exactly so a turn that started on it can finish
-//     (§3.1, §4.7). Pinning is a value captured once, not a re-read.
+//     (§3.1, §4.7). Pinning is a value captured once, not a re-read. Since M4 the
+//     pin also LEASES the folder until `release()`, so even a second flip during
+//     the same run cannot get it deleted.
 //   * LOAD (`makeOrgSkillLoadTool`). `naby_skill_load(name)` returns the §3.4
 //     preamble, the skill folder's absolute path, and the SKILL.md body with the
 //     Claude Code placeholders replaced by absolute paths. Both engines get it the
@@ -41,6 +43,7 @@ import { join } from 'node:path';
 import type { Executor, ToolOutput, ToolSchema } from './engine.js';
 import { CASE_INSENSITIVE_FS, isPathInside } from './fs-tools.js';
 import {
+  leaseOrgPackageDir,
   ORG_HARNESS_CLIENT,
   ORG_HARNESS_ORIGIN_PREFIX,
   ORG_HARNESS_PACKAGE,
@@ -111,6 +114,12 @@ export type OrgHarnessTurn = {
   /** The skill folder the most recent `naby_skill_load` in this turn returned —
    *  the `CLAUDE_SKILL_DIR` for a command that only names the variable. */
   lastLoadedSkillDir?: string;
+  /**
+   * End this turn's lease on `pkg.dir` (§4.7, M4). Until it is called the
+   * package GC keeps the folder even after two newer versions arrived; call it
+   * once the run is over (idempotent; a no-op for a turn with no package).
+   */
+  release(): void;
 };
 
 export type PinOrgHarnessTurnArgs = OrgHarnessContext & {
@@ -130,6 +139,7 @@ export function pinOrgHarnessTurn(
   args: PinOrgHarnessTurnArgs,
 ): OrgHarnessTurn {
   const base = {
+    release: () => {},
     home: args.home,
     nativeClaudeTools: args.nativeClaudeTools === true,
     ...(args.projectDir ? { projectDir: args.projectDir } : {}),
@@ -168,7 +178,11 @@ export function pinOrgHarnessTurn(
     if (!state.on) return { ...base, on: false, offReason: state.reason };
     const pkg = readCurrentOrgPackage(args.home);
     if (!pkg) return { ...base, on: true };
-    return { ...base, on: true, pkg: { version: pkg.version, dir: pkg.dir, skills: pkg.skills } };
+    // The lease is what lets a turn outlive TWO version flips (§4.7): without it
+    // the GC keeps only current + one previous. Taken in the same synchronous
+    // step that read `current`, so no sync can slip in between.
+    const release = leaseOrgPackageDir(pkg.dir);
+    return { ...base, release, on: true, pkg: { version: pkg.version, dir: pkg.dir, skills: pkg.skills } };
   } catch {
     return { ...base, on: false };
   }

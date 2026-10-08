@@ -1,7 +1,7 @@
 {
   "name": "altimedia-harness",
   "displayName": "Altimedia Harness",
-  "version": "0.7.1",
+  "version": "0.8.1",
   "description": "알티미디어 개발자용 공통 AI 하네스 — 통제·측정 훅, 공통 스킬·에이전트, 필수 MCP",
   "author": {
     "name": "AX 추진실",

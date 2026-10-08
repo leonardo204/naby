@@ -26,8 +26,9 @@
 //
 //   Out of scope for M1, by the spec's own staging: `naby_skill_load` and turn
 //   injection (M2), the compatibility layer (M2), hooks (M3), the Atlassian gate
-//   (M3), metrics (M4), the 6-hour re-check (M4 — `runOrgHarnessSync` is the unit
-//   a timer would call).
+//   (M3). M4 added the six-hour re-check clock (`startOrgHarnessRecheck`, run by
+//   the shell around `runOrgHarnessSync`) and package-folder leases, so the GC
+//   never deletes a folder a running turn or hook still uses (§4.7).
 //
 // THE SAFETY PROPERTIES, in the order the spec states them.
 //
@@ -65,7 +66,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { applyAutoStatusTransition } from './harness-seed.js';
 import { DEFAULT_USER_ID } from './memory-inject.js';
 import type { HarnessItem, HarnessStatus, Store } from './store/store.js';
@@ -482,7 +483,173 @@ function pickMarketplaceEntry(body: unknown, marketplaceUrl: string): Marketplac
   return { version: entry.version, url: resolved.toString(), sha256: sha.toLowerCase() };
 }
 
-function cleanupLeftovers(root: string, keep: ReadonlySet<string>, now: number): void {
+// ---------------------------------------------------------------------------
+// Package folders in use (§4.7, M4) — the GC must never pull a folder out from
+// under a turn or a hook that is still running on it
+// ---------------------------------------------------------------------------
+//
+// THE PROBLEM. The sync keeps `current` and ONE previous version (§3.1). That is
+// enough while at most one new version lands per turn. It is not enough when two
+// land during one long turn (an autonomous run, a slow hook): v1 pinned → v2
+// arrives (v1 kept as previous) → v3 arrives (v2 previous) → v1 deleted while the
+// turn — and the hooks it spawned, which read `${CLAUDE_PLUGIN_ROOT}` files after
+// they start — still run from it.
+//
+// THE RULE. Whoever runs from a package folder holds a LEASE on it: the turn pin
+// (`pinOrgHarnessTurn`) for the whole run, and the hook runner for the lifetime
+// of each hook process. The GC keeps every leased folder on top of current +
+// previous, and remembers that it skipped one; when the last lease on a folder is
+// released, the deferred collection runs then. "Only one previous" is restored as
+// soon as nothing needs the older folder.
+//
+// A LEASE CANNOT PIN FOREVER. A turn that throws before its `finally`, or a
+// process that dies, would otherwise keep a folder on disk for the life of the
+// app. A lease older than `ORG_PACKAGE_LEASE_MAX_AGE_MS` no longer protects its
+// folder — far longer than any turn or hook runs.
+//
+// PROCESS-WIDE, NOT MODULE-WIDE. The registry rides `globalThis` under a
+// `Symbol.for` key: the Next server bundles its own copy of this runtime (the
+// same reason the quit hook does, org-harness-hooks.ts), and a turn pinned
+// through one copy must be visible to a sync running through the other.
+
+/** A lease older than this no longer keeps its folder (a leak guard, not a
+ *  timeout: nothing is stopped when it passes). */
+export const ORG_PACKAGE_LEASE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+type LeaseRegistry = {
+  /** normalized package dir → lease id → leased-at (epoch ms) */
+  leases: Map<string, Map<number, number>>;
+  /** package roots whose GC skipped a leased folder; collected on release */
+  deferred: Set<string>;
+  nextId: number;
+};
+
+const LEASE_KEY = Symbol.for('naby.orgHarness.packageLeases');
+
+function leaseRegistry(): LeaseRegistry {
+  const host = globalThis as unknown as Record<symbol, LeaseRegistry | undefined>;
+  let reg = host[LEASE_KEY];
+  if (!reg) {
+    reg = { leases: new Map(), deferred: new Set(), nextId: 1 };
+    host[LEASE_KEY] = reg;
+  }
+  return reg;
+}
+
+const FOLD_CASE = process.platform === 'darwin' || process.platform === 'win32';
+
+function leaseKey(dir: string): string {
+  const r = resolve(dir);
+  return FOLD_CASE ? r.toLowerCase() : r;
+}
+
+/**
+ * Hold a package folder for as long as something runs from it. Returns the
+ * release function (idempotent). Releasing the last lease on a folder the GC
+ * had to skip runs the deferred collection for its package root. Never throws.
+ */
+export function leaseOrgPackageDir(dir: string, now: () => number = Date.now): () => void {
+  const reg = leaseRegistry();
+  const key = leaseKey(dir);
+  const id = reg.nextId++;
+  let byId = reg.leases.get(key);
+  if (!byId) {
+    byId = new Map();
+    reg.leases.set(key, byId);
+  }
+  byId.set(id, now());
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const m = reg.leases.get(key);
+    if (!m) return;
+    m.delete(id);
+    if (m.size > 0) return;
+    reg.leases.delete(key);
+    const root = dirname(key);
+    if (!reg.deferred.has(root)) return;
+    try {
+      collectOrgPackageRoot(root, Date.now());
+    } catch {
+      /* best effort; the next sync collects */
+    }
+  };
+}
+
+/** Version folder names under `root` that hold a live lease right now. */
+function leasedVersions(root: string, now: number): Set<string> {
+  const reg = leaseRegistry();
+  const rootKey = leaseKey(root);
+  const out = new Set<string>();
+  for (const [key, byId] of reg.leases) {
+    if (dirname(key) !== rootKey) continue;
+    let live = false;
+    for (const at of byId.values()) {
+      if (now - at < ORG_PACKAGE_LEASE_MAX_AGE_MS) {
+        live = true;
+        break;
+      }
+    }
+    if (live) out.add(basename(key));
+  }
+  return out;
+}
+
+/** Package folders (absolute, normalized) currently leased — spikes, diagnostics. */
+export function leasedOrgPackageDirs(now: number = Date.now()): string[] {
+  const out: string[] = [];
+  for (const [key, byId] of leaseRegistry().leases) {
+    if ([...byId.values()].some((at) => now - at < ORG_PACKAGE_LEASE_MAX_AGE_MS)) out.push(key);
+  }
+  return out.sort();
+}
+
+/**
+ * The GC of one package root: keep `current`, the one previous version, and
+ * every leased folder; delete the rest (and crashed runs' leftovers). Records
+ * whether a leased folder was all that kept something alive, so the release of
+ * that lease finishes the job.
+ */
+function collectOrgPackageRoot(root: string, now: number): void {
+  const ptr = readPointer(root);
+  const keep = new Set<string>();
+  if (ptr) {
+    keep.add(ptr.version);
+    if (ptr.previous) keep.add(ptr.previous);
+  }
+  const leased = leasedVersions(root, now);
+  const reg = leaseRegistry();
+  const rootKey = leaseKey(root);
+  let deferred = false;
+  for (const v of leased) {
+    if (FOLD_CASE ? [...keep].some((k) => k.toLowerCase() === v) : keep.has(v)) continue;
+    deferred = true;
+  }
+  if (deferred) reg.deferred.add(rootKey);
+  else reg.deferred.delete(rootKey);
+  if (!ptr) return; // never delete versions without knowing which one is current
+  cleanupLeftovers(root, keep, now, leased);
+}
+
+/** Run the package GC for a naby home now (spikes; the sync calls it itself). */
+export function collectOrgHarnessGarbage(home: string, now: number = Date.now()): void {
+  collectOrgPackageRoot(orgHarnessRoot(home), now);
+}
+
+/** Spikes: forget every lease. */
+export function resetOrgPackageLeasesForTests(): void {
+  const reg = leaseRegistry();
+  reg.leases.clear();
+  reg.deferred.clear();
+}
+
+function cleanupLeftovers(
+  root: string,
+  keep: ReadonlySet<string>,
+  now: number,
+  leased: ReadonlySet<string> = new Set(),
+): void {
   let names: string[];
   try {
     names = readdirSync(root);
@@ -491,6 +658,7 @@ function cleanupLeftovers(root: string, keep: ReadonlySet<string>, now: number):
   }
   for (const name of names) {
     if (name === POINTER_FILE || keep.has(name)) continue;
+    if (leased.has(FOLD_CASE ? name.toLowerCase() : name)) continue;
     const full = join(root, name);
     if (name.startsWith(STAGING_PREFIX)) {
       // A staging dir younger than this may belong to a sync running right now
@@ -706,9 +874,9 @@ async function syncOnce(args: {
     return base({ outcome: 'invalid-package', offered: entry.version, detail: `pointer: ${String(e)}` });
   }
 
-  // 6. Keep current + one previous.
-  const keep = new Set<string>([entry.version, ...(pointer.previous ? [pointer.previous] : [])]);
-  cleanupLeftovers(root, keep, now());
+  // 6. Keep current + one previous — and any folder a running turn or hook
+  //    still leases (§4.7); that one goes when its last lease is released.
+  collectOrgPackageRoot(root, now());
   return { outcome: 'updated', current: entry.version, offered: entry.version };
 }
 
@@ -1274,7 +1442,8 @@ export type OrgHarnessSyncReport = {
 
 /**
  * One background pass: activation → package → rows (§4.2). What a boot calls
- * once, and what the M4 six-hour timer will call again. Never throws.
+ * once, and what the six-hour re-check (`startOrgHarnessRecheck`) calls again.
+ * Never throws.
  *
  * `applyNow: false` downloads and verifies but leaves the rows to the next turn
  * boundary (`applyOrgHarnessIfDue` from the engine), which is how "never in the
@@ -1331,6 +1500,128 @@ export async function runOrgHarnessSync(
       package: { outcome: 'unreachable', detail: e instanceof Error ? e.message : String(e) },
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// The six-hour re-check (§3.1, M4)
+// ---------------------------------------------------------------------------
+//
+// "At app start and every 6 hours after" — the boot pass is the shell's
+// (`ensureOrgHarnessSyncStarted`); this is the clock after it. One timer per
+// process, owned by whoever calls `startOrgHarnessRecheck` (the shell, in the
+// long-lived Next server realm that also runs the turns).
+//
+//   JITTERED. Every install opens the app around 9 a.m.; without jitter they
+//   would all re-check together six hours later. Each wait is 6 h ± 15 min.
+//
+//   NEVER OVERLAPPING. The next wait starts after the current pass settles, so a
+//   pass slower than the interval cannot stack up. The pass itself is the
+//   shell's single-flight `syncOrgHarnessNow`, shared with the boot pass and the
+//   "check now" button, so a tick that lands on a running pass joins it.
+//
+//   SKIPPABLE PER TICK. `shouldRun` is asked at every tick (the kill switch, the
+//   Settings toggle and `NABY_ORG_HARNESS_SYNC=0` can all change while the app
+//   runs). A skipped tick does no network and simply waits for the next one.
+//
+//   NEVER BLOCKING, NEVER FAILING. A pass that throws or rejects is logged and
+//   the clock keeps going; the package on disk is whatever the last good pass
+//   left (the sync never replaces it with something unverified). The timer is
+//   unref'd, so it never keeps a process alive on its own.
+//
+// THE DAILY KEY CHECK (§3.6) RIDES THIS CLOCK. Each pass asks
+// `checkOrgHarnessActivation`, which goes to the network only on the first pass
+// of a new KST day for the key — so "once per day" holds for an app that is
+// left running for days, not only for one that is restarted every morning.
+
+export const ORG_HARNESS_RECHECK_MS = 6 * 60 * 60 * 1000;
+export const ORG_HARNESS_RECHECK_JITTER_MS = 15 * 60 * 1000;
+
+/** The next wait: `intervalMs` ± `jitterMs`, uniformly. Pure. */
+export function orgHarnessRecheckDelay(
+  random: () => number = Math.random,
+  intervalMs: number = ORG_HARNESS_RECHECK_MS,
+  jitterMs: number = ORG_HARNESS_RECHECK_JITTER_MS,
+): number {
+  const r = Math.min(Math.max(random(), 0), 1);
+  return Math.max(1, Math.round(intervalMs + (r * 2 - 1) * jitterMs));
+}
+
+export type OrgHarnessRecheck = {
+  stop(): void;
+  /** Epoch ms of the next tick, or undefined after `stop()`. */
+  readonly nextAt: number | undefined;
+  /** Ticks so far: `ran` called the pass, `skipped` did not. */
+  readonly stats: { ran: number; skipped: number; failed: number };
+};
+
+type TimerHandle = { unref?: () => unknown };
+
+export function startOrgHarnessRecheck(args: {
+  /** One pass. Awaited before the next wait starts. */
+  run: () => Promise<unknown> | unknown;
+  /** Asked at every tick; false skips that tick (no pass, no network). */
+  shouldRun?: () => boolean;
+  intervalMs?: number;
+  jitterMs?: number;
+  random?: () => number;
+  now?: () => number;
+  setTimer?: (fn: () => void, ms: number) => TimerHandle;
+  clearTimer?: (h: TimerHandle) => void;
+  log?: (line: string) => void;
+}): OrgHarnessRecheck {
+  const setTimer = args.setTimer ?? ((fn, ms) => setTimeout(fn, ms) as unknown as TimerHandle);
+  const clearTimer = args.clearTimer ?? ((h) => clearTimeout(h as unknown as ReturnType<typeof setTimeout>));
+  const now = args.now ?? Date.now;
+  const log = args.log ?? ((line: string) => console.log(`[org-harness] ${line}`));
+  const stats = { ran: 0, skipped: 0, failed: 0 };
+  let handle: TimerHandle | undefined;
+  let nextAt: number | undefined;
+  let stopped = false;
+
+  const schedule = (): void => {
+    if (stopped) return;
+    const delay = orgHarnessRecheckDelay(args.random, args.intervalMs, args.jitterMs);
+    nextAt = now() + delay;
+    handle = setTimer(() => void tick(), delay);
+    handle.unref?.();
+  };
+
+  const tick = async (): Promise<void> => {
+    handle = undefined;
+    if (stopped) return;
+    let go = true;
+    try {
+      go = args.shouldRun ? args.shouldRun() : true;
+    } catch {
+      go = false;
+    }
+    if (!go) {
+      stats.skipped += 1;
+    } else {
+      stats.ran += 1;
+      try {
+        await args.run();
+      } catch (e) {
+        stats.failed += 1;
+        log(`re-check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    schedule();
+  };
+
+  schedule();
+  return {
+    stop() {
+      stopped = true;
+      nextAt = undefined;
+      if (handle) clearTimer(handle);
+      handle = undefined;
+    },
+    get nextAt() {
+      return nextAt;
+    },
+    stats,
+  };
 }
 
 // ---------------------------------------------------------------------------

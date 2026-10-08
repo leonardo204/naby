@@ -2,7 +2,7 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.6.0
+version: 0.7.0
 status: draft
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
 related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution]
@@ -24,12 +24,12 @@ updated: 2026-10-08
 | 세션 종료 | 탭 닫기와 앱 종료를 세션 종료로 본다 |
 | 인증 유예 | 기존 사용자는 업그레이드 후 7일 동안 막지 않는다 |
 | 같은 이름 사본 | 자동으로 끄지 않는다. 알림을 띄우고 사용자가 고른다 |
-| naby 사용분 구분 | 집계에서 naby를 따로 센다. Skill Hub 쪽 변경과 함께 간다(§3.7, 부록 A) |
+| naby 사용분 구분 | 집계에서 naby를 따로 센다. Skill Hub 0.8.0이 받아 준다(§3.7, 부록 A) |
 | Atlassian | 공식 원격 MCP의 브라우저 OAuth **하나로 통일**한다. API 토큰 방식(`mcp-atlassian`)은 없앤다(§3.8, §4.4) |
 
 ## 2. 지금 naby와의 차이
 
-altimedia-harness 0.7.1을 직접 열어 확인한 내용이다(`~/.claude/plugins/cache/altimedia-skills/altimedia-harness/0.7.1`).
+altimedia-harness 0.7.1을 직접 열어 확인한 내용이다(`~/.claude/plugins/cache/altimedia-skills/altimedia-harness/0.7.1`). M4에서 Skill Hub의 0.8.1도 받아 열어 봤다. 아래 표는 0.8.1에서도 같다. 달라진 점은 7.8에 적었다.
 
 | 플러그인 구성 | naby 현황 | 차이 |
 |---|---|---|
@@ -55,8 +55,10 @@ altimedia-harness 0.7.1을 직접 열어 확인한 내용이다(`~/.claude/plugi
 - 본체: `source.url`(`/api/v1/plugins/altimedia-harness/download`)에서 zip을 받는다. 인증 없이 받아진다(사내망에서 확인, 200, 473,035바이트).
 - **sha256이 마켓플레이스 값과 다르면 버린다.** 받은 것을 쓰지 않고, 이전 버전을 그대로 둔다.
 - 이 확인은 **서명이 아니라 무결성 확인**이다. 목록과 zip이 같은 서버에서 오므로, 전송 중 손상과 반쯤 받은 파일은 막지만 서버 자체가 뚫린 경우는 막지 못한다. 신뢰의 기준은 `skills.altimedia.com`(HTTPS, 사내망)이다. Claude Code에 같은 플러그인을 설치할 때와 같은 수준이다. 서명은 Skill Hub가 서명 키를 내놓으면 더한다(§6).
-- 푸는 곳은 `~/.naby/org/altimedia-harness/<version>/`이다. 다 풀린 뒤에 `current` 표시를 새 버전으로 옮긴다. 도중에 끊겨도 이전 버전이 계속 쓰인다. 직전 버전 하나는 남기고 그보다 오래된 것은 지운다.
+- 푸는 곳은 `~/.naby/org/altimedia-harness/<version>/`이다. 다 풀린 뒤에 `current` 표시를 새 버전으로 옮긴다. 도중에 끊겨도 이전 버전이 계속 쓰인다. 직전 버전 하나는 남기고 그보다 오래된 것은 지운다. 다만 아직 돌고 있는 턴이나 훅이 쓰는 폴더는 그 턴이나 훅이 끝날 때까지 지우지 않는다(§4.7).
 - 확인 시점은 앱 시작과 그 뒤 6시간마다다. Skill Hub는 스킬이 바뀌면 5분 안에 다시 조립하므로, 하루 안에는 반영된다.
+- 6시간 간격은 매번 앞뒤 15분 안에서 무작위로 바꾼다. 같은 시각에 앱을 켠 PC들이 한꺼번에 요청하지 않게 하려는 것이다. 다음 확인은 앞 확인이 끝난 뒤에 잡으므로 겹치지 않는다. 앱 시작 확인, 6시간 확인, 설정 화면의 "지금 확인"은 한 번에 하나만 돈다.
+- 조직 하네스가 꺼져 있으면(`NABY_ORG_HARNESS=0`이나 설정 토글) 그 회차의 확인을 건너뛰고 네트워크 요청을 하지 않는다. `NABY_ORG_HARNESS_SYNC=0`이면 시작 확인도 6시간 확인도 돌지 않는다. 확인하는 동안에도 턴은 기다리지 않는다. 확인이 실패하면 이미 받은 버전을 그대로 쓴다.
 - 사내망 밖이거나 서버가 응답하지 않으면 조용히 다음 확인을 기다린다. 이미 받은 버전은 계속 동작한다. 받은 버전이 하나도 없는 첫 실행이면 조직 하네스 없이 동작하고, 설정 화면에 "사내망에 연결되면 받는다"를 표시한다. 인증 차단(§3.6)도 패키지가 없으면 걸지 않는다.
 - 런타임에서 경로를 찾을 때는 `NABY_HOME` 기준으로 정한다. 앱 번들 안 경로를 쓰지 않으므로 packaging-path-resolution의 `import.meta.url` 문제와 무관하다.
 
@@ -146,6 +148,7 @@ Claude 엔진이 SDK 내장 `Bash`·`Write`·`Edit`를 쓰는 경우에도 이�
 | `HARNESS_CLIENT` | `naby` |
 | `CLAUDE_PLUGIN_OPTION_CIC_TOKEN`, `CIC_API_TOKEN` | cic 토큰(설정된 경우만) |
 | `HARNESS_METRICS_TOKEN` | 활성화(§3.6)로 받은 집계 토큰. 없으면 대신 `HARNESS_METRICS_DISABLED=1`을 넣는다 |
+| `HARNESS_TEAM` | 열린 프로젝트의 `.claude/settings.local.json`이나 `.claude/settings.json`에 있는 `env.HARNESS_TEAM`(§3.7). 없으면 앱 환경의 값을 그대로 둔다 |
 | `ELECTRON_RUN_AS_NODE` | `1` |
 | `CLAUDE_PLUGIN_OPTION_SHUB_API_KEY`, `SHUB_API_KEY` | 지운다. Skill Hub 키는 훅에 가지 않는다 |
 
@@ -171,7 +174,7 @@ Windows에서는 Python을 `py -3`까지 찾고(`run-skill-hook.js`가 이미 �
 **활성화 (`activate.js` 대체).** skill-hub 프리셋에 저장된 API 키로 `GET /api/v1/harness/bootstrap`을 부른다.
 
 - 성공하면 응답의 `env.HARNESS_METRICS_TOKEN`을 받아 naby 설정에 저장하고, 집계 훅에 `HARNESS_METRICS_TOKEN`으로 넘긴다. Claude Code의 `~/.cache/altimedia-harness/activation.json`은 읽지도 쓰지도 않는다.
-- 확인은 하루(KST)에 한 번이다. 키를 바꾸면 바로 다시 확인한다. Skill Hub는 이 확인으로 그날 사용자를 센다.
+- 확인은 하루(KST)에 한 번이다. 키를 바꾸면 바로 다시 확인한다. Skill Hub는 이 확인으로 그날 사용자를 센다. 6시간 확인(§3.1)이 매번 이 확인을 거치므로, 앱을 며칠 켜 둔 채로 써도 날짜가 바뀐 뒤 첫 확인에서 키를 다시 확인한다. 같은 날 안에서는 네트워크 요청을 하지 않는다.
 - 401이면 조직 하네스를 끄고 설정 화면과 세션 시작에 "Skill Hub 키를 다시 넣어 주세요"를 띄운다. 네트워크 실패는 실패로 보지 않는다.
 - skill-hub 프리셋이 없으면 조직 하네스를 받지 않는다. 온보딩의 skill-hub 단계가 곧 설치 단계가 된다.
 
@@ -187,13 +190,26 @@ Windows에서는 Python을 `py -3`까지 찾고(`run-skill-hook.js`가 이미 �
 
 ### 3.7 집계
 
-H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린다. 단계 판정(입력·맥락·실행·검수·기록)과 페이로드 7개 필드는 Skill Hub 소유로 남고, 바뀌면 자동 갱신으로 따라온다.
+H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린다. 어느 이벤트를 어느 단계(입력·맥락·실행·검수·기록)로 볼지와 페이로드 필드는 Skill Hub가 정하고, 바뀌면 자동 갱신으로 따라온다.
 
-- 보내는 필드는 `session_id`, `team`, `repo`, `event`, `stage`, `harness_version`, `ts`뿐이다. 프롬프트 본문, 파일 경로, 명령은 보내지 않는다.
-- `repo`는 열린 프로젝트의 `git remote get-url origin`에서 나온다.
-- 서브에이전트 안의 이벤트(`agent_id`)는 세지 않는다. 스크립트가 걸러 낸다.
-- **naby 사용분을 따로 센다.** naby는 훅을 띄울 때 `HARNESS_CLIENT=naby`를 넣고, 활성화 확인(§3.6)에도 같은 값을 실어 보낸다. `metrics-emit.js`가 이 값을 `client` 필드로 보내고 서버가 나눠 세는 일은 Skill Hub 쪽 변경이다(부록 A). 그 변경이 오기 전에는 값이 무시되어 지금처럼 합쳐 잡힌다. naby 쪽은 먼저 넣어 두고 기다린다.
-- **알려진 문제(Skill Hub 쪽).** `metrics-emit.js`는 "기록" 단계를 `^mcp__.*__confluence_(create|update)_page`로 판정한다. 이것은 `mcp-atlassian`의 도구 이름이다. 공식 OAuth MCP의 쓰기 도구는 `createConfluencePage`·`updateConfluencePage`라서 걸리지 않는다. Claude Code 플러그인에서도 같다. naby는 판정 규칙을 Skill Hub에 맡기므로(위) 여기서 고치지 않고, 플러그인 쪽 수정(부록 A)을 따라간다. naby는 MCP 도구를 `mcp__atlassian__createConfluencePage` 철자로 넘긴다(§3.5).
+| naby 시점(§3.5) | 단계 |
+|---|---|
+| `SessionStart`(`startup`) | 입력 |
+| `UserPromptSubmit` | 맥락 |
+| `PostToolUse`, 도구가 `Write`·`Edit`·`Bash`(naby의 `write_file`·`edit_file`·`run_command`)[^matcher] | 실행 |
+| `PostToolUse`, 도구가 `^mcp__.*__(confluence_(create\|update)_page\|(create\|update)ConfluencePage)$` | 기록 |
+| `Stop` | 검수 |
+
+[^matcher]: `hooks.json`의 matcher `Write|Edit|Bash|^mcp__…$`는 식 전체가 하나의 정규식이고, 앞의 세 낱말은 앞뒤가 묶여 있지 않다. 그래서 Claude 엔진에서는 `MultiEdit`, `NotebookEdit`, `TodoWrite`도 "실행"으로 잡힌다(7.8).
+
+- 보내는 필드는 `session_id`, `team`, `repo`, `event`, `stage`, `harness_version`, `client`, `ts` 여덟 개다. 프롬프트 본문, 파일 경로, 명령은 보내지 않는다.
+- `team`은 훅 환경의 `HARNESS_TEAM`이다. naby는 열린 프로젝트의 `.claude/settings.local.json`, `.claude/settings.json` 순서로 `env.HARNESS_TEAM` 하나만 읽어 넣는다. 두 파일에 없으면 앱 환경의 `HARNESS_TEAM`을 쓰고, 그것도 없으면 넣지 않는다. 그러면 스크립트가 `unassigned`로 보낸다. 파일은 턴마다(`SessionEnd`는 그때) 세션의 프로젝트 폴더에서 읽는다. 파일이 없거나 JSON이 깨졌으면 조용히 다음 순서로 넘어가고, 파일에 쓰지는 않는다(사용자 결정, 2026-10-08). Claude Code에서 팀 저장소가 팀 코드를 정하는 자리와 같은 파일이다.
+- `repo`는 열린 프로젝트의 `git remote get-url origin`에서 `소유자/이름`만 뽑은 값이다. 리모트가 없으면 폴더 이름이다. `harness_version`은 그 턴이 고정한 패키지 폴더의 `plugin.json`에서 읽는다.
+- 서브에이전트 안의 이벤트(`agent_id`가 있는 것)는 세지 않는다. 스크립트가 걸러 낸다. 두 엔진 모두 서브에이전트의 도구 호출에 `agent_id`를 붙여 넘긴다. Claude 엔진은 SDK가 준 값을, AI-SDK 엔진은 `naby-delegate-<이름>`을 쓴다.
+- 접은 뒤의 `SessionStart`(`compact`)는 스크립트가 거른다. 이어받은 세션의 `SessionStart`(`resume`)에는 naby가 이 스크립트를 띄우지 않는다(§4.7). 둘 다 새 세션으로 세지 않는다.
+- **naby 사용분을 따로 센다.** naby는 훅을 띄울 때 `HARNESS_CLIENT=naby`를 넣고, 활성화 확인(§3.6) 요청에 `X-Harness-Client: naby` 헤더를 붙인다. Skill Hub 0.8.0부터 `metrics-emit.js`가 이 값을 `client` 필드로 보내고, 서버는 설치자·주간 활성 사용자·단계별 이벤트를 도구별로 나눠 센다(부록 A, 반영됨).
+- **집계 토큰은 활성화 응답으로 받은 값 하나만 쓴다.** 훅에는 활성화(§3.6) 응답의 `env.HARNESS_METRICS_TOKEN`을 `HARNESS_METRICS_TOKEN`으로 넣는다. 토큰이 없으면 `HARNESS_METRICS_DISABLED=1`을 넣으므로 아무것도 보내지 않는다. `~/.cache/altimedia-harness/activation.json`은 읽지 않는다.
+- 공식 OAuth MCP의 쓰기 도구는 "기록"으로 잡힌다. naby는 MCP 도구 이름을 `mcp__atlassian__createConfluencePage` 꼴로 넘기고(§3.5), 0.8.0의 판정 규칙은 이 꼴과 플러그인 쪽 이름을 모두 잡는다.
 
 ### 3.8 Atlassian은 OAuth 하나로 간다
 
@@ -318,6 +334,9 @@ task·pdoc·ctx는 Skill Hub에 개별 스킬로도 올라와 있다. 기존 사
 
 - 다시 시작한 뒤 이어지는 세션에는 `SessionStart`를 `source: "resume"`으로 한 번 보낸다. 집계는 새 세션으로 세지 않는다.
 - 패키지 교체는 턴 사이에만 일어난다. 턴은 시작할 때의 패키지 경로를 고정해 쓴다. 직전 버전 폴더를 하나 남기므로(§3.1), 교체 직후에도 이미 시작한 턴과 훅은 옛 경로에서 끝까지 돈다.
+- 한 턴 동안 새 버전이 두 번 와도 같다. 턴은 고정한 폴더를 끝날 때까지 **사용 중으로 표시**하고, 훅 프로세스도 도는 동안 같은 표시를 한다. 오래된 버전을 지울 때 사용 중인 폴더는 건너뛰고, 마지막 표시가 풀릴 때 지운다. 그 뒤에는 다시 현재 버전과 직전 버전 하나만 남는다. 표시한 지 24시간이 지나면 그 표시는 무시한다. 턴이 비정상으로 끝나 표시를 풀지 못해도 폴더가 계속 남지 않게 하려는 것이다.
+- 자율 실행 도중에 새 버전이 와도 같다. 행은 실행이 끝난 뒤 다음 턴 경계에서 반영되고, 다음 턴은 새 폴더를 고정한다.
+- 세션의 `SessionEnd`는 그 세션의 마지막 턴이 쓴 폴더에서 돈다. 그 폴더가 이미 정리됐으면 현재 버전에서 돈다.
 - 이전 버전 앱으로 돌아가면 조직 행은 `naby_skill_load` 도구가 없어 주입되지 않는다(§3.2). 훅과 집계도 돌지 않는다. 사용자가 만든 행과 설정은 그대로 남는다.
 
 ### 4.8 되돌리기
@@ -355,7 +374,7 @@ task·pdoc·ctx는 Skill Hub에 개별 스킬로도 올라와 있다. 기존 사
 | M1 | 패키지 받기·검증·풀기(§3.1), 행 반영(§3.2), 활성화(§3.6), 기존 사용자 이전(§4.1~4.3, 4.5, 4.8) | 스파이크: sha256 불일치 거부, 중단 시 이전 버전 유지, 재실행 무변화, 사용자가 끈 행 유지, 빠진 스킬 `org-withdrawn`, `spike:org-harness-migrate` 1~6·8 |
 | M2 | 필요할 때 불러오기(§3.3), 호환 계층(§3.4) | 스파이크: 목록만 예산에 들어감, `naby_skill_load` 결과에 경로 치환과 안내문, `~/.naby/org` 쓰기 거부. 실제 모델로 `/task start` 한 번 |
 | M3 | 훅 실행기(§3.5), Atlassian OAuth 프리셋(§3.8), 인증 차단·의존성 점검(§3.6), API 토큰에서 OAuth로 전환(§4.4), 인증 유예(§4.6), 세션 이어받기(§4.7) | 스파이크: 시점 7개 발생, 도구 이름 변환 표 전체, OAuth 갱신 single-flight·rotation 선저장·재로그인 판정(가짜 인증 서버), 실제 계정으로 `atlassian` 연결 1회(2026-10-08 완료, 7.5), `ask`가 승인 UI로 감, 허용 목록 밖 훅 미실행, 실패한 훅이 턴을 막지 않음, `SessionEnd` 5초 상한 |
-| M4 | 집계(§3.7), 6시간 주기 갱신, 턴 도중 교체(§4.7) | `HARNESS_METRICS_DRYRUN=1`로 단계별 페이로드 확인, 두 엔진에서 같은 이벤트 수 |
+| M4 | 집계(§3.7), 6시간 주기 갱신, 턴 도중 교체(§4.7) | `HARNESS_METRICS_DRYRUN=1`로 단계별 페이로드 확인, 두 엔진에서 같은 이벤트 수. `spike:org-harness-metrics`·`spike:org-harness-recheck`와 셸의 `orgHarnessRecheck.test.ts`(7.7) |
 
 엔진 턴 루프를 건드리므로 각 단계에서 `npm run spike:autonomy`와 `npm run spike:02`를 먼저 돌린다. 스파이크와 셸 테스트는 `NABY_DB_PATH`·`NABY_HOME`을 임시 경로로 둔다. 실제 `~/.naby`에 조직 패키지를 풀지 않는다.
 
@@ -363,22 +382,21 @@ task·pdoc·ctx는 Skill Hub에 개별 스킬로도 올라와 있다. 기존 사
 
 ## 6. 미결정
 
-- **Skill Hub 쪽 변경 일정.** 부록 A의 요청이 반영되기 전까지 naby 사용분은 Claude Code 사용분과 합쳐 잡히고, "기록" 단계는 잡히지 않는다.
 - **다른 조직 패키지.** 마켓플레이스의 다른 플러그인도 같은 경로로 받을지. 이 문서는 altimedia-harness 하나로 한정한다.
 - **패키지 서명.** Skill Hub가 서명 키를 공개하면 sha256 대신 서명 검증으로 올린다.
 - **허용 목록 갱신 주기.** 패키지에 새 훅이 생기면 naby 릴리스 전까지 돌지 않는다. 그 사이 차이를 어떻게 알릴지.
 
-## 부록 A. Skill Hub에 요청하는 변경
+## 부록 A. Skill Hub에 요청한 변경 (반영됨)
 
-naby 쪽은 아래 변경을 기다리지 않고 먼저 동작한다. 반영되면 자동 갱신으로 따라온다.
+다섯 가지 모두 altimedia-harness 0.8.0에 반영됐다(Skill Hub 마이그레이션 038). M4에서 Skill Hub가 내놓은 0.8.1 패키지를 받아 열어 A1·A4·A5를 확인했다(7.8). A2·A3은 서버 쪽 변경이라 naby에서는 요청을 보내는 쪽(`client` 필드, `X-Harness-Client` 헤더)까지만 확인했다.
 
-| # | 대상 | 요청 | 이유 |
-|---|---|---|---|
-| A1 | `scripts/metrics-emit.js` | 환경 변수 `HARNESS_CLIENT`를 읽어 페이로드에 `client` 필드로 보낸다. 값이 없으면 `"claude-code"`. 허용 값은 `claude-code`, `naby` | naby 사용분을 따로 센다. naby는 훅을 띄울 때 `HARNESS_CLIENT=naby`를 넣는다 |
-| A2 | `POST /api/v1/harness/events` | `client` 필드를 받아 저장한다. 없으면 `claude-code`로 본다. 적용률 화면에서 client별로 나눠 볼 수 있게 한다 | A1을 받는 쪽 |
-| A3 | `GET /api/v1/harness/bootstrap` | 요청 헤더 `X-Harness-Client: naby`(없으면 `claude-code`)를 받아, 설치자·주간 활성 사용자도 client별로 센다 | naby는 하루 한 번 이 API로 키를 확인한다(§3.6) |
-| A4 | `scripts/metrics-emit.js`, `hooks/hooks.json` | "기록" 단계 판정에 공식 Atlassian MCP의 쓰기 도구를 더한다. 예: `^mcp__.*__(confluence_(create\|update)_page\|(create\|update)ConfluencePage)$`. `hooks.json`의 `PostToolUse` matcher도 같이 넓힌다 | 하네스의 atlassian MCP는 공식 OAuth MCP라 쓰기 도구가 `createConfluencePage`·`updateConfluencePage`다. 지금 규칙은 `mcp-atlassian`의 이름만 잡아서, Claude Code 플러그인에서도 "기록" 단계가 잡히지 않는다 |
-| A5 | `hooks/hooks.json`에 새 스크립트를 넣을 때 | 변경 기록(CHANGELOG)에 "새 훅 스크립트"를 따로 적는다 | naby는 허용 목록에 있는 스크립트만 돌린다(§3.5). 새 훅은 naby 릴리스에서 검토한 뒤 허용한다 |
+| # | 대상 | 요청 | 이유 | 상태 |
+|---|---|---|---|---|
+| A1 | `scripts/metrics-emit.js` | 환경 변수 `HARNESS_CLIENT`를 읽어 페이로드에 `client` 필드로 보낸다. 값이 없으면 `"claude-code"`. 허용 값은 `claude-code`, `naby` | naby 사용분을 따로 센다. naby는 훅을 띄울 때 `HARNESS_CLIENT=naby`를 넣는다 | 0.8.0 반영 |
+| A2 | `POST /api/v1/harness/events` | `client` 필드를 받아 저장한다. 없으면 `claude-code`로 본다. 적용률 화면에서 client별로 나눠 볼 수 있게 한다 | A1을 받는 쪽 | 0.8.0 반영(서버) |
+| A3 | `GET /api/v1/harness/bootstrap` | 요청 헤더 `X-Harness-Client: naby`(없으면 `claude-code`)를 받아, 설치자·주간 활성 사용자도 client별로 센다 | naby는 하루 한 번 이 API로 키를 확인한다(§3.6) | 0.8.0 반영(서버) |
+| A4 | `scripts/metrics-emit.js`, `hooks/hooks.json` | "기록" 단계 판정에 공식 Atlassian MCP의 쓰기 도구를 더한다. 예: `^mcp__.*__(confluence_(create\|update)_page\|(create\|update)ConfluencePage)$`. `hooks.json`의 `PostToolUse` matcher도 같이 넓힌다 | 하네스의 atlassian MCP는 공식 OAuth MCP라 쓰기 도구가 `createConfluencePage`·`updateConfluencePage`다. 이전 규칙은 `mcp-atlassian`의 이름만 잡아서, Claude Code 플러그인에서도 "기록" 단계가 잡히지 않았다 | 0.8.0 반영 |
+| A5 | `hooks/hooks.json`에 새 스크립트를 넣을 때 | 변경 기록(CHANGELOG)에 "새 훅 스크립트"를 따로 적는다 | naby는 허용 목록에 있는 스크립트만 돌린다(§3.5). 새 훅은 naby 릴리스에서 검토한 뒤 허용한다 | 0.8.0 반영. CHANGELOG 머리말에 규칙이 있고 0.8.0 항목은 "없음"이다 |
 
 참고로 naby가 넘기는 도구 이름은 `mcp__atlassian__createConfluencePage` 꼴이고, Claude Code 플러그인에서는 `mcp__plugin_altimedia-harness_atlassian__createConfluencePage` 꼴이다. A4의 정규식은 둘 다 잡아야 한다.
 
@@ -461,8 +479,36 @@ naby 쪽은 아래 변경을 기다리지 않고 먼저 동작한다. 반영되�
 - **셸 명령으로 `<NABY_HOME>/org/`에 쓰는 일은 막지 않는다.** 명령 줄을 해석하지 않기로 한 결정이다(사용자 결정, 2026-10-08).
 - **도구 이벤트의 `additionalContext`.** `PreToolUse`·`PostToolUse`·`Stop`·`PreCompact`가 준 맥락은 이미 보낸 프롬프트에 붙일 수 없어 훅 로그에만 남긴다. 다음 자율 단계에 넘길지는 정하지 않았다.
 - **훅 `ask` 뒤 정책 `ask`.** 같은 호출에 정책 규칙도 `ask`면 승인 창이 두 번 뜬다. 훅 것이 먼저다.
-- **Claude 엔진 실턴.** 훅이 두 엔진에서 같은 자리를 거친다는 것은 구조(공용 게이트·이벤트·압축 계약)와 `buildQueryOptions` 검사로 확인했다. 로그인한 Claude 엔진으로 훅이 도는 턴은 아직 돌리지 않았다.
+- **Claude 엔진 실턴.** 훅이 두 엔진에서 같은 자리를 거친다는 것은 구조(공용 게이트·이벤트·압축 계약)와 `buildQueryOptions` 검사로 확인했다. M4에서는 정해 둔 순서대로 응답하는 가짜 SDK로 Claude 엔진의 코드(게이트 훅, `tool_result` 변환, 서브에이전트 표시)를 실제로 거치게 해, 두 엔진의 훅 실행 수와 집계 이벤트 수가 같음을 확인했다(7.7). 로그인한 실제 CLI로 훅이 도는 턴은 아직 돌리지 않았다.
 - **Windows 패키징본.** `ELECTRON_RUN_AS_NODE`로 훅을 띄우는 경로와 `py -3`은 Windows 패키징본에서 따로 확인한다(§3.5 마지막 문단).
 - **유예의 "기존 사용자" 판정.** 차단이 처음 걸릴 때 대화가 있었는지로 본다. 새로 설치하고 Skill Hub 키를 넣기 전에 대화를 한 사용자도 유예를 받는다.
-- **M4.** 집계(§3.7)와 6시간 주기 확인을 넣는다.
+- **실서버 집계.** 실제 Skill Hub에 보낸 이벤트가 `client: naby`로 나뉘어 보이는지는 확인하지 않았다. 자동 검증은 `HARNESS_METRICS_DRYRUN=1`과 로컬 주소로만 한다. M4 개발 중 셸 테스트 첫 실행에서 가짜 키로 실서버 `bootstrap`에 GET 몇 건(401, 쓰기 없음)이 갔을 수 있고, 지금은 테스트가 요청을 막은 뒤 키를 저장한다.
 - **M2 증거 중 남은 것.** §5의 "실제 모델로 `/task start` 한 번"은 아직 하지 않았다. 같은 경로(목록, 미리 불러오기, 도구 목록)는 가짜 모델로 셸 테스트가 확인한다.
+
+### 7.7 M4
+
+아래를 넣었다. `spike:org-harness-metrics`(41개), `spike:org-harness-recheck`(24개)와 셸의 `orgHarnessRecheck.test.ts`(5개)가 확인한다. 설계 본문(§3.1, §3.6, §3.7, §4.7)에 옮긴 내용은 여기 다시 적지 않고, 구현에서 정한 세부만 남긴다.
+
+**집계(§3.7).** 단계를 판정하는 코드는 naby에 없다. 패키지의 `metrics-emit.js`가 M3 실행기로 돈다. M4에서 바꾼 것은 넷이다.
+
+- 스파이크용 시험 패키지의 `metrics-emit.js`를 0.8.1 원문으로 바꿨다. 앞에 시험 패키지 전용 머리말만 붙였고, 스파이크가 머리말 아래를 원문의 sha256과 대조한다. 머리말은 `HARNESS_METRICS_DRYRUN=1`도 `HARNESS_METRICS_URL`도 없으면 바로 끝낸다. 시험 패키지가 어떤 토큰을 받아도 실서버로 보내지 않게 하려는 것이다. `hooks.json`과 `plugin.json`도 0.8.1의 파일이다.
+- 훅 기록에 훅마다 표준 오류 출력의 앞 4KB를 메모리에만 남긴다. 활동 로그에는 쓰지 않는다. DRYRUN 페이로드를 확인할 때와 훅이 실패한 까닭을 볼 때 쓴다.
+- AI-SDK 엔진의 `naby_delegate` 중첩 턴 안 도구 호출에도 `PostToolUse`를 `agent_id`와 함께 보낸다. 전에는 `PreToolUse`만 보냈다. 이제 서브에이전트가 쓴 파일은 두 엔진에서 같은 훅(task의 `post-artifact.py`)을 거치고, 집계에서는 두 엔진 모두 빠진다.
+- 팀 코드는 런타임 `orgProjectHarnessTeam`이 읽고, 셸이 훅 환경을 만들 때 넣는다.
+
+**6시간 확인(§3.1, §3.6).** 주기 실행은 런타임 `startOrgHarnessRecheck`이고, 셸의 `ensureOrgHarnessSyncStarted`가 앱 시작 확인과 함께 한 번 시작한다. 매번 앱 시작 확인과 같은 `syncOrgHarnessNow`를 부르므로 "지금 확인"과 겹치면 그 결과를 같이 받는다. 실행 중인 턴이 있으면 행은 반영하지 않고 다음 턴 경계로 미룬다. 회차마다 `orgHarnessRecheckDue`로 건너뛸지 정한다. 끈 상태(`NABY_ORG_HARNESS=0`, 설정 토글)와 `NABY_ORG_HARNESS_SYNC=0`이면 건너뛴다. 키가 없거나 거부된 상태는 건너뛰지 않는다. 키가 없으면 네트워크 요청 없이 행만 맞추고, 거부된 키는 날짜가 바뀌면 다시 확인한다.
+
+**턴 도중 교체(§4.7, §4.9의 7번).** 사용 중 표시는 런타임 `leaseOrgPackageDir`이 관리한다. 표시 목록은 프로세스에 하나만 있도록 `globalThis`에 둔다. Next 서버는 런타임을 따로 묶어 넣으므로, 턴을 고정한 코드와 동기화를 돌린 코드가 서로 다른 사본이어도 같은 목록을 봐야 한다. 턴은 `pinOrgHarnessTurn`에서 표시하고, 셸이 실행의 `finally`에서 `Stop`을 띄운 다음 `release()`로 푼다. 훅 실행기는 한 번에 띄운 훅 프로세스가 모두 끝날 때까지 표시한다. 그래서 `Stop`의 `metrics-emit.js`처럼 턴보다 오래 도는 훅도 옛 폴더에서 끝난다. 세션의 다음 턴이 새 버전을 쓰면 `touchOrgSession`이 그 세션의 `SessionEnd` 폴더를 새 폴더로 바꾼다.
+
+**검증용 옵션.** `ClaudeAgentSdkEngine`의 `sdk` 생성자 옵션과 셸의 `NabyEngineDeps.devClaudeEngine`으로 가짜 SDK(`fixtures/fake-agent-sdk.ts`)를 단 Claude 엔진 턴을 돌린다. 제품 경로에서는 쓰지 않는다.
+
+**확인한 것.** 같은 순서의 턴(명령 실행, 쓰기, 고치기, `createConfluencePage`, `updateConfluencePage`, `getConfluencePage`)을 두 엔진에 돌리면 페이로드가 같다. 입력 1, 맥락 1, 실행 3, 기록 2, 검수 1이다. 훅 실행 수도 이벤트·스크립트별로 같다. 서브에이전트가 일한 턴과 다시 시작한 뒤 이어받은 턴도 두 엔진이 같다(맥락 1, 검수 1). 로컬 주소로 실제로 보내 보면 bearer는 활성화 응답의 토큰이고, 토큰을 지우면 두 엔진 모두 아무것도 보내지 않는다. 프로젝트의 `.claude/settings.local.json`에 둔 팀 코드는 두 엔진의 모든 페이로드에 들어간다. 한 턴 동안 새 버전이 두 번 와도 그 턴의 훅은 모두 옛 폴더(`harness_version` 0.8.1)에서 돌고, 턴과 마지막 훅이 끝나면 옛 폴더가 지워지며, 다음 턴은 새 버전으로 돈다.
+
+### 7.8 M4에서 확인한 사실
+
+- **0.8.1의 `metrics-emit.js`(2026-10-08, Skill Hub에서 받아 확인).** 페이로드는 여덟 필드다(`client` 추가). `HARNESS_CLIENT`는 `claude-code`·`naby`만 받고, 그 밖의 값이면 `claude-code`로 보낸다. 스크립트는 `HARNESS_METRICS_DISABLED=1`을 가장 먼저 본다. `HARNESS_METRICS_DRYRUN=1`은 토큰이 없어도 페이로드를 찍지만, naby는 토큰이 없으면 `DISABLED=1`을 넣으므로 그때는 DRYRUN도 아무것도 찍지 않는다.
+- **`team`의 형식.** 스크립트는 `HARNESS_TEAM`을 소문자로 바꾸고, 케밥 표기(`a-z0-9`와 `-`, 64자 이하)가 아니면 `unassigned`로 보낸다. naby는 값을 고치지 않고 넘긴다.
+- **`harness_version`으로 훅이 돈 폴더를 알 수 있다.** 스크립트가 `CLAUDE_PLUGIN_ROOT`의 `plugin.json`에서 읽기 때문이다. 스파이크는 이 값으로 턴 도중 교체 뒤에도 훅이 옛 폴더에서 돌았음을 확인한다.
+- **`PostToolUse` matcher는 식 전체가 정규식이다.** `Write|Edit|Bash|^mcp__…$`에서 앞의 세 낱말은 앞뒤가 묶여 있지 않아 `MultiEdit`, `NotebookEdit`, `TodoWrite`에도 걸리고 "실행"으로 잡힌다. Claude Code에서도 같다. naby에서는 이 도구들이 Claude 엔진에만 있으므로, 같은 일을 해도 실제로는 Claude 엔진 쪽 "실행"이 더 많이 잡힐 수 있다.
+- **0.8.1의 `hooks.json`은 0.7.1과 `PostToolUse` 집계 matcher 하나만 다르다.** 패키지에는 `scripts/mcp-auth.js`, `scripts/remind.js`, `scripts/deps.json`도 있지만 `hooks.json`이 부르지 않는다. `mcp-auth.js`는 `activate.js`·`gate.js`가 쓰고, `remind.js`는 `activate.js`가 `~/.cache`로 복사해 Claude Code 사용자 설정에 등록한다. naby는 셋 모두 실행하지 않는다. 설정 화면의 "지원하지 않는 훅"은 `hooks.json` 항목만 세므로 여기에도 나오지 않는다.
+- **시험 패키지 스크립트는 저장소 밖에서만 CommonJS로 돈다.** naby 저장소의 `package.json`이 `"type": "module"`이라 저장소 안에서 띄우면 ES 모듈로 읽힌다. 스파이크는 임시 폴더에 풀거나 복사해서 쓴다. M3의 대역 스크립트도 같았다.

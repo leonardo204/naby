@@ -86,7 +86,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|Bash|mcp__.*__confluence_(create|update)_page",
+        "matcher": "Write|Edit|Bash|^mcp__.*__(confluence_(create|update)_page|(create|update)ConfluencePage)$",
         "hooks": [
           {
             "type": "command",
