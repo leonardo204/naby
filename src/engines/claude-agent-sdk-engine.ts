@@ -375,6 +375,70 @@ export const SESSION_STATE_EVENTS_ENV = 'CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS';
 export const INPUT_IDLE_FALLBACK_MS = 30_000;
 
 /**
+ * `base` with `extra` applied: a string value sets the name, an `undefined` value
+ * deletes it. A copy — `base` (often `process.env` itself) is never mutated. With
+ * nothing to apply, `base` is returned as is, so a turn without extra env passes
+ * exactly what it passed before.
+ */
+function withExtraEnv(
+  base: NodeJS.ProcessEnv,
+  extra: Record<string, string | undefined> | undefined,
+): NodeJS.ProcessEnv {
+  if (!extra || Object.keys(extra).length === 0) return base;
+  const out: NodeJS.ProcessEnv = { ...base };
+  for (const [k, v] of Object.entries(extra)) {
+    if (v === undefined) delete out[k];
+    else out[k] = v;
+  }
+  return out;
+}
+
+/** Placeholder written over a secret value in anything that is logged. */
+export const REDACTED = '[redacted]';
+
+/**
+ * `text` with every value of `extraEnv` that is long enough to be a secret
+ * replaced by `[redacted]`. Used on what the engine logs or reports when a turn
+ * fails (the error message and the CLI's stderr), because the CLI process now
+ * carries the cic token (org-harness-sync §7.5) and a crash dump or a failing
+ * command could echo it. Short values (`naby`, `1`) are left alone — replacing
+ * them would shred ordinary words.
+ */
+export function redactExtraEnv(text: string, extraEnv: Record<string, string | undefined> | undefined): string {
+  if (!extraEnv) return text;
+  let out = text;
+  const secrets = Object.values(extraEnv)
+    .filter((v): v is string => typeof v === 'string' && v.length >= 8)
+    .sort((a, b) => b.length - a.length);
+  for (const v of secrets) out = out.split(v).join(REDACTED);
+  return out;
+}
+
+/**
+ * A copy of query options that is safe to print: `env` keeps its names but
+ * every value is `[redacted]`, and functions and the MCP server instance are
+ * named rather than dumped. Anything that ever logs or dumps the options for
+ * debugging must go through this — the env holds the cic token on an org turn.
+ */
+export function queryOptionsForLog(opts: QueryOptions): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(opts as Record<string, unknown>)) {
+    if (k === 'env' && v && typeof v === 'object') {
+      out.env = Object.fromEntries(Object.keys(v as Record<string, unknown>).map((n) => [n, REDACTED]));
+    } else if (typeof v === 'function') {
+      out[k] = '[function]';
+    } else if (k === 'mcpServers' && v && typeof v === 'object') {
+      out[k] = Object.keys(v as Record<string, unknown>);
+    } else if (k === 'abortController' || k === 'hooks') {
+      out[k] = `[${k}]`;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
  * The options object handed to `query()` — built HERE, as a pure function, and
  * exported.
  *
@@ -415,14 +479,23 @@ export function buildQueryOptions(args: {
    *  than a read of `process.env` so the substitution rule below is assertable
    *  without mutating the process running the assertion. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The turn's extra process env (`EngineRunInput.backendEnv`, already read once
+   * by `run`): the org harness env of §3.4 that the SDK's `Bash` can only get
+   * through the CLI process (org-harness-sync §7.5). A string sets a name, an
+   * `undefined` removes it. Applied to the inherited env BEFORE the account rule,
+   * so it can never move `CLAUDE_CONFIG_DIR`, and before the session-state flag.
+   */
+  extraEnv?: Record<string, string | undefined>;
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
+  const inherited = withExtraEnv(args.env ?? process.env, args.extraEnv);
   // When no account is chosen (or the id resolves to nothing — no naby home was
   // named, the id is not one we minted), the child gets the inherited environment
   // unchanged except for the one flag below. With an account it gets that
   // account's namespace spread over the inherited environment.
   const accountEnv = args.accountId
-    ? claudeAccountEnvFor(args.accountId, args.env ?? process.env)
+    ? claudeAccountEnvFor(args.accountId, inherited)
     : undefined;
   return {
     // The SDK REPLACES rather than merges this object (sdk.d.ts) — a bare
@@ -434,7 +507,7 @@ export function buildQueryOptions(args: {
     // the session goes idle (see `buildAgentPrompt`), and `idle` — "the
     // background-agent loop has exited" — is only emitted under this flag.
     env: {
-      ...(accountEnv ?? args.env ?? process.env),
+      ...(accountEnv ?? inherited),
       [SESSION_STATE_EVENTS_ENV]: '1',
     },
     // NOTE: `tools` is deliberately NOT set. Setting `tools: []` stripped ALL
@@ -2044,6 +2117,17 @@ export class ClaudeAgentSdkEngine implements Engine {
     if (input.signal.aborted) closeInput();
     else input.signal.addEventListener('abort', closeInput, { once: true });
 
+    // THE TURN'S EXTRA PROCESS ENV (org-harness-sync §7.5), read ONCE, here, at
+    // turn start: the org harness env the SDK's own `Bash` can only get through
+    // the CLI process. Held only for this run (and only to redact the failure
+    // log below); never stored, never logged. A reader that throws adds nothing.
+    let extraEnv: Record<string, string | undefined> | undefined;
+    try {
+      extraEnv = input.backendEnv?.() ?? undefined;
+    } catch {
+      extraEnv = undefined;
+    }
+
     const q = query({
       prompt: buildAgentPrompt(input.messages, inputReleased),
       // Built by the exported pure function above, so the EXACT object this
@@ -2057,6 +2141,7 @@ export class ClaudeAgentSdkEngine implements Engine {
         // Absent for every single-account install, which is what keeps this
         // change invisible there (see the note on `buildQueryOptions`).
         ...(this.opts.accountId ? { accountId: this.opts.accountId } : {}),
+        ...(extraEnv ? { extraEnv } : {}),
         onStderr: (data: string) => {
           diagnostics.stderr.push(data);
           if (data.includes(SHADOW_WARNING)) diagnostics.shadowWarningSeen = true;
@@ -2341,14 +2426,17 @@ export class ClaudeAgentSdkEngine implements Engine {
         // bubble that appeared and vanished. Diagnosing it meant driving the
         // packaged app's SDK by hand from outside. The buffer is the best
         // evidence there is about a spawn failure, so it goes to the log.
-        const tail = diagnostics.stderr.join('').trim().slice(-2000);
-        console.error(
-          `[engine:claude-agent-sdk] turn failed: ${e instanceof Error ? e.message : String(e)}`,
-        );
+        //
+        // Both are REDACTED against this turn's extra env first: the CLI process
+        // carries the cic token on an org turn, and neither the log nor the error
+        // the user sees may repeat it (org-harness-sync §7.5).
+        const tail = redactExtraEnv(diagnostics.stderr.join(''), extraEnv).trim().slice(-2000);
+        const message = redactExtraEnv(e instanceof Error ? e.message : String(e), extraEnv);
+        console.error(`[engine:claude-agent-sdk] turn failed: ${message}`);
         if (tail) console.error(`[engine:claude-agent-sdk] sdk stderr:\n${tail}`);
         channel.push({
           kind: 'error',
-          message: e instanceof Error ? e.message : String(e),
+          message,
           code: 'ENGINE_THREW',
         });
       } finally {

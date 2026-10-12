@@ -71,6 +71,9 @@ export type RunTurnOptions = {
   /** The engine's compaction hook point (org-harness-sync §3.5), passed through
    *  to `EngineRunInput.compaction` unchanged. Absent = no change. */
   compaction?: CompactionPort;
+  /** Extra env for the engine's backend process (org-harness-sync §7.5), passed
+   *  through to `EngineRunInput.backendEnv` unchanged. Absent = no change. */
+  backendEnv?: () => Record<string, string | undefined> | undefined;
 
   // -- the naby layer (P3-M14a, specs/naby-voice-layer.md §4.1, §8) ----------
   //
@@ -638,6 +641,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       gate,
       executors,
       ...(opts.compaction ? { compaction: opts.compaction } : {}),
+      ...(opts.backendEnv ? { backendEnv: opts.backendEnv } : {}),
       // -- ROLLING COMPACTION'S STORAGE (session-context-management §2.3) ----
       //
       // The engine that builds its own payload (AI-SDK) needs somewhere to keep

@@ -104,6 +104,11 @@ export function resolvePolicyEffect(
  *
  * The refusal NAMES THE REPLACEMENT. A bare denial gets retried and then
  * abandoned; a denial that says which tool to use instead is followed.
+ *
+ * A CAPABILITY REFUSAL, NOT A SAFETY ONE (`refusal.ts`). Nothing about the call
+ * is unsafe; the path simply cannot report back. It must not become a growth
+ * `tripwire` — the first real ledger had 34 of them and nothing else, holding a
+ * butterfly-by-accuracy persona at pupa.
  */
 export function backgroundBashRefusal(call: ToolCall): GateDecision | undefined {
   if (normalizeToolName(call.toolName) !== 'Bash') return undefined;
@@ -112,6 +117,7 @@ export function backgroundBashRefusal(call: ToolCall): GateDecision | undefined 
   if ((input as { run_in_background?: unknown }).run_in_background !== true) return undefined;
   return {
     behavior: 'deny',
+    refusal: 'capability',
     reason:
       'Backgrounding through Bash is not available: its progress and completion events stop when ' +
       'this turn ends, so the job would run on with nobody able to report it. Start it with ' +
@@ -153,6 +159,10 @@ export const PATH_WRITING_TOOLS: Readonly<Record<string, readonly string[]>> = {
  * Relative paths resolve against the turn's project directory — where both
  * engines resolve them. `~/` is expanded, so the obvious spelling is not a way
  * around it. Case is folded on case-insensitive file systems.
+ *
+ * A SAFETY REFUSAL (no `refusal` field ⇒ safety, `refusal.ts`). The write is
+ * perfectly possible; it is refused because it would tamper with a package
+ * verified by sha256. That is exactly what a tripwire is for.
  */
 export function protectedWriteRefusal(
   call: ToolCall,
@@ -210,6 +220,7 @@ export function realPolicy(deps: {
     const effect = resolvePolicyEffect(deps.rules, name);
     if (effect === 'allow') return { behavior: 'allow' };
     if (effect === 'deny') {
+      // Safety (unclassified ⇒ safety): the user said this tool must not run.
       return { behavior: 'deny', reason: `blocked by your policy rule for '${name}'` };
     }
     if (effect === 'ask' && deps.requestApproval) {

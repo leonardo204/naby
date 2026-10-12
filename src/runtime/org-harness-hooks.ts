@@ -23,7 +23,8 @@
 //   unparseable output is logged and ignored. The only things a hook can change
 //   are the ones the spec lists: extra system context, and a PreToolUse
 //   `ask`/`deny` (a hook can tighten the gate, never loosen it — `allow` is no
-//   opinion).
+//   opinion) with an optional `updatedInput` that the policy gate then judges
+//   in place of the original (approval-merge.ts).
 //
 //   NO NODE.JS NEEDED. `node` is the app's own executable started with
 //   `ELECTRON_RUN_AS_NODE=1` (`process.execPath` — Electron's binary in the app,
@@ -344,6 +345,49 @@ export function toClaudeToolCall(
   return { tool_name: toolName, tool_input: input ?? {} };
 }
 
+/**
+ * A hook's `updatedInput` (Claude Code's spelling) back as naby's input for
+ * `toolName` — the inverse of `ORG_HOOK_TOOL_MAP` for the four naby tools it
+ * covers. Only the fields the hook sent override the original call; the rest
+ * of the original input stays. Every other tool (the Agent SDK's built-ins, MCP
+ * tools) already spoke Claude Code's spelling, so the hook's object IS the input.
+ */
+export function fromClaudeToolInput(
+  toolName: string,
+  original: unknown,
+  updated: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!ORG_HOOK_TOOL_MAP[toolName]) return updated;
+  const out: Record<string, unknown> =
+    original && typeof original === 'object' ? { ...(original as Record<string, unknown>) } : {};
+  const take = (from: string, to: string): void => {
+    if (from in updated) out[to] = updated[from];
+  };
+  switch (toolName) {
+    case 'run_command':
+      take('command', 'command');
+      // naby's run_command reads either key; keep whichever the call used.
+      if (typeof updated.timeout === 'number') out['timeout' in out ? 'timeout' : 'timeoutMs'] = updated.timeout;
+      break;
+    case 'write_file':
+      take('file_path', 'path');
+      take('content', 'content');
+      break;
+    case 'edit_file':
+      take('file_path', 'path');
+      take('old_string', 'oldString');
+      take('new_string', 'newString');
+      take('replace_all', 'replaceAll');
+      break;
+    case 'read_file':
+      take('file_path', 'path');
+      take('offset', 'offset');
+      take('limit', 'limit');
+      break;
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Input and output
 // ---------------------------------------------------------------------------
@@ -425,11 +469,37 @@ function matcherTarget(call: OrgHookCall, input: Record<string, unknown>): strin
   }
 }
 
-export type OrgHookDecision = { behavior: 'ask' | 'deny' | 'allow'; reason?: string; script: string };
+export type OrgHookDecision = {
+  behavior: 'ask' | 'deny' | 'allow';
+  reason?: string;
+  script: string;
+  /** The hook as a person would name it (`orgHookLabel`): `task/pre-commit.py`
+   *  rather than the `run-skill-hook.js` launcher. For the approval prompt. */
+  label?: string;
+  /** `hookSpecificOutput.updatedInput` with an `ask` or `allow` — the input the
+   *  hook wants the call to run with, in CLAUDE CODE'S spelling (the hook saw
+   *  `Bash`/`Write`/…). `fromClaudeToolInput` turns it back into naby's input.
+   *  Never set on a `deny`: nothing runs, so there is nothing to rewrite. */
+  updatedInput?: Record<string, unknown>;
+};
+
+/**
+ * The name to show for a hook. A skill hook runs behind the package's launcher
+ * (`node run-skill-hook.js <skill> <hook file> [--flags]`), whose own name says
+ * nothing; the skill and the hook file do. Anything else is its script name.
+ */
+export function orgHookLabel(entry: Pick<OrgHookEntry, 'script' | 'args'>): string {
+  if (entry.script !== 'run-skill-hook.js') return entry.script;
+  const at = entry.args.findIndex((a) => a.endsWith('run-skill-hook.js'));
+  const rest = entry.args.slice(at + 1).filter((a) => !a.startsWith('-'));
+  const skill = rest[0];
+  const file = rest[1]?.split(/[\\/]/).pop();
+  return skill && file ? `${skill}/${file}` : entry.script;
+}
 
 export type OrgHookOutput = {
   additionalContext?: string;
-  decision?: { behavior: 'ask' | 'deny' | 'allow'; reason?: string };
+  decision?: { behavior: 'ask' | 'deny' | 'allow'; reason?: string; updatedInput?: Record<string, unknown> };
 };
 
 /** Parse one hook's stdout (§3.5 "출력 처리"). Pure. */
@@ -464,7 +534,14 @@ export function parseOrgHookOutput(event: OrgHookEvent, stdout: string): OrgHook
           ? json.reason
           : undefined;
     if (pd === 'ask' || pd === 'deny' || pd === 'allow') {
-      out.decision = { behavior: pd, ...(reason ? { reason } : {}) };
+      // Claude Code applies `updatedInput` with `allow` (silently) and `ask` (the
+      // prompt shows the rewrite). A plain object only; anything else is noise.
+      const ui = hso?.updatedInput;
+      const updatedInput =
+        pd !== 'deny' && ui && typeof ui === 'object' && !Array.isArray(ui)
+          ? (ui as Record<string, unknown>)
+          : undefined;
+      out.decision = { behavior: pd, ...(reason ? { reason } : {}), ...(updatedInput ? { updatedInput } : {}) };
     } else if (json.decision === 'block') {
       // The older top-level spelling.
       out.decision = { behavior: 'deny', ...(reason ? { reason } : {}) };
@@ -934,8 +1011,19 @@ export function createOrgHookRunner(opts: OrgHookRunnerOptions): OrgHookRunner {
         recordHook({ at: now(), event: call.event, script: e.script, outcome: 'ok', ms: r.ms, ...tag(r) });
         const out = parseOrgHookOutput(call.event, r.stdout);
         if (out.additionalContext) result.additionalContext.push(out.additionalContext);
-        if (out.decision && (!decision || rank[out.decision.behavior] > rank[decision.behavior])) {
-          decision = { ...out.decision, script: e.script };
+        // The strongest opinion wins. On a tie, a hook that REWRITES the input
+        // beats one that does not, so a rewrite is not lost to a plain `allow`
+        // that happened to finish first. Two rewrites of one call: the first
+        // to finish wins (Claude Code leaves that order undefined too).
+        if (
+          out.decision &&
+          (!decision ||
+            rank[out.decision.behavior] > rank[decision.behavior] ||
+            (rank[out.decision.behavior] === rank[decision.behavior] &&
+              out.decision.updatedInput !== undefined &&
+              decision.updatedInput === undefined))
+        ) {
+          decision = { ...out.decision, script: e.script, label: orgHookLabel(e) };
         }
       });
       const quiet = settle.catch(() => {});

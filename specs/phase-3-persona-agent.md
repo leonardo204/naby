@@ -2,11 +2,11 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.12.1
+version: 0.12.5
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
-related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-3-fast-evolution, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts]
-updated: 2026-08-04
+related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-3-fast-evolution, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts, settings-ia-reorg]
+updated: 2026-10-12
 ---
 
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
@@ -69,19 +69,20 @@ Agent {
   - ⚠️ **2026-08-03 개정(§8.2)**: 섹션 이름은 **'나비'/'Naby'**이고, **추가(생성) UI는 없다**. 편집은 가져온 커스텀 에이전트에만 남는다.
 - **하네스** 섹션에 **커맨드·스킬·서브에이전트 서브탭을 합친다.** 지금 따로 있는 "커맨드" 섹션을 흡수한다. 스킬은 이미 하네스에 속한다.
 - 정리된 nav: theme · language · provider · **Agents(페르소나+메모리)** · **Harness(command/skill/subagent)** · Permissions · about.
+  - ⚠️ **개정([`settings-ia-reorg`](settings-ia-reorg.md))**: 메모리는 나비 탭 아래에 있지 않고 독립한 **기억** 탭으로 옮겼다. 텔레그램은 나비 탭에서 **연결** 탭으로 갔다. 지금 nav는 일반 · AI 프로바이더 · 연결 · 나비 · 기억 · 하네스 · 권한 · 정보 8개다.
 
 ## 7. 마일스톤 (Phase 3)
 
 - **P3-M1** ✅ **구현 완료(2026-07-25, 커밋 대기)** — 데이터 모델(`agents` 스토어), built-in 페르소나 시드, Settings "에이전트" 섹션, 메모리 이동, 커맨드를 하네스로 흡수. 구조만 재편하고 실행은 없다.
   - 런타임: `store.ts`에 Agent/AgentInput/AgentKind/AgentEscalation/AgentAutonomy와 `listAgents/getAgent/getAgentByName/putAgent/removeAgent`를 두 드라이버 모두에 넣었다. `agents.ts`(BUILTIN_PERSONA_ID/SEED/seedBuiltinPersona)에서 페르소나 삭제 금지를 store가 강제한다. **(2026-07-30 개정: 편집 금지도 store가 강제하고, 시드가 기본값을 되돌린다 — §4·§8.1.)** runtime-entry로 내보내고, `spike-agents`가 30체크 × 2드라이버와 재오픈 시 중복 없음을 PASS로 확인했다.
   - 셸: `getStore()` 합성 루트에 `seedBuiltinPersona`를 멱등으로 연결했다. `api/naby.ts`에 `agent.list/put/remove` 액션, `NabyAgentManager.tsx`(신규), Settings `agents` 섹션(메모리 이동)과 `harness` 섹션(커맨드 흡수), i18n `agentManager.*`(en/ko)를 추가했다.
-  - 검증: 타입체크 clean(두 트리, 베이스라인 노이즈만), `build:app` exit 0. 실서버를 띄우고 `/api/naby`로 agent.list 시드 확인, put, 페르소나 삭제 거부, 중복 이름 거부를 모두 통과했다. **미검증: Settings UI가 실제로 어떻게 보이는지(라이브 창이 필요하다).**
+  - 검증: 타입체크 clean(두 트리, 베이스라인 노이즈만), `build:app` exit 0. 실서버를 띄우고 `/api/naby`로 agent.list 시드 확인, put, 페르소나 삭제 거부, 중복 이름 거부를 모두 통과했다. ~~미검증: Settings UI가 실제로 어떻게 보이는지(라이브 창이 필요하다).~~ → **2026-10-12 검증 완료(일부는 대체됨).** 섹션 이름은 M11에서 '나비'로 바뀌었고 추가 버튼도 그때 없어졌다. 메모리와 텔레그램은 설정 IA 재편(`settings-ia-reorg`)에서 '기억'·'연결' 탭으로 나갔다. 그래서 지금 검증할 대상은 나비 탭(내장 `@naby` 행과 가져온 커스텀 행)과, 커맨드를 흡수한 하네스 탭이다. prod 서버(`node server.mjs`, 임시 HOME·NABY_HOME·NABY_DB_PATH·COCKPIT_HOME, 텔레그램 꺼짐)에 사이드카로 에이전트 하나를 가져온 뒤, 오프스크린 Electron으로 창 안 페이지만 찍었다. 라이트·다크, 한국어·영어를 모두 찍었다. 배치는 정상이었고 결함 셋을 고쳤다. ① **편집하고 저장하면 가져온 에이전트의 `toolRefs`가 지워졌다.** 편집기에 그 필드가 없는데 `agent.put`은 행을 통째로 바꾸므로, 아무것도 고치지 않고 저장만 해도 도구 제한이 풀렸다. 이제 갱신 요청에 `toolRefs`가 없으면 저장된 목록을 그대로 둔다. 편집기에는 그 목록을 읽기 전용으로 보여 준다(`agentManager.toolRefs`). ② **빠른 성장 세션 버튼이 커스텀 행에도 떴다.** 이 세션은 에이전트를 싣지 않고 엔진은 페르소나 턴에서만 진행하므로, 커스텀 행에서 누르면 나비 인터뷰가 열리고 그 행은 아무것도 배우지 못했다. 이제 페르소나 행에만 띄운다(`GrowthPanel`의 `fastGrowth`). ③ **한국어 화면에 페르소나 설명이 영어로 나왔다.** 시드 문장을 그대로 읽었기 때문이다. 페르소나 행은 이제 `agentManager.personaDescription`을 쓴다. 테스트: `naby.test.ts`에 toolRefs 보존 1건, `settingsLayout.test.ts`에 2건을 더했다.
   - 결정: 페르소나는 kind='persona' 하나뿐이고 사용자는 custom만 만든다. name은 `@` 라우팅 핸들이라 UNIQUE이고 공백을 쓸 수 없다. memoryScope는 학습 스코프이며 주입 연결은 P3-M2에서 한다. escalation은 inline으로 두고 텔레그램은 P3-M3에서 붙인다.
 - **P3-M2** ✅ **구현 완료(2026-07-25, 커밋 대기)** — `@에이전트` 라우팅. 지정한 에이전트로 턴을 실행하고(systemPrompt + 메모리 주입 + toolRefs), 메모리 자동 주입을 연결했다. M3와 M4가 이 배선을 재사용한다.
   - 런타임: `agents.ts`에 `parseAgentAddress(prompt)`를 넣었다. `@name`과 task를 분리하는 순수 파서이며 runtime-entry로 내보낸다. `spike-agents`에 파서 7체크를 더했다.
   - 셸 `naby.ts`: `parseAgentAddress` 결과를 `getAgentByName`으로 찾아 라우팅한다. 라우팅하면 (a) userText는 주소를 뗀 task, (b) system은 agent.systemPrompt + cwd 노트, (c) model은 agent.model을 먼저 쓰고, (d) **toolRefs allowlist를 게이트 가장 바깥의 deny로 강제한다**(엔진과 무관하게 걸린다). **memoryInjection을 연결해** dormant에서 active로 바꿨고, 모든 턴에 일반 주입이 걸리며 no-op 불변은 지켰다.
   - 셸 `slashCommands.ts`: **충돌 규칙**을 넣었다. `@등록에이전트명`은 하네스 `@verb` 확장을 건너뛰고 엔진 라우팅으로 넘어간다. `CommandExpansionStore`에 `getAgentByName`을 추가하고 `slashCommands.test`에 3케이스를 더했다.
-  - 검증: 타입체크 clean(두 트리), slashCommands 유닛 13/13, spike-agents(파서 7 + 스토어 전부) PASS, `build:app` exit 0, 실서버 부팅 정상. **미검증: 실제 `@` 라우팅 턴 — system을 덮어쓰는지, toolRefs deny가 걸리는지, 메모리 주입이 라이브 모델 턴에 반영되는지. 라이브 모델이 필요하다.**
+  - 검증: 타입체크 clean(두 트리), slashCommands 유닛 13/13, spike-agents(파서 7 + 스토어 전부) PASS, `build:app` exit 0, 실서버 부팅 정상. ~~미검증: 실제 `@` 라우팅 턴 — system을 덮어쓰는지, toolRefs deny가 걸리는지, 메모리 주입이 라이브 모델 턴에 반영되는지. 라이브 모델이 필요하다.~~ → **2026-10-12 검증 완료.** 세 질문은 모두 배선에 관한 것이라 라이브 모델 없이 확인할 수 있다. 신규 `npm run spike:routing`이 **18/18 PASS**다. SPIKE-02와 같은 주입 seam으로 mock 모델을 넣고 실제 엔진·게이트·실행기를 돌리며, 모델이 받은 프롬프트를 그대로 검사한다. M11(`@naby`)과 M12a(단계와 상관없이 라우팅하고 단계 계약으로 행동 범위를 좁힘)를 반영해 확인한 것은 다음과 같다. `@naby`의 시드 프롬프트가 하나뿐인 system 메시지의 맨 앞에 온다. 모델은 `@naby`를 뗀 task만 받는다. 새 설치의 알 단계 페르소나도 라우팅되며 `stage-limited` 알약이 붙는다. confirmed 기억은 라우팅 턴의 system에 들어가고 proposed 기억은 들어가지 않는다. 주소 없는 턴은 에이전트 프롬프트를 쓰지 않지만 일반 기억 주입은 받는다. `toolRefs` 밖의 도구는 게이트에서 에이전트 사유로 거부되고 실행기가 돌지 않는다. 안의 도구는 실행된다. `toolRefs`가 없는 대조군은 거부되지 않는다. 에이전트의 `model`이 리졸버에 그대로 전달된다. 가져온 에이전트(원장이 없어 알 단계)도 라우팅되며 단계 계약이 되돌릴 수 없는 도구를 막는다. `@nobody`는 라우팅되지 않고 글자 그대로 모델에 간다. 라이브 모델의 응답 품질은 이 항목의 범위가 아니다.
   - P3-M3으로 넘긴 것: autonomy(maxSteps 루프)와 텔레그램 에스컬레이션. 메모리는 지금 모든 스코프를 일반 주입하며, 에이전트 memoryScope로 좁히는 일은 P3-M4 학습에서 다듬는다.
 - **P3-M3** ✅ **완료(M3a·M3b·M3c, 2026-07-25)** — 자율 모드와 에스컬레이션. 목표 루프, M2 승인의 **텔레그램 채널**, 최종 리포트를 붙였다(M2·scheduled·telegram 재사용).
   - **결정(2026-07-25, 개정)**: 텔레그램 설정은 naby 자체(store settings)에 두고 **naby 전용 봇을 @BotFather로 따로 만든다.** dotclaude 봇과 `messenger.json`에서 **완전히 분리한다**(사용자 요청). chat_id는 `detectChatId`로 자동 감지한다(naby 봇에 메시지를 한 번 보낸 뒤 감지). 에스컬레이션은 **양방향**이다. 텔레그램 인라인 버튼이나 답장으로 원격에서 승인을 해소한다.
@@ -116,7 +117,8 @@ Agent {
     평범한 턴은 페르소나의 턴이므로 페르소나가 배우고 체크인한다. **지목은 여전히 벌어야 한다** — 게이트가 지키려던 것이 그것이다. 커스텀 에이전트에게 맡긴 턴은 그 에이전트에 귀속된다(전문가가 한 일을 페르소나가 자기 실적으로 배우면 안 된다).
   - ✅ **체크인 배선** — `naby_checkin`(런타임), 일시정지 브리지(`checkinRegistry`, M2와 같은 기법), 게이트가 쓰는 `autonomous`/`tripwire` 행, 인라인 프롬프트 UI(추천은 답한 뒤 공개). 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) §9, 계약 → [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md).
   - ✅ **설정 성장 패널** — 단계 사다리·게이지·축·작업 유형별 분해·최근 결정 목록 + 후퇴 사유를 쉬운 한국어로. 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) §9.
-  - ⬜ 남은 것: 2차 축(물음 판단 정밀도·재현율, Brier 보정).
+  - ✅ **2차 축(물음 판단 정밀도·재현율, Brier 보정)** — 계산·표시는 7월에 이미 붙어 있었고 이 줄만 갱신되지 않았다. 2026-10-12 실사용 원장으로 다시 검토해 두 가지를 고쳤다. ① 보정은 0.25 기준선만 보지 않고 판정 코드 다섯 가지(`not-measured`·`overconfident`·`underconfident`·`informative`·`flat`)를 낸다. 새 상수 없이 Wilson 구간과 기준값 p(1−p)만 쓴다. ② 물음 판단은 아무도 돌아보지 않은 자율 행동을 "잘한 침묵"으로 세지 않는다. 둘 다 **표시만 하고 단계는 바꾸지 않는다.** `spike:growth` 38/38. 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) §9.3.
+  - ✅ 사용자 결정(2026-10-12): 보정은 표시만 하고 나비 게이트에 넣지 않는다. 엔진 능력 거부는 트립와이어에서 뺀다. 상세 → [`phase-3-butterfly-trust-meter`](phase-3-butterfly-trust-meter.md) 0.9.0 §11, 분류 → [`phase-3-checkin-contracts`](phase-3-checkin-contracts.md) 0.7.x §2.1.
 - **P3-M6** ✅ **내보내기 구현 완료(2026-07-26)** — 학습된 에이전트를 Claude Code 표준 서브에이전트 `.md` + 무손실 사이드카(`.naby.json`)로 내보낸다. 상세 → [`phase-3-agent-export`](phase-3-agent-export.md).
   - `src/runtime/agent-export.ts`(순수): 무엇을 빼는지, YAML 스칼라 인용, 사이드카 형태. `npm run spike:export` **11/11**.
   - 셸 `lib/agentExport.ts`: 어느 스코프를 모으는가(user 항상, project는 cwd 있을 때, session·org 절대 아님). `api/naby.ts` `agent.export`는 **읽기 전용**이라 아무것도 쓰지 않는다.
@@ -186,3 +188,11 @@ Agent {
 
 ### 착수 순서
 **P3-M1부터 시작한다.** `agents` 스토어(store.ts와 두 드라이버) → built-in 페르소나 시드 → runtime-entry export → 셸 `/api/agents` CRUD → Settings "에이전트" 섹션(메모리 이동, 커맨드를 하네스로 흡수) → spike-agents 검증. M1부터 M4까지 각각 한 세션 분량이다.
+
+## 변경 이력
+
+- 0.12.5(2026-10-12): P3-M5의 사용자 결정 대기 항목을 결정 완료로 바꿨다(보정은 표시만, 능력 거부는 트립와이어에서 제외). `spike:growth` 수를 38/38로 고쳤다.
+- 0.12.4(2026-10-12): §6에 settings-ia-reorg 개정 표시를 달았다(메모리는 기억 탭, 텔레그램은 연결 탭). related에 `settings-ia-reorg`를 넣었다.
+- 0.12.3(2026-10-12): P3-M5 2차 축을 완료로 표시했다. 보정 판정 다섯 가지와 돌아보지 않은 자율 행동 제외를 적었다. 상세는 phase-3-butterfly-trust-meter 0.8.0 §9.3에 있다.
+- 0.12.2(2026-10-12): P3-M1·P3-M2의 미검증 항목을 닫았다. M2는 `spike:routing` 18/18로 검증했다. M1은 나비 탭을 prod 빌드에서 찍어 확인했고, 그 과정에서 찾은 결함 셋(편집 저장 시 `toolRefs` 소실, 커스텀 행의 빠른 성장 버튼, 영어로 나오는 페르소나 설명)을 고쳤다.
+- 0.12.2 이전의 변경 이력은 이 문서에 기록하지 않았다.

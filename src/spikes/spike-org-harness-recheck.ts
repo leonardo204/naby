@@ -18,8 +18,9 @@
 //   daily key  four passes six hours apart across a KST midnight call the
 //              bootstrap exactly twice (once per KST day), the marketplace four
 //              times — "once a day" holds for an app left running (§3.6)
-//   off        `NABY_ORG_HARNESS=0` and the Settings toggle off ⇒ the pass makes
-//              no request at all
+//   off        `NABY_ORG_HARNESS=0` (developer escape hatch) ⇒ the pass makes
+//              no request at all; a stored 'false' from the retired Settings
+//              toggle is ignored (the org harness is mandatory) ⇒ the pass runs
 //   failure    offline, an integrity mismatch and a broken zip each keep the
 //              current version (and its folder) exactly as it was
 //   leases     a turn pinned on v1 survives TWO flips (v2, v3): v1 stays on disk
@@ -57,6 +58,7 @@ import {
   listOrgPackageVersions,
   ORG_HARNESS_RECHECK_JITTER_MS,
   ORG_HARNESS_RECHECK_MS,
+  ORG_HARNESS_RETIRED_ENABLED_SETTING,
   ORG_HARNESS_SETTING,
   ORG_PACKAGE_LEASE_MAX_AGE_MS,
   orgHarnessRecheckDelay,
@@ -307,16 +309,25 @@ async function passChecks(): Promise<void> {
   );
   record('package: the first pass installed 0.8.1, later passes were no-ops', readCurrentOrgPackage(c.home)?.version === '0.8.1');
 
-  // Off: no request at all.
+  // Off (developer escape hatch): no request at all.
   const before = c.hub.calls.length;
   const envOff = await pass(c, { env: { NABY_ORG_HARNESS: '0' } });
-  c.store.setSetting(ORG_HARNESS_SETTING.enabled, 'false');
-  const userOff = await pass(c);
-  c.store.setSetting(ORG_HARNESS_SETTING.enabled, 'true');
   record(
-    'off: NABY_ORG_HARNESS=0 and the Settings toggle each skip the pass with zero requests',
-    envOff.skipped === 'env-off' && userOff.skipped === 'user-off' && c.hub.calls.length === before,
-    JSON.stringify({ envOff: envOff.skipped, userOff: userOff.skipped, calls: c.hub.calls.length - before }),
+    'off: NABY_ORG_HARNESS=0 skips the pass with zero requests',
+    envOff.skipped === 'env-off' && c.hub.calls.length === before,
+    JSON.stringify({ envOff: envOff.skipped, calls: c.hub.calls.length - before }),
+  );
+  // Mandatory (§4.8, 2026-10-12): a 'false' left by the retired Settings toggle
+  // does not skip anything — the pass goes out as usual.
+  c.store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, 'false');
+  const stale = await pass(c);
+  c.store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, '');
+  record(
+    'mandatory: a stored toggle "false" is ignored — the pass runs and checks the marketplace',
+    stale.skipped === undefined &&
+      c.hub.calls.slice(before).includes(MARKETPLACE) &&
+      stale.apply?.on === true,
+    JSON.stringify({ skipped: stale.skipped, calls: c.hub.calls.length - before, on: stale.apply?.on }),
   );
 
   // Failures keep the current version and its folder.

@@ -2,11 +2,11 @@
 id: phase-1-contracts
 title: Phase 1 — Interface Contracts (IPC, engine interface, provider config, storage)
 type: interface
-version: 0.4.0
+version: 0.5.0
 status: draft
 scope: Contracts between renderer and main, the engine abstraction seam and its two backends, the gate contract, the provider configuration schema, the Store interface (incl. projects and session↔project links), the re-backed browsing HTTP routes, and the on-disk storage layout for Phase 1
-related: [phase-1-shell-architecture, phase-1-desktop-shell, phase-1-test-plan, personalized-agent-desktop-app, phase-1_5-memory-contracts]
-updated: 2026-07-23
+related: [phase-1-shell-architecture, phase-1-desktop-shell, phase-1-test-plan, personalized-agent-desktop-app, phase-1_5-memory-contracts, phase-3-checkin-contracts]
+updated: 2026-10-12
 ---
 
 # Phase 1 — Interface Contracts
@@ -112,11 +112,13 @@ type EngineRunInput = {
 type Gate = (call: ToolCall) => Promise<GateDecision>;
 type GateDecision =
   | { behavior: 'allow'; input?: unknown }   // input rewrite allowed
-  | { behavior: 'deny';  reason: string };
+  | { behavior: 'deny';  reason: string; refusal?: RefusalKind };
 
 type Executor = (input: unknown, ctx: ExecCtx) => Promise<ToolOutput>;
 type ToolCall = { toolCallId: string; toolName: string; input: unknown };
 ```
+
+- **`RefusalKind`** (`'safety' | 'capability'`, absent = `safety`) is defined in [`phase-3-checkin-contracts`](../../../specs/phase-3-checkin-contracts.md) §2.1. Only the growth-ledger writer reads it; engines ignore it.
 
 - **`system` is not a message.** It travels on its own field and each engine forwards it through its provider's dedicated slot (`ai` v7's `system`/instructions option; the Agent SDK's `systemPrompt`). `ai` v7 **rejects** `role:'system'` inside `messages` outright — *"System messages are not allowed in the prompt or messages fields. Use the instructions option instead."* — so a system prompt is neither stored in the transcript nor replayed as history; it is supplied per turn.
 - **`model` is the only key-dependent field.** The engine reads the provider key (via the credential vault) solely to construct the model. `messages`, `system`, `toolSchemas`, `gate`, and `executors` are all provider-independent — the same values are passed whether the backend is `AiSdkEngine` or `ClaudeAgentSdkEngine`, and whichever provider is selected.

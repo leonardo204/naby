@@ -25,6 +25,10 @@
 //   (l) The dev engine DISALLOWS the SDK's native `AskUserQuestion`, so
 //       `naby_checkin` is the only way to ask the user — the thing that made
 //       check-ins vanish on subscription machines.
+//   (m) WHICH REFUSALS BECOME TRIPWIRES (2026-10-12). The real policy refuses a
+//       backgrounded Bash as a CAPABILITY refusal — it reaches the ledger as no
+//       row and leaves a butterfly a butterfly — while a user's deny rule is a
+//       SAFETY refusal that lands as a tripwire and blocks it.
 //
 // No store and no engine: the sink is a fake, so this runs in milliseconds.
 // (l) reads the production query options as a value; still no model, no network.
@@ -391,6 +395,63 @@ const TAKE_RECOMMENDED = (q: CheckinQuestion): CheckinAnswer => ({ chosen: q.rec
       // contains one is read exactly as before.
       classifyToolConsequence(NATIVE_ASK_USER_QUESTION_TOOL) === 'observation',
     `disallowedTools=${JSON.stringify(disallowed)}; tools left unset=${builtinsStillLive}`,
+  );
+}
+
+// -- (m) a capability refusal is not a tripwire; a safety refusal is --------
+{
+  const { realPolicy } = await import('../runtime/policy.js');
+  const { makeGate } = await import('../runtime/gate.js');
+  const { isSafetyRefusal } = await import('../runtime/refusal.js');
+  const gated = makeGate(
+    realPolicy({
+      rules: [
+        { id: 'r1', scope: 'user', scopeKey: '', toolPattern: 'mcp__mail__send', effect: 'deny', createdAt: 0, updatedAt: 0 },
+      ],
+      fallback: () => ({ behavior: 'allow' }),
+    }),
+  );
+  // The writer's rule, as `recordGateOutcome` (shell checkinTurn.ts) applies it:
+  // allowed ⇒ autonomous, refused for safety ⇒ tripwire, refused for capability
+  // ⇒ nothing. The shell's own vitest pins the writer; this pins the rule against
+  // the REAL policy's decisions and the REAL meter.
+  const ledger: CheckinRecord[] = [];
+  let at = 10_000;
+  const observe = async (toolName: string, input: unknown) => {
+    const d = await gated.gate({ toolCallId: `m${at}`, toolName, input });
+    at += 1;
+    if (!isConsequentialTool(toolName)) return d;
+    if (d.behavior === 'allow') ledger.push({ at, agentId: 'agent-under-test', kind: 'autonomous' });
+    else if (isSafetyRefusal(d.refusal))
+      ledger.push({ at, agentId: 'agent-under-test', kind: 'tripwire', reason: d.reason });
+    return d;
+  };
+  // A butterfly's worth of answered check-ins first.
+  const answered: CheckinRecord[] = Array.from({ length: 20 }, (_, i) => ({
+    at: 1_000 + i,
+    agentId: 'agent-under-test',
+    kind: 'checkin' as const,
+    hit: i < 17,
+  }));
+  const bg = await observe('Bash', { command: 'npm run deploy', run_in_background: true });
+  const afterCapability = computeGrowth([...answered, ...ledger]);
+  const rowsAfterCapability = ledger.length;
+  const mail = await observe('mcp__mail__send', { to: 'x@y.z' });
+  const afterSafety = computeGrowth([...answered, ...ledger]);
+  record(
+    '(m) a backgrounded Bash (capability) writes no row and keeps butterfly; a deny-rule refusal (safety) is a tripwire that blocks it',
+    bg.behavior === 'deny' &&
+      bg.refusal === 'capability' &&
+      rowsAfterCapability === 0 &&
+      afterCapability.stage === 'butterfly' &&
+      mail.behavior === 'deny' &&
+      mail.refusal === undefined &&
+      ledger.length === 1 &&
+      ledger[0]?.kind === 'tripwire' &&
+      afterSafety.stage === 'pupa' &&
+      afterSafety.blockedByTripwire === true,
+    `bg → ${bg.behavior}/${bg.behavior === 'deny' ? bg.refusal : '-'}, rows=${rowsAfterCapability}, stage=${afterCapability.stage}; ` +
+      `deny rule → ${mail.behavior}/${mail.behavior === 'deny' ? (mail.refusal ?? 'safety') : '-'}, rows=${ledger.length}, stage=${afterSafety.stage}`,
   );
 }
 

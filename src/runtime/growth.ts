@@ -38,6 +38,8 @@
 // UI owes the user then is an honest reason, which is what `diagnoseChange`
 // produces (as structured codes; the shell renders them in the user's language).
 
+import { isLegacyCapabilityTripwire } from './refusal.js';
+
 /** The four visible stages. Only a butterfly may be addressed with `@`. */
 export type GrowthStage = 'egg' | 'larva' | 'pupa' | 'butterfly';
 
@@ -45,7 +47,8 @@ export type GrowthStage = 'egg' | 'larva' | 'pupa' | 'butterfly';
  *
  *   checkin     — it asked before an irreversible step; `hit` is the label
  *   autonomous  — it acted without asking; this is what coverage counts
- *   tripwire    — a safety-relevant call was refused by the gate
+ *   tripwire    — a safety-relevant call was refused by the gate (a refusal
+ *                 because the thing CANNOT be done here is not one — refusal.ts)
  *
  * Shape mirrors `EvalEvent` in specs/phase-3-checkin-contracts.md, which
  * realizes the `eval_events` stream P15-03 reserved. The runtime type carries
@@ -94,7 +97,33 @@ export type CheckinRecord = {
    *  gets its own window and daily cap, and can NEVER fill `GROWTH_MIN_SAMPLE` —
    *  see `drillPool`. */
   drill?: boolean;
+  /** kind='tripwire': the refusal reason the gate gave, as recorded. Read ONLY
+   *  to recognise rows written before capability refusals stopped being
+   *  tripwires (`countedTripwires`). Mirrors `EvalEvent.reason`. */
+  reason?: string;
 };
+
+/**
+ * The tripwire rows that BLOCK BUTTERFLY: every `tripwire` row except the ones
+ * recorded for a CAPABILITY refusal before 2026-10-12 (trust-meter §4.8, §11).
+ *
+ * WHY AT COUNT TIME AND NOT A MIGRATION. Since the fix a capability refusal
+ * writes no row at all (`recordGateOutcome` reads `GateDecision.refusal`), so
+ * this filter only ever sees history. Rewriting that history would be the
+ * ledger's first after-the-fact delete (checkin-contracts §4 invariant 8 allows
+ * only two reflection-owned fields to change), and it would have to run on every
+ * install, including imported archives that never pass through a migration.
+ * Ignoring the rows where they are read leaves them on disk as the audit record
+ * of what happened, frees every existing user at the next reading, and is undone
+ * by deleting one line.
+ *
+ * The match is on the frozen wording of the known refusal
+ * (`LEGACY_CAPABILITY_TRIPWIRE_PREFIXES`), never on a guess: a row whose reason
+ * is missing or anything else still counts.
+ */
+export function countedTripwires(records: readonly CheckinRecord[]): CheckinRecord[] {
+  return records.filter((r) => r.kind === 'tripwire' && !isLegacyCapabilityTripwire(r.reason));
+}
 
 /**
  * Drop rows that were imported rather than observed on this machine.
@@ -248,6 +277,22 @@ export function wilsonLowerBound(successes: number, trials: number, z: number = 
   return Math.max(0, (center - margin) / denom);
 }
 
+/** The other end of the same Wilson interval. The meter never promotes on it —
+ *  promotion keys on the LOWER end so that growth has to be earned — but the
+ *  calibration guard needs both ends: a stated confidence outside the whole
+ *  interval is a claim the evidence cannot support at any reading. */
+export function wilsonUpperBound(successes: number, trials: number, z: number = Z_95): number {
+  if (trials <= 0) return 1;
+  const s = Math.max(0, Math.min(successes, trials));
+  const n = trials;
+  const p = s / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const center = p + z2 / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n));
+  return Math.min(1, (center + margin) / denom);
+}
+
 /** The stage a bound + sample size earns. */
 export function stageFor(lowerBound: number, trials: number): GrowthStage {
   if (trials < GROWTH_MIN_SAMPLE) return 'egg';
@@ -344,11 +389,102 @@ export function brierScore(
   return { score: total / rated.length, samples: rated.length };
 }
 
+/** What the calibration axis concludes, as a CODE the shell renders per locale.
+ *
+ *   not-measured    fewer than GROWTH_MIN_SAMPLE rated answers — the same floor
+ *                   the hit rate uses, because a Brier score over two answers is
+ *                   exactly the "3-for-3 is 100%" mistake the meter exists to avoid
+ *   overconfident   its AVERAGE claim sits above the whole Wilson interval of its
+ *                   actual hit rate: it says it is surer than it can be shown to be
+ *   underconfident  the mirror image: its average claim sits below the interval
+ *   informative     honest on average AND its per-question confidence beats the
+ *                   base-rate forecaster, so "0.9 here, 0.6 there" means something
+ *   flat            honest on average, but stating one flat number would have
+ *                   scored as well: the confidence does not yet tell easy calls
+ *                   from hard ones
+ *
+ * Order matters: a claim outside the interval is reported before anything else,
+ * because it is the one reading that says "do not take its word for it". */
+export type CalibrationVerdict =
+  | 'not-measured'
+  | 'overconfident'
+  | 'underconfident'
+  | 'informative'
+  | 'flat';
+
+/** The calibration axis in full: the Brier score plus the two numbers a person
+ *  can actually check it against (how sure it said it was, how often it was
+ *  right) and the reference it has to beat. */
+export type CalibrationReading = {
+  /** Mean squared error of the stated confidence. Same value as `brierScore`. */
+  score: number;
+  /** Rated check-ins (real, scorable, carrying a confidence). */
+  samples: number;
+  /** Mean stated confidence over those rows. */
+  meanConfidence: number;
+  /** Observed hit rate over the SAME rows (not the window's hit rate: rows
+   *  without a confidence are not part of this comparison). */
+  hitRate: number;
+  /** Brier of the base-rate forecaster — always stating `hitRate` — which is
+   *  hitRate·(1−hitRate). Never above BRIER_UNINFORMATIVE, so it is the stricter
+   *  line: an agent right 67% of the time that always says "67%" already scores
+   *  0.22, and only per-question confidence that tracks outcomes gets below it. */
+  reference: number;
+  verdict: CalibrationVerdict;
+};
+
+/**
+ * Read the calibration axis (§4.7) and say what it means.
+ *
+ * WHY NOT THE 0.25 LINE ALONE. 0.25 is what "always 50%" scores, and it is a
+ * lenient bar: on the first real ledger (323 rated check-ins, right 67.2% of the
+ * time, average claim 0.70) the Brier score was 0.214 — under 0.25, so the panel
+ * called the confidence "worth reading", while always saying "67%" would have
+ * scored 0.220. The number was honest on average and nearly uninformative per
+ * question. The verdict separates those two properties instead of folding them
+ * into one threshold.
+ *
+ * NO NEW CONSTANTS. The guard reuses the Wilson interval the hit rate already
+ * uses (z = 1.96) and the minimum sample the stage already uses; the reference is
+ * arithmetic on the observed rate. A threshold invented before any ledger existed
+ * is what §11 refuses, and this introduces none.
+ *
+ * MEASURED AND SHOWN, NEVER GATED. Nothing here feeds `stageFor`. Whether an
+ * `overconfident` verdict should hold an agent back is a product decision (§11).
+ *
+ * Returns undefined when no scorable row carried a confidence.
+ */
+export function calibrationReading(
+  records: readonly CheckinRecord[],
+): CalibrationReading | undefined {
+  const rated = scorable(withoutImported(records)).filter(
+    (r) => typeof r.confidence === 'number' && r.confidence >= 0 && r.confidence <= 1,
+  );
+  const brier = brierScore(records);
+  if (!brier || rated.length === 0) return undefined;
+  const n = rated.length;
+  const hits = rated.filter((r) => r.hit).length;
+  const meanConfidence = rated.reduce((sum, r) => sum + r.confidence!, 0) / n;
+  const hitRate = hits / n;
+  const reference = hitRate * (1 - hitRate);
+
+  let verdict: CalibrationVerdict;
+  if (n < GROWTH_MIN_SAMPLE) verdict = 'not-measured';
+  else if (meanConfidence > wilsonUpperBound(hits, n)) verdict = 'overconfident';
+  else if (meanConfidence < wilsonLowerBound(hits, n)) verdict = 'underconfident';
+  else if (brier.score < reference) verdict = 'informative';
+  else verdict = 'flat';
+
+  return { score: brier.score, samples: n, meanConfidence, hitRate, reference, verdict };
+}
+
 /** How well the agent judges WHEN to ask. */
 export type AskQuality = {
   /** Of the times it asked, how often the ask was warranted. */
   precision: number;
-  /** Of the times an ask was warranted, how often it asked. */
+  /** Of the times an ask was warranted AND observed, how often it asked. Misses
+   *  are only visible among reviewed actions, so with `unreviewedActs > 0` this
+   *  is an upper bound — an unreviewed action may hide a miss. */
   recall: number;
   /** It asked and the user chose differently — the ask caught a divergence. */
   warrantedAsks: number;
@@ -356,9 +492,13 @@ export type AskQuality = {
   unnecessaryAsks: number;
   /** It acted alone and the user had to fix it — it should have asked. */
   missedAsks: number;
-  /** It acted alone and nothing needed fixing. */
+  /** It acted alone, the action was looked back over, and nothing needed fixing. */
   correctSilences: number;
-  /** Consequential decisions this is computed over. */
+  /** It acted alone and nobody has looked back over it yet. NEITHER a correct
+   *  silence nor a miss: "unseen" and "seen, uncorrected" must not be conflated
+   *  (checkin-contracts §2, `reviewedAt`). Reported so the panel can say so. */
+  unreviewedActs: number;
+  /** Labelled decisions this is computed over: asks + reviewed actions. */
   samples: number;
 };
 
@@ -367,10 +507,29 @@ export type AskQuality = {
  * when it grades "did it stop for approval" separately from "was the answer
  * right" (§4.5). Treating every consequential action as one labelled instance:
  *
- *   asked + user diverged   → warranted   (true positive)
- *   asked + user agreed     → unnecessary (false positive)
- *   acted + user corrected  → missed      (false negative)
- *   acted + nothing fixed   → correct silence (true negative)
+ *   asked + user diverged            → warranted   (true positive)
+ *   asked + user agreed              → unnecessary (false positive)
+ *   acted + user corrected           → missed      (false negative)
+ *   acted + reviewed, nothing fixed  → correct silence (true negative)
+ *   acted + never reviewed           → unlabelled  (counted, not scored)
+ *
+ * WHAT IS NOT A LABEL HERE, and why:
+ *   - An UNREVIEWED action. Until reflection has put it before its judge nobody
+ *     has had the chance to object, so calling it a correct silence would grade
+ *     an absence of evidence as a success. On the first real ledger this was
+ *     the difference between "acted alone 1,898 times without needing a fix"
+ *     and the truth — 264 of those had been looked at. A correction implies the
+ *     action was seen, so a corrected row counts as reviewed even without the
+ *     stamp (M8a corrections predate `reviewedAt`).
+ *   - A TRIPWIRE. In principle "tried a refused call without asking" is a missed
+ *     ask, but a refusal is not a judgement the user graded: asking first would
+ *     not have changed it. (Capability refusals — an engine that cannot
+ *     background a command — used to land here too; since 2026-10-12 they are
+ *     not tripwires at all, see `countedTripwires`.) It stays the meter's hard
+ *     block (§4.8) and does not enter this ratio.
+ *   - A DRILL (below). A DEGENERATE ask, by contrast, IS counted: it was a real
+ *     interruption, and an agent padding questions should pay for it here the
+ *     same way it pays in coverage.
  *
  * NOTE THE DELIBERATE TENSION with the hit rate: an agent that is always right
  * has LOW ask precision, because every ask turns out to have been unnecessary.
@@ -390,12 +549,20 @@ export function askDecisionQuality(records: readonly CheckinRecord[]): AskQualit
     (r) => (r.kind ?? 'checkin') === 'checkin' && !r.drill && r.hit !== undefined,
   );
   const acts = rows.filter((r) => r.kind === 'autonomous');
-  if (asks.length + acts.length === 0) return undefined;
 
   const warrantedAsks = asks.filter((r) => !r.hit).length;
   const unnecessaryAsks = asks.filter((r) => r.hit).length;
   const missedAsks = acts.filter((r) => r.correctedAfter).length;
-  const correctSilences = acts.length - missedAsks;
+  const correctSilences = acts.filter(
+    (r) => !r.correctedAfter && r.reviewedAt !== undefined,
+  ).length;
+  const unreviewedActs = acts.length - missedAsks - correctSilences;
+
+  // Nothing LABELLED to score reads as absent — including a ledger of nothing but
+  // unreviewed actions, which says how often it acted (coverage already shows
+  // that) and nothing about whether it should have asked.
+  const samples = asks.length + missedAsks + correctSilences;
+  if (samples === 0) return undefined;
 
   const askedTotal = warrantedAsks + unnecessaryAsks;
   const neededTotal = warrantedAsks + missedAsks;
@@ -406,7 +573,8 @@ export function askDecisionQuality(records: readonly CheckinRecord[]): AskQualit
     unnecessaryAsks,
     missedAsks,
     correctSilences,
-    samples: asks.length + acts.length,
+    unreviewedActs,
+    samples,
   };
 }
 
@@ -492,6 +660,10 @@ export type GrowthState = {
    *  when no check-in carried one — never 0, which would look perfect. */
   brier?: number;
   brierSamples: number;
+  /** The calibration axis read out: Brier, the average claim against the actual
+   *  rate, the base-rate reference, and a verdict code. Absent exactly when
+   *  `brier` is. `brier`/`brierSamples` stay for existing readers. */
+  calibration?: CalibrationReading;
   /** How well it judges when to ask. Absent when there is nothing to score. */
   ask?: AskQuality;
 };
@@ -670,10 +842,12 @@ export function computeGrowth(
   // practice run would otherwise make its "handled without asking" share collapse
   // for having practised.
   const checkins = spanRows.filter((r) => (r.kind ?? 'checkin') === 'checkin' && !r.drill);
-  const tripwires = spanRows.filter((r) => r.kind === 'tripwire').length;
+  // Safety refusals only — a legacy capability row is history, not a block.
+  const tripwires = countedTripwires(spanRows).length;
   const decisions = autonomous.length + checkins.length;
 
   const brier = brierScore(spanRows);
+  const calibration = calibrationReading(spanRows);
   const ask = askDecisionQuality(spanRows);
 
   // A safety refusal is a HARD block, not a term in an average (§4.8).
@@ -722,6 +896,7 @@ export function computeGrowth(
     // hit rate with a lifetime calibration figure.
     ...(brier ? { brier: brier.score } : {}),
     brierSamples: brier?.samples ?? 0,
+    ...(calibration ? { calibration } : {}),
     ...(ask ? { ask } : {}),
   };
 }

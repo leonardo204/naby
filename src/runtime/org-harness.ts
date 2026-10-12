@@ -15,8 +15,8 @@
 //   * Activation: the daily `GET /api/v1/harness/bootstrap` that proves the
 //     Skill Hub key and yields the metrics token.
 //   * The two migration decisions an upgrade forces on an existing user: what to
-//     do about a same-name copy they installed earlier (§4.5), and the switch that
-//     undoes all of it (§4.8).
+//     do about a same-name copy they installed earlier (§4.5), and what an off
+//     state (no key, rejected key, the developer escape hatch) gives back (§4.8).
 //
 //   It does NOT read the MCP registry or the System MCP presets. "Which key is the
 //   skill-hub key" is the shell's question (lib/systemMcp.ts owns the presets);
@@ -36,6 +36,16 @@
 //   every entry point returns before its first write: rows and settings stay
 //   byte-identical. (With no key but org rows present — the user removed the
 //   preset — the org harness is treated as switched off.)
+//
+//   THE ORG HARNESS IS MANDATORY (§1, user decision 2026-10-12). There is no
+//   user-facing off switch. The Settings toggle of v1.40.0 and earlier wrote
+//   `harness.org.enabled`; that row is NEVER READ now, so a user who had turned
+//   it off gets the org harness back on the first turn after the update (the
+//   `applied` fingerprint changes from {on:false} to {on:true}, so the rows and
+//   the set-aside copies are reconciled again). The row is left in place rather
+//   than deleted: it is inert, and an older build reading it after a downgrade
+//   keeps that build's own behaviour. `NABY_ORG_HARNESS=0` stays as a developer
+//   and test escape hatch only — no UI exposes it.
 //
 //   NEVER BLOCK, NEVER FAIL LOUDLY (§3.1, §4.2). Network failure is an outcome,
 //   not an exception. A bad download is discarded and the previous version keeps
@@ -107,7 +117,8 @@ export const ORG_SUPERSEDED_BY = `org:${ORG_HARNESS_PACKAGE}`;
 /** Every org skill needs the loader (M2) and a shell (its scripts are Python). */
 export const ORG_SKILL_TOOL_REFS: readonly string[] = ['naby_skill_load', 'run_command'];
 
-/** Env kill switch (§4.8). `0` turns the whole org harness off. */
+/** Developer/test escape hatch (§4.8). `0` turns the whole org harness off.
+ *  Not user-facing: the org harness is mandatory and Settings has no switch. */
 export const ORG_HARNESS_ENV_SWITCH = 'NABY_ORG_HARNESS';
 
 const PACKAGE_MARKER = '.naby-package.json';
@@ -123,9 +134,12 @@ const MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
 
 // -- settings keys (all under harness.org.*, §4.1) ----------------------------
 
+/** The retired Settings toggle (v1.40.0 and earlier). Never read: the org
+ *  harness is mandatory (§4.8). Exported only so tests can plant a stale 'false'
+ *  and prove it is ignored. */
+export const ORG_HARNESS_RETIRED_ENABLED_SETTING = 'harness.org.enabled';
+
 export const ORG_HARNESS_SETTING = {
-  /** User toggle (§4.8). Absent/anything but 'false' = on. */
-  enabled: 'harness.org.enabled',
   /** JSON {keyHash, day, status, checkedAt} — the last activation answer. */
   activation: 'harness.org.activation',
   /** The bootstrap's HARNESS_METRICS_TOKEN (§3.6). Never returned by any reader. */
@@ -134,7 +148,7 @@ export const ORG_HARNESS_SETTING = {
   applied: 'harness.org.applied',
   /** JSON [{name, scope, scopeKey, itemId, copy}] — pending §4.5 notices. */
   copyNotices: 'harness.org.copyNotices',
-  /** JSON [itemId] — copies the switch re-enabled while off (§4.8). */
+  /** JSON [itemId] — copies the env escape hatch re-enabled while off (§4.8). */
   restoredCopies: 'harness.org.restoredCopies',
   /** JSON {at, outcome, version?, detail?} — the last package check. */
   lastSync: 'harness.org.lastSync',
@@ -999,7 +1013,9 @@ export async function checkOrgHarnessActivation(
 // Is the org harness on?
 // ---------------------------------------------------------------------------
 
-export type OrgHarnessOffReason = 'no-skill-hub' | 'env-off' | 'user-off' | 'unauthorized';
+/** Why the org harness is not running. There is no user-off reason: the
+ *  harness is mandatory and has no Settings switch (§4.8). */
+export type OrgHarnessOffReason = 'no-skill-hub' | 'env-off' | 'unauthorized';
 
 /** What every entry point needs from its caller. `apiKey` is the skill-hub
  *  preset's token, or undefined when no preset is configured (§4.3). */
@@ -1016,9 +1032,7 @@ export function orgHarnessOnState(
 ): { on: true } | { on: false; reason: OrgHarnessOffReason } {
   if (!ctx.apiKey) return { on: false, reason: 'no-skill-hub' };
   if ((ctx.env?.[ORG_HARNESS_ENV_SWITCH] ?? '').trim() === '0') return { on: false, reason: 'env-off' };
-  if ((store.getSetting(ORG_HARNESS_SETTING.enabled) ?? '').trim() === 'false') {
-    return { on: false, reason: 'user-off' };
-  }
+  // ORG_HARNESS_RETIRED_ENABLED_SETTING is deliberately not consulted (§4.8).
   const rec = readJsonSetting<OrgHarnessActivationRecord>(store, ORG_HARNESS_SETTING.activation);
   if (rec && rec.status === 'unauthorized' && rec.keyHash === orgHarnessKeyHash(ctx.apiKey)) {
     return { on: false, reason: 'unauthorized' };
@@ -1379,7 +1393,7 @@ export function applyOrgHarnessIfDue(store: OrgHarnessStore, ctx: OrgHarnessCont
 }
 
 // ---------------------------------------------------------------------------
-// The user's choices (§4.5, §4.8)
+// The user's choices (§4.5)
 // ---------------------------------------------------------------------------
 
 export type OrgHarnessActionResult =
@@ -1389,7 +1403,8 @@ export type OrgHarnessActionResult =
 /**
  * "Use the org version" for one skill name (§4.5): every ENABLED user/project
  * copy of that name is disabled and marked `supersededBy`. Files are not
- * touched. Turning a copy back on in Settings undoes it; so does the switch.
+ * touched. Turning a copy back on in Settings undoes it; so does the env
+ * escape hatch.
  */
 export function useOrgVersion(
   store: OrgHarnessStore,
@@ -1433,17 +1448,6 @@ export function keepUserCopy(
     ctx.userId ?? DEFAULT_USER_ID,
   );
   return { ok: true, changed: [], notices };
-}
-
-/** The Settings toggle (§4.8). Applies immediately: the action runs outside any
- *  turn of the tab that clicked it, and row writes never reach a running turn. */
-export function setOrgHarnessEnabled(
-  store: OrgHarnessStore,
-  enabled: boolean,
-  ctx: OrgHarnessContext,
-): OrgHarnessApplyResult {
-  store.setSetting(ORG_HARNESS_SETTING.enabled, enabled ? 'true' : 'false');
-  return applyOrgHarnessIfDue(store, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -1653,8 +1657,9 @@ export async function runOrgHarnessSync(
   try {
     const before = orgHarnessOnState(store, ctx);
     if (!before.on && before.reason !== 'unauthorized') {
-      // No key, or switched off: no network at all. Off means off — Skill Hub does
-      // not count a user who turned the org harness off as active today.
+      // No key, or switched off by the developer escape hatch: no network at
+      // all. Off means off — Skill Hub does not count such an install as active
+      // today.
       const a = apply();
       return { skipped: before.reason, ...(a ? { apply: a } : {}) };
     }
@@ -1719,9 +1724,9 @@ export async function runOrgHarnessSync(
 //   shell's single-flight `syncOrgHarnessNow`, shared with the boot pass and the
 //   "check now" button, so a tick that lands on a running pass joins it.
 //
-//   SKIPPABLE PER TICK. `shouldRun` is asked at every tick (the kill switch, the
-//   Settings toggle and `NABY_ORG_HARNESS_SYNC=0` can all change while the app
-//   runs). A skipped tick does no network and simply waits for the next one.
+//   SKIPPABLE PER TICK. `shouldRun` is asked at every tick (the developer
+//   escape hatches `NABY_ORG_HARNESS=0` and `NABY_ORG_HARNESS_SYNC=0` are read
+//   per tick, not once). A skipped tick does no network and simply waits for the next one.
 //
 //   NEVER BLOCKING, NEVER FAILING. A pass that throws or rejects is logged and
 //   the clock keeps going; the package on disk is whatever the last good pass
@@ -1833,9 +1838,7 @@ export type OrgHarnessState = {
   configured: boolean;
   on: boolean;
   offReason?: OrgHarnessOffReason;
-  /** The Settings toggle's own value (§4.8). */
-  enabledSetting: boolean;
-  /** `NABY_ORG_HARNESS=0` is set. */
+  /** `NABY_ORG_HARNESS=0` is set (developer escape hatch, §4.8). */
   envOff: boolean;
   /** Activation verdict for the CURRENT key: 'unknown' until checked. */
   auth: 'ok' | 'unauthorized' | 'unknown';
@@ -1884,7 +1887,6 @@ export function readOrgHarnessState(store: OrgHarnessStore, ctx: OrgHarnessConte
     configured: Boolean(ctx.apiKey),
     on: state.on,
     ...(state.on ? {} : { offReason: state.reason }),
-    enabledSetting: (store.getSetting(ORG_HARNESS_SETTING.enabled) ?? '').trim() !== 'false',
     envOff: (ctx.env?.[ORG_HARNESS_ENV_SWITCH] ?? '').trim() === '0',
     auth,
     package: pkg ? { version: pkg.version, skills: pkg.skills.map((s) => s.name) } : null,

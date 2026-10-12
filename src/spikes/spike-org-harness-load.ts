@@ -19,9 +19,11 @@
 //   load       naby_skill_load returns the §3.4 preamble, the absolute skill
 //              folder, and the body with ${CLAUDE_PLUGIN_ROOT} / ${CLAUDE_SKILL_DIR}
 //              replaced by absolute paths; unknown / disabled names refuse
-//   switch     settings toggle and NABY_ORG_HARNESS=0 hide the listing and make
-//              the load refuse EVEN WHILE THE ROWS STILL READ `enabled`; flipping
-//              the switch mid-turn makes the next load refuse
+//   switch     a stored 'false' from the retired Settings toggle is ignored (the
+//              org harness is mandatory); NABY_ORG_HARNESS=0 (developer escape
+//              hatch) hides the listing and makes the load refuse EVEN WHILE THE
+//              ROWS STILL READ `enabled`; flipping it mid-turn makes the next
+//              load refuse
 //   explicit   `/task` named ⇒ the body is preloaded into the turn's system
 //              field (through runTurn and a mock engine, i.e. the real path)
 //   no shell   no run_command ⇒ org rows excluded and counted, nothing listed
@@ -52,11 +54,10 @@ import { DEFAULT_USER_ID } from '../runtime/memory-inject.js';
 import {
   applyOrgHarnessIfDue,
   ORG_HARNESS_ENV_SWITCH,
-  ORG_HARNESS_SETTING,
+  ORG_HARNESS_RETIRED_ENABLED_SETTING,
   orgHarnessRoot,
   readCurrentOrgPackage,
   runOrgHarnessSync,
-  setOrgHarnessEnabled,
   type OrgHarnessContext,
   type OrgHarnessFetch,
 } from '../runtime/org-harness.js';
@@ -389,12 +390,28 @@ async function switchChecks(): Promise<void> {
   const rowsEnabled = () =>
     c.store.listHarness('org', 'default', { kind: 'skill' }).every((r) => r.status === 'enabled');
 
-  // Settings toggle written WITHOUT the turn-boundary apply: rows still read enabled.
-  c.store.setSetting(ORG_HARNESS_SETTING.enabled, 'false');
-  const offTurn = pin(c);
+  // The org harness is mandatory (§4.8, 2026-10-12): a 'false' left by the
+  // retired Settings toggle is ignored — listing, preload and load all work.
+  c.store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, 'false');
+  const staleTurn = pin(c);
+  const stale = retrieveSkillsForInjection(c.store, query(staleTurn, { explicitNames: ['task'] }), ORG_OPTS);
+  const staleLoad = await load(staleTurn, 'task');
+  record(
+    '[switch] stored toggle "false" is ignored: listed, preloaded, loadable',
+    orgTurnListsSkills(staleTurn) &&
+      (stale.onDemand?.listed.length ?? 0) > 0 &&
+      (stale.onDemand?.preloaded.length ?? 0) === 1 &&
+      stale.onDemand?.switchedOff === 0 &&
+      !staleLoad.isError,
+    JSON.stringify(stale.onDemand && { listed: stale.onDemand.listed.length, off: stale.onDemand.switchedOff }),
+  );
+  c.store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, '');
+
+  // The developer escape hatch, pinned WITHOUT the turn-boundary apply: rows still read enabled.
+  const offTurn = pin(c, { env: { [ORG_HARNESS_ENV_SWITCH]: '0' } });
   const off = retrieveSkillsForInjection(c.store, query(offTurn, { explicitNames: ['task'] }), ORG_OPTS);
   record(
-    '[switch] settings off: rows still enabled, yet nothing listed or preloaded (counted switchedOff)',
+    '[switch] NABY_ORG_HARNESS=0: rows still enabled, yet nothing listed or preloaded (counted switchedOff)',
     rowsEnabled() &&
       off.onDemand?.listed.length === 0 &&
       off.onDemand.preloaded.length === 0 &&
@@ -403,29 +420,21 @@ async function switchChecks(): Promise<void> {
     JSON.stringify(off.onDemand && { listed: off.onDemand.listed.length, off: off.onDemand.switchedOff }),
   );
   const refused = await load(offTurn, 'task');
-  record('[switch] settings off: naby_skill_load refuses', refused.isError && /switched off/.test(refused.content));
-  record('[switch] settings off: no package-command env', orgCommandEnv(offTurn, `ls ${join(c.home, 'org')}`, c.project) === undefined);
-  record('[switch] settings off: no org read root', orgReadRoots(offTurn).length === 0);
-  c.store.setSetting(ORG_HARNESS_SETTING.enabled, 'true');
-
-  const envOff = pin(c, { env: { [ORG_HARNESS_ENV_SWITCH]: '0' } });
-  const envOffSel = retrieveSkillsForInjection(c.store, query(envOff), ORG_OPTS);
-  const envRefused = await load(envOff, 'task');
-  record(
-    '[switch] NABY_ORG_HARNESS=0: nothing listed, load refuses (rows still enabled)',
-    rowsEnabled() && envOffSel.onDemand?.listed.length === 0 && envRefused.isError,
-  );
+  record('[switch] NABY_ORG_HARNESS=0: naby_skill_load refuses', refused.isError && /switched off/.test(refused.content));
+  record('[switch] NABY_ORG_HARNESS=0: no package-command env', orgCommandEnv(offTurn, `ls ${join(c.home, 'org')}`, c.project) === undefined);
+  record('[switch] NABY_ORG_HARNESS=0: no org read root', orgReadRoots(offTurn).length === 0);
 
   // Mid-turn: pinned on, switched off before the call ⇒ the call refuses.
-  const live = pin(c);
+  const env: Record<string, string | undefined> = {};
+  const live = pin(c, { env });
   const before = await load(live, 'task');
-  setOrgHarnessEnabled(c.store, false, ctxFor(c.home));
+  env[ORG_HARNESS_ENV_SWITCH] = '0';
   const after = await load(live, 'task');
   record(
     '[switch] switched off mid-turn: the next load refuses (the live switch is re-read)',
     !before.isError && after.isError,
   );
-  setOrgHarnessEnabled(c.store, true, ctxFor(c.home));
+  delete env[ORG_HARNESS_ENV_SWITCH];
   record('[switch] switched back on: listing returns', orgTurnListsSkills(pin(c)));
 }
 

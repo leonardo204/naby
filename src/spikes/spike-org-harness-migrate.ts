@@ -32,7 +32,8 @@
 //                user-deleted org row is never revived
 //   §3.6         Bearer + X-Harness-Client; token in settings; once per KST day
 //                per key; key change re-checks; 401 ⇒ off + flag; offline ≠ fail
-//   §4.8         settings toggle and NABY_ORG_HARNESS=0 both round-trip
+//   §4.8         no user switch: a stored toggle 'false' is ignored (an upgrade
+//                from 'off' comes back on); NABY_ORG_HARNESS=0 round-trips
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
@@ -60,6 +61,7 @@ import {
   kstDay,
   listOrgPackageVersions,
   ORG_HARNESS_ENV_SWITCH,
+  ORG_HARNESS_RETIRED_ENABLED_SETTING,
   ORG_HARNESS_SCOPE_KEY,
   ORG_HARNESS_SETTING,
   ORG_SUPERSEDED_BY,
@@ -71,7 +73,6 @@ import {
   readOrgCopyNotices,
   readOrgHarnessState,
   runOrgHarnessSync,
-  setOrgHarnessEnabled,
   syncOrgHarnessPackage,
   useOrgVersion,
   type OrgHarnessContext,
@@ -593,7 +594,8 @@ async function case4(): Promise<void> {
     `${rescanned.status} ${rescanned.provenance.supersededBy}`,
   );
 
-  // §4.8 — the settings toggle.
+  // §4.8 — the org harness is mandatory (2026-10-12). The only off states left
+  // are no key, a rejected key and the developer escape hatch NABY_ORG_HARNESS=0.
   const snapshot = (): string =>
     JSON.stringify({
       org: statusMap(store),
@@ -601,34 +603,48 @@ async function case4(): Promise<void> {
       marker: store.getHarnessItem(copy.id)!.provenance.supersededBy ?? null,
     });
   const onState = snapshot();
-  const off = setOrgHarnessEnabled(store, false, ctxFor(home));
+  const envOn = ctxFor(home);
+  const envOffCtx = ctxFor(home, { env: { [ORG_HARNESS_ENV_SWITCH]: '0' } });
+
+  // A 'false' left by the retired Settings toggle is ignored.
+  store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, 'false');
+  const stale = applyOrgHarnessIfDue(store, envOn);
+  record(
+    '[§4.8] stored toggle "false" is ignored: still on, nothing switched',
+    stale.on === true && stale.offReason === undefined && stale.switched.length === 0 && snapshot() === onState,
+    `${JSON.stringify({ on: stale.on, offReason: stale.offReason, switched: stale.switched })} ${snapshot()}`,
+  );
+  record(
+    '[§4.8] stored toggle "false" is ignored by the state the UI reads',
+    readOrgHarnessState(store, envOn).on === true && !('enabledSetting' in readOrgHarnessState(store, envOn)),
+  );
+
+  // The off state the old toggle left behind is the same one the escape hatch
+  // leaves: rows off (not deleted), the set-aside copy given back, applied={on:false}.
+  const off = applyOrgHarnessIfDue(store, envOffCtx);
   const offRows = orgRowsOf(store);
   record(
-    '[§4.8] toggle off: every org row disabled, none deleted',
-    off.on === false && offRows.length === 3 && offRows.every((r) => r.status === 'disabled'),
+    '[§4.8] NABY_ORG_HARNESS=0: every org row disabled, none deleted',
+    off.on === false && off.offReason === 'env-off' && offRows.length === 3 && offRows.every((r) => r.status === 'disabled'),
     JSON.stringify(statusMap(store)),
   );
   record(
-    '[§4.8] toggle off: the superseded copy is enabled again',
+    '[§4.8] NABY_ORG_HARNESS=0: the superseded copy is enabled again',
     store.getHarnessItem(copy.id)!.status === 'enabled',
   );
-  const on = setOrgHarnessEnabled(store, true, ctxFor(home));
+  // Upgrading from v1.40.0 with the toggle off: the stored 'false' is still
+  // there, yet the first apply restores exactly the on state.
+  const on = applyOrgHarnessIfDue(store, envOn);
   record(
-    '[§4.8] toggle back on: exactly the previous state (org rows enabled, copy disabled + marked)',
-    on.on === true && snapshot() === onState,
+    '[§4.8] upgrade with a stored "false": back on, exactly the previous state (org rows enabled, copy disabled + marked)',
+    on.on === true && on.ran === 'full' && snapshot() === onState,
     `${snapshot()} vs ${onState}`,
   );
-
-  // §4.8 — the environment switch, same round trip.
-  const envOff = applyOrgHarnessIfDue(store, ctxFor(home, { env: { [ORG_HARNESS_ENV_SWITCH]: '0' } }));
-  const envOffOk =
-    envOff.on === false &&
-    envOff.offReason === 'env-off' &&
-    orgRowsOf(store).every((r) => r.status === 'disabled') &&
-    store.getHarnessItem(copy.id)!.status === 'enabled';
-  record('[§4.8] NABY_ORG_HARNESS=0: org rows off, copy back', envOffOk, JSON.stringify(statusMap(store)));
-  applyOrgHarnessIfDue(store, ctxFor(home));
-  record('[§4.8] NABY_ORG_HARNESS unset again: previous state restored', snapshot() === onState, snapshot());
+  record(
+    '[§4.8] the retired toggle row is ignored, not deleted',
+    store.getSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING) === 'false',
+  );
+  store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, '');
 
   // §4.5 "turning the copy back on returns it to how it was".
   store.setHarnessEnabled(copy.id, true);
@@ -903,8 +919,8 @@ async function rowChecks(): Promise<void> {
     ctx.status === 'disabled' && ctx.provenance.origin === 'org:altimedia-harness@0.7.2' && v2.apply?.updated.length === 3,
     `${ctx.status} ${ctx.provenance.origin}`,
   );
-  setOrgHarnessEnabled(store, false, ctxFor(home));
-  setOrgHarnessEnabled(store, true, ctxFor(home));
+  applyOrgHarnessIfDue(store, ctxFor(home, { env: { [ORG_HARNESS_ENV_SWITCH]: '0' } }));
+  applyOrgHarnessIfDue(store, ctxFor(home));
   record(
     '[§3.2] user-disabled row stays disabled across the switch round trip (userOwned)',
     orgRow(store, 'ctx')!.status === 'disabled' && orgRow(store, 'task')!.status === 'enabled',

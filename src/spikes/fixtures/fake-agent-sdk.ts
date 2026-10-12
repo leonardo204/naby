@@ -22,6 +22,11 @@
 // A step with `agentId` is a call made inside a subagent: the hook input carries
 // `agent_id` (and `agent_type`), and the messages carry a `parent_tool_use_id`,
 // exactly the fields the engine keys subagent attribution on.
+//
+// THE PROCESS ENV. The real CLI runs with `options.env` as its whole environment
+// and its built-in `Bash` inherits it. The stand-in records that object per
+// `query()` call (`record.envs`) and hands it to `builtin` as the env a built-in
+// would run with (org-harness-sync §7.5).
 
 import type { ClaudeAgentSdkModule } from '../../engines/claude-agent-sdk-engine.js';
 
@@ -40,6 +45,8 @@ export type FakeBuiltin = (
   name: string,
   input: Record<string, unknown>,
   cwd: string | undefined,
+  /** The CLI process env this `query()` was given (`options.env`). */
+  env?: Record<string, string | undefined>,
 ) => { content: string; isError?: boolean };
 
 type ToolDef = { name: string; handler: (args: unknown, extra: unknown) => Promise<unknown> };
@@ -49,13 +56,15 @@ export type FakeSdkRecord = {
   /** Hook outputs, in order, for each tool step. */
   decisions: { name: string; decision: string | undefined }[];
   runs: number;
+  /** `options.env` of each `query()` call, in order (undefined = not set). */
+  envs: (Record<string, string | undefined> | undefined)[];
 };
 
 const NABYTOOLS_PREFIX = 'mcp__nabytools__';
 
 /** Build a stand-in that plays `script` on every `query()` call. */
 export function fakeAgentSdk(script: () => FakeSdkStep[], builtin: FakeBuiltin): ClaudeAgentSdkModule & { record: FakeSdkRecord } {
-  const record: FakeSdkRecord = { decisions: [], runs: 0 };
+  const record: FakeSdkRecord = { decisions: [], runs: 0, envs: [] };
   const tool = ((name: string, _description: string, _shape: unknown, handler: ToolDef['handler']) => ({
     name,
     handler,
@@ -74,7 +83,9 @@ export function fakeAgentSdk(script: () => FakeSdkStep[], builtin: FakeBuiltin):
     const nabytools = servers.nabytools?.instance?.tools ?? [];
     const cwd = typeof options.cwd === 'string' ? options.cwd : undefined;
     const signal = (options.abortController as AbortController | undefined)?.signal ?? new AbortController().signal;
+    const env = options.env as Record<string, string | undefined> | undefined;
     record.runs += 1;
+    record.envs.push(env);
     let n = 0;
     const usage = { input_tokens: 40, output_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 
@@ -139,7 +150,7 @@ export function fakeAgentSdk(script: () => FakeSdkStep[], builtin: FakeBuiltin):
             isError = r.isError === true;
           }
         } else {
-          const r = builtin(step.name, out.hookSpecificOutput?.updatedInput ?? step.input, cwd);
+          const r = builtin(step.name, out.hookSpecificOutput?.updatedInput ?? step.input, cwd, env);
           content = r.content;
           isError = r.isError === true;
         }

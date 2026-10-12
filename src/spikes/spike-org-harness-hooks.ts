@@ -39,6 +39,18 @@
 //               the turn; a resumed session gets `resume` once
 //   claude      the Agent SDK engine registers PreCompact + SessionStart(compact)
 //               on the compaction port (`buildQueryOptions`)
+//   claude env  (§7.5) END TO END through the shell's naby engine on dev-claude
+//               with a fake SDK: the CLI process env carries HARNESS_CLIENT,
+//               CLAUDE_PROJECT_DIR and the cic token under BOTH names while the
+//               org harness is on and the cic preset has a token; the cic names
+//               are gone the next turn after the token is removed; a stored
+//               'false' from the retired Settings toggle changes nothing (the
+//               org harness is mandatory); every org name is gone under the
+//               developer escape hatch NABY_ORG_HARNESS=0; never the Skill Hub
+//               key (stored or exported) nor the metrics token; never the
+//               per-skill CLAUDE_SKILL_DIR / CLAUDE_PLUGIN_ROOT; PATH kept;
+//               `process.env` untouched. `buildQueryOptions` merges and removes
+//               names; `queryOptionsForLog` and the failure log redact the token
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
 
@@ -68,7 +80,15 @@ process.env.HARNESS_GATE = '0';
 
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import { MockLanguageModelV4 } from 'ai/test';
-import { buildQueryOptions } from '../engines/claude-agent-sdk-engine.js';
+import {
+  buildQueryOptions,
+  ClaudeAgentSdkEngine,
+  queryOptionsForLog,
+  REDACTED,
+  type ClaudeAgentSdkModule,
+} from '../engines/claude-agent-sdk-engine.js';
+import type { EngineEvent } from '../runtime/engine.js';
+import { fakeAgentSdk, type FakeSdkRecord } from './fixtures/fake-agent-sdk.js';
 import {
   buildOrgHookInput,
   claudeTranscriptLines,
@@ -83,10 +103,14 @@ import {
   type OrgHookCall,
   type OrgHookConfig,
 } from '../runtime/org-harness-hooks.js';
+import { ORG_HARNESS_RETIRED_ENABLED_SETTING } from '../runtime/org-harness.js';
 import { buildZip, type ZipWriteEntry } from '../runtime/zip.js';
 import { createNabySpec, getStore } from '../../shell/packages/feature/agent/src/server/engines/naby.js';
 import type { RunCtx, RunEvent } from '../../shell/packages/feature/agent/src/server/engines/types.js';
-import { setOrgHarnessFetch, syncOrgHarnessNow } from '../../shell/packages/feature/agent/src/server/lib/orgHarness.js';
+import {
+  setOrgHarnessFetch,
+  syncOrgHarnessNow,
+} from '../../shell/packages/feature/agent/src/server/lib/orgHarness.js';
 import {
   endOrgSessionsOnClose,
   orgHooksIdle as shellOrgHooksIdle,
@@ -109,6 +133,7 @@ const FIXTURE = join(ROOT, 'src/spikes/fixtures/org-harness/altimedia-harness');
 type DistRuntime = {
   runOrgHarnessQuitHandler(capMs?: number): Promise<void>;
   orgTranscriptPath(home: string, sessionId: string): string;
+  ClaudeAgentSdkEngine: new (opts: { sdk: ClaudeAgentSdkModule }) => unknown;
 };
 const DIST = '../../dist/naby-runtime.mjs';
 
@@ -859,12 +884,221 @@ function claudeEngineChecks(): void {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 5. The Agent SDK engine's process env (§3.4 on the Claude engine, §7.5)
+// ---------------------------------------------------------------------------
+
+const CIC_TOKEN = 'cic_e2e_token';
+const ORG_ENV_NAMES = ['HARNESS_CLIENT', 'CLAUDE_PROJECT_DIR', 'CLAUDE_PLUGIN_OPTION_CIC_TOKEN', 'CIC_API_TOKEN'];
+const NEVER_NAMES = ['CLAUDE_PLUGIN_ROOT', 'CLAUDE_SKILL_DIR', 'HARNESS_METRICS_TOKEN', 'SHUB_API_KEY', 'CLAUDE_PLUGIN_OPTION_SHUB_API_KEY'];
+const NEVER_VALUES = ['shub_e2e_key_never_forward', 'shub_from_the_profile_never_forward', 'shub_option_never_forward', 'hmt_e2e'];
+
+/** One dev-claude turn through the shell, a Bash call that reports whether the
+ *  token is visible to it; returns the env the CLI process was given. */
+async function claudeTurn(prompt: string): Promise<{ env: Record<string, string | undefined> | undefined; bash: string; ok: boolean }> {
+  const dist = (await import(DIST)) as unknown as DistRuntime;
+  let rec: FakeSdkRecord | undefined;
+  let bash = '';
+  const events: RunEvent[] = [];
+  let key = 'provisional';
+  const ctx: RunCtx = {
+    prompt,
+    images: undefined,
+    cwd: PROJECT,
+    sessionId: undefined,
+    params: { prompt, engine: 'naby' },
+    signal: new AbortController().signal,
+    emit(event: RunEvent) {
+      events.push(event);
+      if (event.type === 'approval_request') {
+        setTimeout(() => resolveApproval(String((event as unknown as { approvalId: string }).approvalId), { behavior: 'allow' }), 5);
+      }
+    },
+    rekey(id: string) {
+      key = id;
+    },
+    currentKey() {
+      return key;
+    },
+  };
+  await createNabySpec({
+    devClaudeEngine: () => {
+      const sdk = fakeAgentSdk(
+        () => [
+          { kind: 'tool', name: 'Bash', input: { command: 'python3 template_source.py' } },
+          { kind: 'text', text: 'done.' },
+        ],
+        (name, _input, _cwd, env) => {
+          if (name === 'Bash') bash = env?.CIC_API_TOKEN ? 'token-visible' : 'token-absent';
+          return { content: bash || `${name} done` };
+        },
+      );
+      rec = sdk.record;
+      return new dist.ClaudeAgentSdkEngine({ sdk }) as never;
+    },
+  }).runner.run(ctx);
+  await orgHooksIdleDist();
+  const r = events.find((e) => e.type === 'result') as { subtype?: string } | undefined;
+  return { env: rec?.envs[0], bash, ok: r?.subtype === 'success' };
+}
+
+const has = (env: Record<string, string | undefined> | undefined, name: string): boolean =>
+  env !== undefined && Object.prototype.hasOwnProperty.call(env, name) && env[name] !== undefined;
+
+async function claudeProcessEnvChecks(): Promise<void> {
+  const store = getStore();
+  control({});
+  const before = { cic: process.env.CIC_API_TOKEN, client: process.env.HARNESS_CLIENT };
+
+  // ---- on, with a cic token -------------------------------------------------
+  const a = await claudeTurn('make the doc');
+  record('claude env: the dev-claude turn ran through the fake SDK', a.ok && a.env !== undefined, JSON.stringify(Object.keys(a.env ?? {}).length));
+  record(
+    'claude env: org on + cic token → the CLI env has the token under BOTH names',
+    a.env?.CLAUDE_PLUGIN_OPTION_CIC_TOKEN === CIC_TOKEN && a.env?.CIC_API_TOKEN === CIC_TOKEN,
+  );
+  record(
+    'claude env: HARNESS_CLIENT=naby and CLAUDE_PROJECT_DIR is the open project',
+    a.env?.HARNESS_CLIENT === 'naby' && a.env?.CLAUDE_PROJECT_DIR === PROJECT,
+    JSON.stringify({ client: a.env?.HARNESS_CLIENT, dir: a.env?.CLAUDE_PROJECT_DIR }),
+  );
+  record('claude env: the SDK Bash of that turn sees the token (the accepted trade-off)', a.bash === 'token-visible', a.bash);
+  record(
+    'claude env: never the Skill Hub key (stored or exported), the metrics token, CLAUDE_SKILL_DIR or CLAUDE_PLUGIN_ROOT',
+    NEVER_NAMES.every((n) => !has(a.env, n)) && !Object.values(a.env ?? {}).some((v) => v !== undefined && NEVER_VALUES.includes(v)),
+    JSON.stringify(NEVER_NAMES.filter((n) => has(a.env, n))),
+  );
+  record(
+    'claude env: the inherited env is kept (PATH, HOME) and the session-state flag is on',
+    a.env?.PATH === process.env.PATH && a.env?.HOME === process.env.HOME && a.env?.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS === '1',
+  );
+  record(
+    'claude env: process.env itself is not changed',
+    process.env.CIC_API_TOKEN === before.cic && process.env.HARNESS_CLIENT === before.client,
+  );
+
+  // ---- the cic token removed → gone the next turn ---------------------------
+  const cicRow = store.listMcpEntries().find((e) => e.name === 'cic');
+  store.removeMcpEntry('cic');
+  const b = await claudeTurn('make the doc again');
+  record(
+    'claude env: cic token removed → neither cic name the next turn; HARNESS_CLIENT stays',
+    b.ok && !has(b.env, 'CLAUDE_PLUGIN_OPTION_CIC_TOKEN') && !has(b.env, 'CIC_API_TOKEN') && b.env?.HARNESS_CLIENT === 'naby',
+    JSON.stringify(ORG_ENV_NAMES.filter((n) => has(b.env, n))),
+  );
+  record('claude env: and the SDK Bash no longer sees one', b.bash === 'token-absent', b.bash);
+
+  // ---- token back, a stored toggle 'false' → ignored, org env still there ----
+  // The org harness is mandatory (§4.8, 2026-10-12): the retired Settings
+  // toggle's row is never read.
+  if (cicRow) store.upsertMcpEntry(cicRow);
+  store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, 'false');
+  const stale = await claudeTurn('make the doc, stale toggle row');
+  record(
+    'claude env: a stored toggle "false" is ignored → HARNESS_CLIENT and the cic token are still set',
+    stale.ok && stale.env?.HARNESS_CLIENT === 'naby' && has(stale.env, 'CIC_API_TOKEN'),
+    JSON.stringify(ORG_ENV_NAMES.filter((n) => has(stale.env, n))),
+  );
+  store.setSetting(ORG_HARNESS_RETIRED_ENABLED_SETTING, '');
+
+  // ---- org harness off (developer escape hatch) → nothing of the org env ----
+  process.env.NABY_ORG_HARNESS = '0';
+  const c = await claudeTurn('make the doc, harness off').finally(() => {
+    delete process.env.NABY_ORG_HARNESS;
+  });
+  record(
+    'claude env: org harness off → no org name at all, even with the cic token configured',
+    c.ok && ORG_ENV_NAMES.every((n) => !has(c.env, n)),
+    JSON.stringify(ORG_ENV_NAMES.filter((n) => has(c.env, n))),
+  );
+  record(
+    'claude env: org off → the stored Skill Hub key and the metrics token are still absent',
+    !Object.values(c.env ?? {}).some((v) => v === 'shub_e2e_key_never_forward' || v === 'hmt_e2e'),
+  );
+
+  // ---- buildQueryOptions: merge, removal, account rule wins -----------------
+  const base: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/u', SHUB_API_KEY: 'shub_x', CLAUDE_CONFIG_DIR: '/keep' };
+  const opts = buildQueryOptions({
+    input: {
+      model: { providerId: 'dev-claude' },
+      messages: [],
+      toolSchemas: [],
+      gate: async () => ({ behavior: 'allow' }),
+      executors: {},
+      signal: new AbortController().signal,
+    },
+    mcpServer: {} as never,
+    preToolUse: (async () => ({})) as never,
+    abortController: new AbortController(),
+    onStderr: () => {},
+    env: base,
+    extraEnv: { HARNESS_CLIENT: 'naby', CIC_API_TOKEN: CIC_TOKEN, CLAUDE_PLUGIN_OPTION_CIC_TOKEN: CIC_TOKEN, SHUB_API_KEY: undefined },
+  });
+  const env = (opts as { env?: Record<string, string | undefined> }).env ?? {};
+  record(
+    'buildQueryOptions: extra env is set, an undefined name is REMOVED, the base is kept and not mutated',
+    env.CIC_API_TOKEN === CIC_TOKEN && env.HARNESS_CLIENT === 'naby' && !('SHUB_API_KEY' in env) &&
+      env.PATH === '/usr/bin' && base.SHUB_API_KEY === 'shub_x' && !('CIC_API_TOKEN' in base),
+    JSON.stringify(Object.keys(env)),
+  );
+  const logged = JSON.stringify(queryOptionsForLog(opts));
+  record(
+    'queryOptionsForLog: env names stay, every value is redacted (no token, no PATH value)',
+    !logged.includes(CIC_TOKEN) && !logged.includes('/usr/bin') && logged.includes(`"CIC_API_TOKEN":"${REDACTED}"`),
+    logged.slice(0, 300),
+  );
+
+  // ---- the failure log and the error event redact the token -----------------
+  const throwing = {
+    ...fakeAgentSdk(() => [], () => ({ content: '' })),
+    query: ((args: { options?: { stderr?: (d: string) => void } }) => {
+      args.options?.stderr?.(`env dump: CIC_API_TOKEN=${CIC_TOKEN}\n`);
+      return (async function* () {
+        throw new Error(`CLI crashed with CIC_API_TOKEN=${CIC_TOKEN}`);
+      })();
+    }) as unknown as ClaudeAgentSdkModule['query'],
+  } as ClaudeAgentSdkModule;
+  const logs: string[] = [];
+  const origError = console.error;
+  console.error = (...a: unknown[]) => {
+    logs.push(a.map(String).join(' '));
+  };
+  const out: EngineEvent[] = [];
+  try {
+    for await (const ev of new ClaudeAgentSdkEngine({ sdk: throwing }).run({
+      model: { providerId: 'dev-claude' },
+      messages: [{ role: 'user', content: 'hi' }] as never,
+      toolSchemas: [],
+      gate: async () => ({ behavior: 'allow' }),
+      executors: {},
+      signal: new AbortController().signal,
+      backendEnv: () => ({ CIC_API_TOKEN: CIC_TOKEN, HARNESS_CLIENT: 'naby' }),
+    })) {
+      out.push(ev);
+    }
+  } finally {
+    console.error = origError;
+  }
+  const err = out.find((e) => e.kind === 'error') as { message?: string } | undefined;
+  record(
+    'failure log: the CLI stderr and the error message are logged with the token redacted',
+    logs.length > 0 && logs.every((l) => !l.includes(CIC_TOKEN)) && logs.some((l) => l.includes(REDACTED)),
+    JSON.stringify(logs).slice(0, 400),
+  );
+  record(
+    'failure log: the error event the user sees does not carry the token either',
+    !!err && !String(err.message).includes(CIC_TOKEN) && String(err.message).includes(REDACTED),
+    JSON.stringify(err),
+  );
+}
+
 async function main(): Promise<void> {
   try {
     configChecks();
     await runnerChecks();
     await endToEndChecks();
     claudeEngineChecks();
+    await claudeProcessEnvChecks();
   } catch (e) {
     record('spike ran to completion', false, e instanceof Error ? (e.stack ?? e.message) : String(e));
   }

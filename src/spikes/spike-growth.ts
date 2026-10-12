@@ -25,9 +25,21 @@
 //       same hit rate can score differently, and 0.5-always is exactly the line.
 //   (l) Ask precision and recall grade the decision to ask, and the tension with
 //       a high hit rate is real rather than a bug.
+// Second-tier review (trust-meter §4.7 / §9.3):
+//   (k2) The calibration VERDICT: under the minimum sample it is "not measured";
+//        a claim outside the Wilson interval of the actual rate is over- or
+//        under-confident even when Brier is under 0.25; honest-on-average but
+//        no better than the base-rate forecaster is "flat"; only beating that
+//        reference is "informative". The stage never moves.
+//   (l2) An UNREVIEWED action is not a correct silence: a flood of never-looked-at
+//        actions reads as unlabelled, a correction without a review stamp still
+//        counts as a miss, and a ledger of nothing but unreviewed actions has no
+//        ask quality at all.
 // P3-M8d — the IMPLICIT half of the bound (trust-meter §4.11):
 //   (n) THE REGRESSION INVARIANT: with nothing reviewed, every number the meter
-//       exports is identical to what it was before the blend existed.
+//       exports is identical to what it was before the blend existed — except the
+//       ask-quality block, whose silence count was corrected on purpose by the
+//       second-tier review (l2) and is asserted there instead.
 //   (o) Uncorrected reviewed actions raise the bound; corrected ones lower it.
 //   (p) Implicit evidence alone cannot leave the egg — 40 clean actions and no
 //       check-in is still "not measured".
@@ -45,6 +57,11 @@
 //       cap.
 //   (w) NO DRILL PERTURBS AN EXISTING AXIS: with drills added, every other number
 //       the meter exports is identical to the same ledger without them.
+//   (x) ONLY A SAFETY REFUSAL IS A TRIPWIRE (2026-10-12). A tripwire row recorded
+//       for the known capability refusal ("Backgrounding through Bash is not
+//       available") before the fix no longer blocks butterfly; a safety refusal,
+//       and a row with no reason at all, still do. And the policy layer marks
+//       its own capability refusal as such while leaving safety ones unmarked.
 //
 // Pure arithmetic, no store and no engine — runs in milliseconds.
 
@@ -52,6 +69,7 @@ import {
   BRIER_UNINFORMATIVE,
   askDecisionQuality,
   brierScore,
+  calibrationReading,
   BUTTERFLY_THRESHOLD,
   DRILL_DAILY_CAP,
   DRILL_WEIGHT,
@@ -65,6 +83,7 @@ import {
   diagnoseChange,
   stageFor,
   wilsonLowerBound,
+  wilsonUpperBound,
   type CheckinRecord,
 } from '../runtime/growth.js';
 // THE METER AS IT WAS, verbatim at c3a6613 (see the file's own header). Checking
@@ -413,9 +432,9 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
     { at: 3, agentId: 'a', kind: 'checkin', hit: true },
     // Acted alone and had to be fixed: it should have asked.
     { at: 4, agentId: 'a', kind: 'autonomous', correctedAfter: true },
-    // Acted alone, nothing needed fixing.
-    { at: 5, agentId: 'a', kind: 'autonomous' },
-    { at: 6, agentId: 'a', kind: 'autonomous' },
+    // Acted alone, was looked back over, nothing needed fixing.
+    { at: 5, agentId: 'a', kind: 'autonomous', reviewedAt: 50 },
+    { at: 6, agentId: 'a', kind: 'autonomous', reviewedAt: 60 },
   ];
   const q = askDecisionQuality(rows)!;
   // A flawless agent: every ask turns out to have been unnecessary, so precision
@@ -423,7 +442,7 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
   const flawless = askDecisionQuality([
     { at: 1, agentId: 'a', kind: 'checkin', hit: true },
     { at: 2, agentId: 'a', kind: 'checkin', hit: true },
-    { at: 3, agentId: 'a', kind: 'autonomous' },
+    { at: 3, agentId: 'a', kind: 'autonomous', reviewedAt: 30 },
   ])!;
   record(
     '(l) ask precision and recall are graded, and a flawless agent scores 0 precision',
@@ -433,6 +452,7 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
       q.unnecessaryAsks === 1 &&
       q.missedAsks === 1 &&
       q.correctSilences === 2 &&
+      q.unreviewedActs === 0 &&
       q.samples === 6 &&
       flawless.precision === 0 &&
       flawless.recall === 0 &&
@@ -440,6 +460,123 @@ function runOf(hits: number, n: number, opts?: { t0?: number; taskType?: string 
       askDecisionQuality([]) === undefined &&
       askDecisionQuality([{ at: 1, agentId: 'a', kind: 'tripwire' }]) === undefined,
     `precision=${q.precision.toFixed(2)} recall=${q.recall.toFixed(2)} (warranted ${q.warrantedAsks}, unnecessary ${q.unnecessaryAsks}, missed ${q.missedAsks}, silent ${q.correctSilences}); flawless precision=${flawless.precision}`,
+  );
+}
+
+// -- (k2) the calibration verdict --------------------------------------------
+{
+  const rated = (hits: number, n: number, conf: (i: number, hit: boolean) => number, t0 = 10_000) =>
+    Array.from({ length: n }, (_, i): CheckinRecord => ({
+      at: t0 + i,
+      agentId: 'a',
+      kind: 'checkin',
+      hit: i < hits,
+      confidence: conf(i, i < hits),
+    }));
+  // 8/10, and it KNOWS which two it will miss: 0.9 on the hits, 0.2 on the misses.
+  const honest = rated(8, 10, (_, hit) => (hit ? 0.9 : 0.2));
+  // Same 8/10, loudly certain every time. Brier 0.196 — UNDER the old 0.25 line,
+  // which is why the line alone told the user "worth reading" for this agent.
+  const loud = rated(8, 10, () => 0.99);
+  // 5/10 at 0.99: certainty as decoration.
+  const decorative = rated(5, 10, () => 0.99);
+  // 10/10 while saying 0.3 every time.
+  const timid = rated(10, 10, () => 0.3);
+  // THE REAL-LEDGER SHAPE: right 13 of 20, average claim 0.69 (honest on
+  // average), but 0.6 vs 0.8 is assigned without regard to the outcome. Brier
+  // 0.236 is under 0.25; always saying "65%" would have scored 0.2275.
+  const flatConf = [
+    ...[0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8], // 13 hits
+    ...[0.6, 0.6, 0.6, 0.6, 0.8, 0.8, 0.8], // 7 misses
+  ];
+  const flat = rated(13, 20, (i) => flatConf[i]!);
+  const tiny = rated(3, 3, () => 0.9);
+
+  const c = {
+    honest: calibrationReading(honest)!,
+    loud: calibrationReading(loud)!,
+    decorative: calibrationReading(decorative)!,
+    timid: calibrationReading(timid)!,
+    flat: calibrationReading(flat)!,
+    tiny: calibrationReading(tiny)!,
+  };
+  const stages = [honest, loud, decorative, timid, flat].map((r) => computeGrowth(r).stage);
+  const sameStageAsWithoutConfidence = [honest, loud, decorative, timid, flat].every(
+    (r) =>
+      computeGrowth(r).stage ===
+      computeGrowth(r.map(({ confidence: _c, ...rest }) => rest)).stage,
+  );
+  const g = computeGrowth(honest);
+  record(
+    '(k2) calibration verdict: not-measured below the floor, over/under-confident outside the Wilson interval, flat unless it beats the base-rate forecaster',
+    c.tiny.verdict === 'not-measured' &&
+      c.honest.verdict === 'informative' &&
+      c.loud.verdict === 'overconfident' &&
+      c.loud.score < BRIER_UNINFORMATIVE && // the old line would have passed it
+      c.loud.meanConfidence > wilsonUpperBound(8, 10) &&
+      c.decorative.verdict === 'overconfident' &&
+      c.timid.verdict === 'underconfident' &&
+      c.flat.verdict === 'flat' &&
+      c.flat.score < BRIER_UNINFORMATIVE && // the old line would have passed it too
+      c.flat.score >= c.flat.reference &&
+      Math.abs(c.flat.reference - 0.65 * 0.35) < 1e-9 &&
+      // the reading agrees with the plain Brier score and rides on the state
+      g.calibration !== undefined &&
+      g.calibration.score === g.brier &&
+      g.calibration.samples === g.brierSamples &&
+      // never gated: confidence has no say in the stage
+      sameStageAsWithoutConfidence &&
+      // no confidence anywhere → absent, never a zero that looks perfect
+      calibrationReading(runOf(5, 5)) === undefined &&
+      computeGrowth(runOf(5, 5)).calibration === undefined &&
+      wilsonUpperBound(0, 0) === 1 &&
+      wilsonUpperBound(8, 10) >= 0.8,
+    `honest ${c.honest.verdict} (B=${c.honest.score.toFixed(3)} ref=${c.honest.reference.toFixed(3)}); ` +
+      `loud ${c.loud.verdict} (claim ${c.loud.meanConfidence.toFixed(2)} > upper ${wilsonUpperBound(8, 10).toFixed(3)}, B=${c.loud.score.toFixed(3)} < 0.25); ` +
+      `decorative ${c.decorative.verdict}; timid ${c.timid.verdict}; ` +
+      `flat ${c.flat.verdict} (B=${c.flat.score.toFixed(4)} < 0.25 but ≥ ref ${c.flat.reference.toFixed(4)}); tiny ${c.tiny.verdict}; stages ${stages.join(',')}`,
+  );
+}
+
+// -- (l2) unreviewed actions are not correct silences -----------------------
+{
+  const flood: CheckinRecord[] = [
+    { at: 1, agentId: 'a', kind: 'checkin', hit: false },
+    // 100 actions nobody has looked at yet…
+    ...Array.from({ length: 100 }, (_, i): CheckinRecord => ({
+      at: 10 + i,
+      agentId: 'a',
+      kind: 'autonomous',
+    })),
+    // …3 that reflection reviewed and nobody corrected…
+    ...Array.from({ length: 3 }, (_, i): CheckinRecord => ({
+      at: 200 + i,
+      agentId: 'a',
+      kind: 'autonomous',
+      reviewedAt: 300 + i,
+    })),
+    // …and one corrected before `reviewedAt` existed (M8a): seen, so a miss.
+    { at: 250, agentId: 'a', kind: 'autonomous', correctedAfter: true },
+  ];
+  const q = askDecisionQuality(flood)!;
+  const onlyUnseen = askDecisionQuality(
+    Array.from({ length: 5 }, (_, i): CheckinRecord => ({ at: i, agentId: 'a', kind: 'autonomous' })),
+  );
+  // The state carries the same block, so the panel reads the corrected counts.
+  const g = computeGrowth([...runOf(5, 5, { t0: 0 }).map((r) => ({ ...r, agentId: 'a' })), ...flood.slice(1)]);
+  record(
+    '(l2) unreviewed actions are counted as unlabelled, not as correct silences',
+    q.correctSilences === 3 &&
+      q.unreviewedActs === 100 &&
+      q.missedAsks === 1 &&
+      q.samples === 1 + 3 + 1 &&
+      Math.abs(q.recall - 1 / 2) < 1e-9 &&
+      onlyUnseen === undefined &&
+      g.ask?.unreviewedActs === 100 &&
+      g.ask?.correctSilences === 3 &&
+      // coverage still sees every action: being unlabelled is not being invisible
+      g.coverage > 0.9,
+    `silent ${q.correctSilences} (was ${q.correctSilences + q.unreviewedActs} before the review), unreviewed ${q.unreviewedActs}, missed ${q.missedAsks}, recall ${q.recall.toFixed(2)}; only-unreviewed → ${onlyUnseen === undefined ? 'absent' : 'present'}; coverage ${g.coverage.toFixed(3)}`,
   );
 }
 
@@ -495,18 +632,27 @@ function reviewedOf(
       [...runOf(20, 20).map((r) => ({ ...r, imported: true })), ...runOf(4, 6, { t0: 900_000 })],
     ],
   ];
+  // The `ask` block is left out ON PURPOSE. The second-tier review stopped
+  // counting never-reviewed actions as correct silences (l2), so a population of
+  // unreviewed autonomous rows reads differently there by design. Everything this
+  // invariant exists to protect — the bound, the stage, the gauge, coverage,
+  // Brier — is still compared byte for byte.
+  const withoutAsk = (g: object): string => {
+    const { ask: _ask, ...rest } = g as { ask?: unknown };
+    return JSON.stringify(rest);
+  };
   const disagreements: string[] = [];
   for (const [name, rows] of populations) {
-    const now = JSON.stringify(computeGrowth(rows));
-    const then = JSON.stringify(preComputeGrowth(rows as PreCheckinRecord[]));
+    const now = withoutAsk(computeGrowth(rows));
+    const then = withoutAsk(preComputeGrowth(rows as PreCheckinRecord[]));
     if (now !== then) disagreements.push(`${name}: ${now} !== ${then}`);
     // The per-task-type reading takes the same path, so it is checked too.
-    const nowW = JSON.stringify(computeGrowth(rows, { window: 8 }));
-    const thenW = JSON.stringify(preComputeGrowth(rows as PreCheckinRecord[], { window: 8 }));
+    const nowW = withoutAsk(computeGrowth(rows, { window: 8 }));
+    const thenW = withoutAsk(preComputeGrowth(rows as PreCheckinRecord[], { window: 8 }));
     if (nowW !== thenW) disagreements.push(`${name} (window 8): ${nowW} !== ${thenW}`);
   }
   record(
-    '(n) with NOTHING reviewed, the meter is byte-for-byte the pre-M8d meter (6 populations, 2 windows each)',
+    '(n) with NOTHING reviewed, the meter is byte-for-byte the pre-M8d meter outside the ask block (6 populations, 2 windows each)',
     disagreements.length === 0,
     disagreements.length === 0
       ? `${populations.length * 2} readings identical to the pre-M8d copy in fixtures/growth-pre-m8d.ts`
@@ -791,11 +937,103 @@ function drillsOf(
       b.lowerBound !== a.lowerBound &&
       JSON.stringify(diagnoseChange(base)) === JSON.stringify(diagnoseChange(withDrills)) &&
       JSON.stringify(brierScore(base)) === JSON.stringify(brierScore(withDrills)) &&
+      JSON.stringify(calibrationReading(base)) === JSON.stringify(calibrationReading(withDrills)) &&
       JSON.stringify(askDecisionQuality(base)) === JSON.stringify(askDecisionQuality(withDrills)),
     strip(a) === strip(b)
       ? `every non-bound field identical with ${b.drillTrials} drills added (an 11th, degenerate one was dropped);` +
         ` bound ${a.lowerBound.toFixed(4)} → ${b.lowerBound.toFixed(4)}; diagnosis, Brier and ask quality byte-identical`
       : `DIFFERED: ${strip(a)} !== ${strip(b)}`,
+  );
+}
+
+// ---- (x) only a safety refusal is a tripwire -------------------------------
+{
+  const { backgroundBashRefusal, protectedWriteRefusal, realPolicy } = await import('../runtime/policy.js');
+  const { phase1HarnessFloor } = await import('../runtime/gate.js');
+  const bgCall = {
+    toolCallId: 'x1',
+    toolName: 'Bash',
+    input: { command: 'sleep 99', run_in_background: true },
+  };
+  const bg = backgroundBashRefusal(bgCall as never);
+  const liveReason = bg?.behavior === 'deny' ? bg.reason : '';
+  // The exact sentence the 34 real rows carry (copied from the user's ledger).
+  const recordedReason =
+    'Backgrounding through Bash is not available: its progress and completion events stop when ' +
+    'this turn ends, so the job would run on with nobody able to report it. Start it with ' +
+    'naby_start_job instead — that one gives you a new turn when the work finishes, and ' +
+    'naby_check_job / naby_read_job_output let you look in on it meanwhile.';
+  const base = runOf(17, 20, { t0: 1_000 });
+  const legacy = computeGrowth([
+    ...base,
+    { at: 1_500, agentId: 'a1', kind: 'tripwire', reason: recordedReason },
+    { at: 1_501, agentId: 'a1', kind: 'tripwire', reason: recordedReason },
+    { at: 1_502, agentId: 'a1', kind: 'tripwire', reason: recordedReason },
+  ]);
+  const safety = computeGrowth([
+    ...base,
+    { at: 1_500, agentId: 'a1', kind: 'tripwire', reason: recordedReason },
+    { at: 1_501, agentId: 'a1', kind: 'tripwire', reason: "blocked by your policy rule for 'Bash'" },
+  ]);
+  const noReason = computeGrowth([...base, { at: 1_500, agentId: 'a1', kind: 'tripwire' }]);
+  record(
+    '(x1) three legacy capability tripwires (the real Bash-background rows) no longer block butterfly',
+    legacy.stage === 'butterfly' &&
+      legacy.percent === 100 &&
+      legacy.tripwires === 0 &&
+      legacy.blockedByTripwire === undefined,
+    `legacy rows ×3 → ${legacy.stage} ${legacy.percent}%, tripwires=${legacy.tripwires}`,
+  );
+  record(
+    '(x2) a safety refusal beside them still blocks, and a row with no reason counts (fail-closed)',
+    safety.stage === 'pupa' &&
+      safety.tripwires === 1 &&
+      safety.blockedByTripwire === true &&
+      noReason.stage === 'pupa' &&
+      noReason.tripwires === 1,
+    `policy-rule row → ${safety.stage} (tripwires=${safety.tripwires}); reason-less row → ${noReason.stage}`,
+  );
+
+  // The classification happens at the SOURCE: the deny decision says what it is.
+  const protectedRefusal = protectedWriteRefusal(
+    { toolCallId: 'x2', toolName: 'Write', input: { file_path: '/tmp/naby-org/x.md' } } as never,
+    { roots: ['/tmp/naby-org'] },
+  );
+  const ruleDeny = await realPolicy({
+    rules: [{ id: 'r', scope: 'user', toolPattern: 'Bash', effect: 'deny' } as never],
+    fallback: () => ({ behavior: 'allow' }),
+  })({ toolCallId: 'x3', toolName: 'Bash', input: { command: 'ls' } });
+  const viaPolicy = await realPolicy({ rules: [], fallback: () => ({ behavior: 'allow' }) })(bgCall as never);
+  const floorDeny = phase1HarnessFloor(['read_file'])({ toolCallId: 'x4', toolName: 'Write', input: {} });
+  const kindOf = (d: unknown) =>
+    d && typeof d === 'object' && (d as { behavior?: string }).behavior === 'deny'
+      ? ((d as { refusal?: string }).refusal ?? 'safety(unmarked)')
+      : 'not a deny';
+  record(
+    '(x3) backgroundBashRefusal is marked capability (also through realPolicy); protected write, policy rule and read-only floor stay safety',
+    kindOf(bg) === 'capability' &&
+      kindOf(viaPolicy) === 'capability' &&
+      kindOf(protectedRefusal) === 'safety(unmarked)' &&
+      kindOf(ruleDeny) === 'safety(unmarked)' &&
+      kindOf(floorDeny) === 'safety(unmarked)',
+    `bg=${kindOf(bg)} realPolicy(bg)=${kindOf(viaPolicy)} protected=${kindOf(protectedRefusal)} rule=${kindOf(ruleDeny)} floor=${kindOf(floorDeny)}`,
+  );
+  const { isLegacyCapabilityTripwire } = await import('../runtime/refusal.js');
+  const probes: Array<[string | undefined, boolean]> = [
+    [recordedReason, true],
+    [liveReason, true],
+    ["blocked by your policy rule for 'Bash'", false],
+    ['org harness hook (task/guard.py): denied', false],
+    ['', false],
+    [undefined, false],
+  ];
+  const misses = probes.filter(([r, want]) => isLegacyCapabilityTripwire(r) !== want);
+  record(
+    '(x4) the legacy match recognises the recorded (and current) Bash-background sentence and nothing else',
+    misses.length === 0,
+    misses.length === 0
+      ? `${probes.length} probes as expected`
+      : `wrong on: ${misses.map(([r]) => JSON.stringify(r?.slice(0, 40))).join(', ')}`,
   );
 }
 

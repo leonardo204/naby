@@ -31,13 +31,17 @@
 // still read `enabled`. So the pinned `on` decides the listing, and the tool and
 // the env re-check the live switch on every call (off is the safe direction).
 //
+//   * PROCESS ENV (`orgProcessEnv`). The Agent SDK has no per-command env seam
+//     (its `env` is the whole CLI process, and a PreToolUse hook can only rewrite
+//     the input), and splicing an `export` into the command line would write the
+//     cic token into the transcript. So on the Claude engine the process-wide
+//     part of §3.4 — `HARNESS_CLIENT`, `CLAUDE_PROJECT_DIR`, the cic token under
+//     both names — goes on the CLI process for the turn instead (user decision
+//     2026-10-12, §7.5). Every Bash command of that turn can see the token; the
+//     user accepted that trade-off for a naby-provided token.
+//
 // WHAT IS NOT HERE: the hook runner (§3.5 — org-harness-hooks.ts), the Atlassian
-// gate and the deps check (§3.6 — org-harness-gate.ts), metrics (§3.7, M4). The
-// SDK engine's native `Bash` does NOT get the §3.4 env: the Agent SDK has no
-// per-command env seam (its `env` is the whole CLI process, and a PreToolUse hook
-// can only rewrite the input), and splicing an `export` into the command line
-// would write the cic token into the transcript. Documented as a limitation in
-// the spec (§7.5/§7.6) rather than worked around.
+// gate and the deps check (§3.6 — org-harness-gate.ts), metrics (§3.7, M4).
 
 import { join } from 'node:path';
 import type { Executor, ToolOutput, ToolSchema } from './engine.js';
@@ -377,6 +381,43 @@ export function orgCommandEnv(
     ...(skillDir ? { [ORG_COMMAND_ENV.skillDir]: skillDir } : {}),
     ...(turn.projectDir ? { [ORG_COMMAND_ENV.projectDir]: turn.projectDir } : {}),
     [ORG_COMMAND_ENV.client]: ORG_HARNESS_CLIENT,
+    ...(cic ? { [ORG_COMMAND_ENV.cicToken]: cic, [ORG_COMMAND_ENV.cicApiToken]: cic } : {}),
+  };
+  for (const k of ORG_KEY_ENV_NAMES) env[k] = undefined;
+  return env;
+}
+
+// ---------------------------------------------------------------------------
+// Env for the Claude engine's whole CLI process (§3.4, §7.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The org part of the Claude Agent SDK engine's process env for ONE turn, or
+ * undefined for "add nothing". Read once, when the engine starts the turn —
+ * never stored, never logged. `undefined` values mean "remove this name from
+ * the inherited env".
+ *
+ * Applies when the org harness was on at turn start, a package is pinned, and
+ * the switch is still on now (the same three facts `orgCommandEnv` checks). The
+ * cic token is added under both names only when the cic preset has one, so a
+ * removed token or a switched-off harness is gone from the very next turn.
+ *
+ * WHAT IS LEFT OUT, on purpose:
+ *   * `CLAUDE_SKILL_DIR` — per skill. One value for the whole process would be
+ *     wrong for the second skill a turn loads.
+ *   * `CLAUDE_PLUGIN_ROOT` — the loaded body already has the absolute path
+ *     (§3.4), so no script needs it, and in the CLI process it is a name Claude
+ *     Code itself assigns to plugin hooks and plugin MCP servers.
+ *   * The Skill Hub key — never handed to scripts (§3.4). Its names are removed
+ *     even when the user's own shell profile exported them.
+ *   * The metrics token — the hook runner's alone (§3.7).
+ */
+export function orgProcessEnv(turn: OrgHarnessTurn): Record<string, string | undefined> | undefined {
+  if (!turn.on || !turn.pkg || !turn.stillOn()) return undefined;
+  const cic = turn.cicToken();
+  const env: Record<string, string | undefined> = {
+    [ORG_COMMAND_ENV.client]: ORG_HARNESS_CLIENT,
+    ...(turn.projectDir ? { [ORG_COMMAND_ENV.projectDir]: turn.projectDir } : {}),
     ...(cic ? { [ORG_COMMAND_ENV.cicToken]: cic, [ORG_COMMAND_ENV.cicApiToken]: cic } : {}),
   };
   for (const k of ORG_KEY_ENV_NAMES) env[k] = undefined;

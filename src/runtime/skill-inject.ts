@@ -121,8 +121,8 @@ export type SkillInjectionQuery = {
 // early, and dropping it for size would make naming a skill do nothing.
 
 export type OnDemandQuery = {
-  /** The org kill switch for this turn (settings toggle + env), resolved at turn
-   *  start. False ⇒ nothing is listed or preloaded, whatever the rows say. */
+  /** Whether the org harness is on for this turn (key state + the developer env
+   *  escape hatch; there is no user switch), resolved at turn start. False ⇒ nothing is listed or preloaded, whatever the rows say. */
   enabled: boolean;
   /** HARD cap on listing tokens, separate from `tokenBudget`. */
   listingTokenBudget: number;

@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.40.0",
+  "version": "1.41.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -42,6 +42,7 @@
     "spike:org-harness-hooks": "npm run build:runtime && tsx src/spikes/spike-org-harness-hooks.ts",
     "spike:org-harness-gate": "npm run build:runtime && tsx src/spikes/spike-org-harness-gate.ts",
     "spike:org-harness-metrics": "npm run build:runtime && tsx src/spikes/spike-org-harness-metrics.ts",
+    "spike:org-harness-ask": "npm run build:runtime && tsx src/spikes/spike-org-harness-ask.ts",
     "spike:org-harness-recheck": "tsx src/spikes/spike-org-harness-recheck.ts",
     "spike:mcp-oauth": "tsx src/spikes/spike-mcp-oauth.ts",
     "spike:mcp-oauth-live": "tsx src/spikes/spike-mcp-oauth-live.ts",
@@ -73,6 +74,7 @@
     "spike:policy": "npm run build:runtime && tsx src/spikes/spike-policy.ts",
     "spike:agents": "npm run build:runtime && tsx src/spikes/spike-agents.ts",
     "spike:autonomy": "npm run build:runtime && tsx src/spikes/spike-autonomy.ts",
+    "spike:routing": "npm run build:runtime && tsx src/spikes/spike-routing.ts",
     "spike:subagent": "tsx src/spikes/spike-subagent.ts",
     "spike:rate-limit": "tsx src/spikes/spike-rate-limit.ts",
     "spike:learn": "npm run build:runtime && tsx src/spikes/spike-learn.ts",

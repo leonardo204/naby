@@ -2,11 +2,11 @@
 id: phase-3-checkin-contracts
 title: Phase 3 P3-M5 — 체크인 원장 계약 (eval_events 실체화)
 type: interface
-version: 0.6.0
+version: 0.7.1
 status: active
 scope: 나비 신뢰 지표가 읽고 쓰는 이벤트 원장의 계약. P15-03이 예약해 둔 `eval_events` 스키마를 체크인·자율행동·트립와이어 세 종류 이벤트로 실체화하고, 스토어 메서드와 불변식을 정의한다. 지표 계산 알고리즘 자체는 butterfly-trust-meter가 다룬다.
-related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-3-continuous-learning, phase-3-fast-evolution, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl]
-updated: 2026-08-04
+related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-3-continuous-learning, phase-3-fast-evolution, phase-1_5-personalization-data-layer, phase-1_5-memory-contracts, phase-2-personalization-hitl, phase-1-contracts, org-harness-sync]
+updated: 2026-10-12
 ---
 
 # 체크인 원장 계약 — `eval_events` 실체화
@@ -32,6 +32,7 @@ type EvalEventKind =
   | 'checkin'      // the agent asked before an irreversible step
   | 'autonomous'   // the agent acted without asking
   | 'tripwire';    // a safety-relevant call was refused by the gate
+                   // (a CAPABILITY refusal is not one — §2.1)
 
 type EvalEvent = {
   id: string;                 // UUID — what MemoryProvenance.createdFrom points at
@@ -87,6 +88,38 @@ type EvalEvent = {
 };
 ```
 
+### 2.1 안전 거부와 능력 거부 (0.7.0)
+
+`tripwire`는 **안전 거부**만 기록한다. 게이트가 호출을 거부하는 이유는 둘이다.
+
+- **안전 거부**(`safety`) — 해서는 안 되는 호출이어서 거부했다. 사용자·조직·naby가 막기로 정한 것이다.
+- **능력 거부**(`capability`) — 여기서는 할 수 없는 호출이어서 거부했다. 먼저 물었어도 결과가 같다.
+
+종류는 거부를 만드는 쪽이 정한다. 게이트 결정(`GateDecision`)의 거부 쪽에 `refusal?: RefusalKind` 필드가 하나 붙는다. `GateDecision`의 정본은 [phase-1-contracts](../ref-docs/specs/interface/phase-1-contracts.md) §2다. 여기서는 `RefusalKind`만 정의한다.
+
+```ts
+type RefusalKind = 'safety' | 'capability';            // src/runtime/refusal.ts
+```
+
+필드가 없으면 안전 거부다. 분류하지 않은 새 거부가 조용히 빠지지 않고 하드 게이트에 걸리게 하려는 것이다(fail-closed). 엔진은 이 필드를 읽지 않는다. 원장 기록기(`recordGateOutcome`)만 읽는다.
+
+**능력 거부는 행이 되지 않는다.** `tripwire`도 아니고(안전 사건이 아니다), `autonomous`도 아니다(아무것도 실행되지 않았다). 단계 계약 거부가 원래 따르던 규칙과 같다.
+
+지금 있는 거부를 이렇게 분류한다. 읽기 도구(`isConsequentialTool`이 아닌 것)의 거부는 종류와 상관없이 원래부터 행이 되지 않는다.
+
+| 거부 | 만드는 곳 | 분류 | 이유 |
+|---|---|---|---|
+| `Bash`의 `run_in_background` | `policy.ts` `backgroundBashRefusal` | 능력 | 턴이 끝나면 그 경로로는 결과를 보고할 수 없다. 대신 쓸 `naby_start_job`이 있다 |
+| 라우팅된 에이전트의 `toolRefs` 밖 도구 | 셸 `engines/naby.ts` 게이트 | 능력 | 그 에이전트에게 주어지지 않은 도구다. 도구 목록이 `toolRefs`로 좁혀지지 않아 모델에게는 보인다 |
+| 단계 계약 거부 | 셸 `engines/naby.ts` (`stageRefusalReason`) | 행 없음(변경 없음) | 원래부터 원장에 쓰지 않는다 |
+| 조직 하네스 PreToolUse 훅의 deny | 셸 `orgHookGate` | 안전 | 조직이 막기로 정한 호출이다 |
+| 보호 디렉터리(`<NABY_HOME>/org`) 쓰기 | `policy.ts` `protectedWriteRefusal` | 안전 | 쓸 수는 있지만 sha256으로 검증한 패키지를 바꾸게 된다 |
+| 사용자 정책 규칙 deny | `policy.ts` `realPolicy` | 안전 | 사용자가 막은 도구다 |
+| 승인 프롬프트에서 거부(앱·텔레그램) | 셸 `requestApproval`, `telegramEscalation.ts` | 안전 | 사용자가 그 호출에 "아니오"라고 답했다 |
+| 승인 만료, 턴 중단 | 셸 `requestApproval` | 안전 | 지금 분류. 재검토 대상이다(§6) |
+| 읽기 전용 바닥(계획 모드, 변경 허용 끔) | `gate.ts` `phase1HarnessFloor` | 안전 | 사용자가 고른 읽기 전용 모드를 넘으려 했다 |
+| 바닥의 허용 목록 밖 도구 | `gate.ts` `phase1HarnessFloor` | 안전 | 모르는 도구는 거부한다(fail-closed) |
+
 ## 3. 스토어 메서드
 
 ```ts
@@ -123,7 +156,7 @@ markEvalEventReviewed(id: string, reviewedAt: number): boolean;
 4. **세션 삭제가 성장 기록을 연쇄 삭제하지 않는다.** 원장은 `agentId`로 키잉되고 `sessionId`는 링크다 — 메모리의 키잉 불변식(`phase-1-contracts` §6)과 같은 이유다. 대화를 지웠다고 배운 것이 사라지면 안 된다.
 5. **에이전트는 이 테이블을 읽을 수 없다.** 도구로도, 주입으로도 노출하지 않는다. 자기 점수를 보면 그것을 최적화한다(§7).
 6. **아무도 답하지 않은 체크인은 행이 되지 않는다.** 턴이 중단되거나 프롬프트가 만료된 것은 관측이 아니다. 빗나감으로 적으면 사용자가 자리를 비운 것을 에이전트 탓으로 돌리고, 제외 행으로 적어도 커버리지를 같은 이유로 끌어내린다. "모두 남긴다"가 틀리는 유일한 경우다 — 남기는 사건 자체가 지어낸 것이기 때문이다.
-7. **`autonomous`와 `tripwire`는 에이전트가 아니라 게이트가 쓴다.** 결과적 행동(`isConsequentialTool`)이 통과하면 `autonomous`, 거부되면 `tripwire`다. 에이전트는 묻지 않기를 고를 수 있어도 **집계되지 않기를 고를 수는 없다**(지표 §4.5).
+7. **`autonomous`와 `tripwire`는 에이전트가 아니라 게이트가 쓴다.** 결과적 행동(`isConsequentialTool`)이 통과하면 `autonomous`, 안전 거부로 거부되면 `tripwire`다. 능력 거부는 행이 되지 않는다(§2.1, 0.7.0). 에이전트는 묻지 않기를 고를 수 있어도 **집계되지 않기를 고를 수는 없다**(지표 §4.5).
 8. **원장 행은 기록 후 불변이되, 회고가 소유한 `correctedAfter`·`reviewedAt` 둘만 예외다**(0.5.0에서 `reviewedAt` 추가). 세션 회고 패스([`phase-3-continuous-learning`](phase-3-continuous-learning.md) §4·§7)가 `autonomous` 행에 한해 쓴다 — 교정은 `markEvalEventCorrected`, 리뷰 표시는 judge에 올린 모든 사건에. `hit`·`chosen` 같은 라벨은 여전히 기록 시점에 확정되고 다시 계산되지 않는다(불변식 1). 예외를 회고 소유 필드로 좁게 유지하는 이유는, 사후 변경 가능한 필드가 늘수록 "원장을 나중에 유리하게 고친다"는 게이밍 표면이 함께 늘기 때문이다. 에이전트 턴은 두 필드 어느 쪽도 쓸 수 없다.
 9. **`drill`은 모델이 아니라 세션이 정한다**(0.6.0, P3-M12). 빠른 성장 세션(`sessions.fast_growth`)에서 기록되는 `checkin` 행에 싱크가 찍는다. 도구 입력에 이 필드가 있어도 무시한다 — 모델이 실전을 모의로, 모의를 실전으로 표시할 수 있으면 장부가 오염된다. drill 행은 표본 최소치(`GROWTH_MIN_SAMPLE`)를 절대 채울 수 없고, 하한 혼합에는 [`phase-3-fast-evolution`](phase-3-fast-evolution.md) §3.4의 할인 가중으로만 들어간다.
 
@@ -143,6 +176,11 @@ markEvalEventReviewed(id: string, reviewedAt: number): boolean;
 ## 6. 미결정
 
 - `taskType`을 누가 정하는가. 모델이 붙이면 게이밍 표면이 늘고, 도구 조합에서 유도하면 거칠다. 1차는 **모델이 제시하되 원장에 그대로 기록하고**, 유형별 질문율 상한으로 남용을 잡는다.
+- ✅ **트립와이어에서 능력 거부를 뺐다(0.7.0, 사용자 결정 2026-10-12).** 0.6.x까지는 엔진이 할 수 없어서 거부한 호출("Backgrounding through Bash is not available", `src/runtime/policy.ts`)도 `tripwire`로 기록돼 하드 게이트(§4 불변식 3)에 걸렸다. 실제 원장의 트립와이어 34건이 전부 이것이었다. 이제 새 거부는 §2.1대로 원천에서 가른다.
+  - **이미 기록된 행은 지우지 않고 집계 때 거른다.** `countedTripwires`(`src/runtime/growth.ts`)가 사유가 알려진 능력 거부 문장으로 시작하는 `tripwire` 행을 세지 않는다. 문장 목록(`LEGACY_CAPABILITY_TRIPWIRE_PREFIXES`)은 기록 당시 문구를 그대로 얼려 둔다. 지금 쓰는 문구가 나중에 바뀌어도 옛 행은 옛 문구를 담고 있기 때문이다. 사유가 없거나 다른 행은 그대로 센다.
+  - **마이그레이션을 쓰지 않은 이유.** 행을 고치거나 지우면 원장의 사후 변경이 늘어난다(불변식 8은 회고 소유 필드 둘만 허용한다). 가져온 아카이브처럼 마이그레이션을 거치지 않는 경로도 있다. 읽을 때 거르면 모든 설치본이 다음 읽기에서 바로 풀리고, 행은 무슨 일이 있었는지의 기록으로 남는다. 이 거르기는 옛 행에만 닿는다. 고친 뒤에는 능력 거부가 행이 되지 않으므로 목록은 더 늘지 않는다.
+  - **남는 한계.** 트립와이어 읽기는 최신 50건(`TRIPWIRE_READ_LIMIT`)이다. 옛 능력 거부 행이 50건을 넘게 쌓인 설치본에서는 그보다 오래된 안전 거부 행이 읽기 밖으로 밀릴 수 있다. 이 사용자는 34건이라 해당하지 않는다.
+- **승인 만료와 턴 중단을 트립와이어로 둘지(재검토 대상).** 둘 다 아무도 "아니오"라고 답하지 않은 거부인데 지금은 안전 거부로 기록된다. 불변식 6(아무도 답하지 않은 체크인은 행이 되지 않는다)과 같은 논리를 적용할지는 정하지 않았다.
 - `domain` 태그는 P15-03이 예약했으나 M5에서 쓰지 않는다. 필드만 두고 비워 둔다(나중에 마이그레이션이 필요 없게).
 - **커버리지는 호출 단위로 센다.** 체크인 한 번 뒤에 쓰기 세 번이면 `autonomous` 세 행이다. 지금은 커버리지를 **보고만 하고 게이트로 쓰지 않으므로** 성립하지만, 커버리지 하한을 실제로 걸려면 "체크인이 자기 결정을 수행하는 호출들을 어떻게 자기 것으로 주장하는가"를 먼저 정해야 한다.
 - ✅ **MCP 도구 분류 해소(0.5.0, M8d).** 이름으로 추측하지 않고 선언을 읽는다 — MCP 주석 `readOnlyHint: true`로 선언된 도구만 관찰(비결과적)이고, 그 외(주석 없음 포함)는 **결과적으로 취급한다(fail-closed).** 사용자가 ask/deny 정책 규칙을 건 도구는 주석과 무관하게 결과적이다. 상세 → [`phase-3-continuous-learning`](phase-3-continuous-learning.md) §7.4.
@@ -150,3 +188,10 @@ markEvalEventReviewed(id: string, reviewedAt: number): boolean;
   - **여기서 잠재 버그를 잡았다.** `callback_data`는 64바이트가 한계인데, 승인 콜백이 id를 그대로 박고 있었다. 실측하니 Agent SDK의 UUID 세션이면 **78바이트**로 넘쳐서 sendMessage 자체가 실패한다 — 버튼이 아예 안 뜨고 에스컬레이션이 조용히 "앱에서 답하세요"로 퇴화한다. 이제 짧은 **ref 토큰**을 쓰며, 승인·체크인 모두 구조적으로 한계 안에 들어온다.
   - **추천안은 전화기로 보내지 않는다.** 인앱 프롬프트가 답한 뒤에 공개하는 이유(지표가 UI 순응도를 재게 된다)가 전화기에서 더 강하게 적용된다. 사용자가 가장 덜 숙고하는 화면이다.
   - **숫자 답장은 범위 안에서만 인정한다.** "첫 번째 것" 같은 말은 추측하지 않는다 — 체크인이 존재하는 이유가 에이전트가 추측할 수 없었기 때문이고, 여기서 잘못 추측하면 **사용자 본인의 답으로 기록된다.**
+
+## 7. 변경 이력
+
+- 0.7.1 (2026-10-12) — §2.1에서 `GateDecision`을 다시 정의하지 않고 phase-1-contracts를 가리키게 했다. `related`에 phase-1-contracts, org-harness-sync를 더했다.
+- 0.7.0 (2026-10-12) — 안전 거부와 능력 거부를 나눴다(§2.1). 게이트 결정에 `refusal`이 붙고, 능력 거부는 원장 행이 되지 않는다. 이미 기록된 능력 거부 `tripwire` 행은 집계 때 거른다(§6). 불변식 7을 고쳤다.
+- 0.6.1 (2026-10-12) — 트립와이어에 능력 거부가 섞인 문제를 §6 미결정에 기록했다.
+- 0.6.1 이전의 변경 이력은 본문에 버전 표시로만 남아 있다.

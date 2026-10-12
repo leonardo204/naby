@@ -134,6 +134,15 @@ export {
   normalizeToolName,
 } from './runtime/policy.js';
 
+// What kind of "no" a gate refusal is (checkin-contracts §2). A `capability`
+// refusal is not a growth tripwire; an unclassified one is `safety`.
+export {
+  isSafetyRefusal,
+  isLegacyCapabilityTripwire,
+  LEGACY_CAPABILITY_TRIPWIRE_PREFIXES,
+  type RefusalKind,
+} from './runtime/refusal.js';
+
 export {
   buildToolset,
   echoNote,
@@ -485,6 +494,7 @@ export {
   ORG_HARNESS_ENV_SWITCH,
   ORG_HARNESS_PACKAGE,
   ORG_HARNESS_SCOPE_KEY,
+  ORG_HARNESS_RETIRED_ENABLED_SETTING,
   ORG_HARNESS_SETTING,
   ORG_SUPERSEDED_BY,
   orgHarnessAutoStatusKey,
@@ -499,7 +509,6 @@ export {
   currentOrgPackageVersion,
   type OrgHarnessStatus,
   runOrgHarnessSync,
-  setOrgHarnessEnabled,
   syncOrgHarnessPackage,
   useOrgVersion,
   ackOrgUpdateNotice,
@@ -537,6 +546,7 @@ export {
   ORG_KEY_ENV_NAMES,
   ORG_SKILL_LISTING_TOKEN_BUDGET,
   orgCommandEnv,
+  orgProcessEnv,
   orgCompatPreamble,
   orgHarnessProtectedRoot,
   orgReadRoots,
@@ -588,6 +598,8 @@ export {
   takeOrgSession,
   touchOrgSession,
   toClaudeToolCall,
+  fromClaudeToolInput,
+  orgHookLabel,
   unsupportedOrgHooks,
   writeOrgTranscript,
   type OrgHookCall,
@@ -601,6 +613,16 @@ export {
   type OrgHookRunnerOptions,
   type OrgHookSessionInfo,
 } from './runtime/org-harness-hooks.js';
+// One approval prompt per decision when a hook and the policy both ask
+// (org-harness-sync §7.10).
+export {
+  createApprovalMerger,
+  sameToolInput,
+  type ApprovalMerger,
+  type ApprovalPrompt,
+  type ApprovalPromptRequest,
+  type HookOpinion,
+} from './runtime/approval-merge.js';
 export {
   checkOrgHarnessDeps,
   DAY_MS,
@@ -1047,12 +1069,15 @@ export {
 // structured so the shell renders them per locale.
 export {
   wilsonLowerBound,
+  wilsonUpperBound,
   stageFor,
   brierScore,
+  calibrationReading,
   askDecisionQuality,
   BRIER_UNINFORMATIVE,
   canBeAddressed,
   computeGrowth,
+  countedTripwires,
   detectChangePoint,
   diagnoseChange,
   GROWTH_MIN_SAMPLE,
@@ -1069,6 +1094,8 @@ export {
   type GrowthChange,
   type GrowthReasonCode,
   type AskQuality,
+  type CalibrationReading,
+  type CalibrationVerdict,
   type CheckinRecord,
   type LedgerKind,
 } from './runtime/growth.js';

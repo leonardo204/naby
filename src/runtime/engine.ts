@@ -8,6 +8,8 @@
 //
 // Contract source: ref-docs/specs/interface/phase-1-contracts.md §2, §3, §6.
 
+import type { RefusalKind } from './refusal.js';
+
 // ---------------------------------------------------------------------------
 // Tool + message shapes (contract §2, §6)
 // ---------------------------------------------------------------------------
@@ -79,7 +81,15 @@ export type Executor = (input: unknown, ctx: ExecCtx) => Promise<ToolOutput>;
 
 export type GateDecision =
   | { behavior: 'allow'; input?: unknown } // input rewrite allowed
-  | { behavior: 'deny'; reason: string };
+  | {
+      behavior: 'deny';
+      reason: string;
+      /** What kind of refusal this is, for the growth ledger only — never read
+       *  by an engine. `capability` (it cannot be done here) is not a tripwire;
+       *  absent means `safety`, so an unclassified refusal still counts
+       *  (`refusal.ts`, checkin-contracts §2). */
+      refusal?: RefusalKind;
+    };
 
 export type Gate = (call: ToolCall) => Promise<GateDecision>;
 
@@ -680,6 +690,20 @@ export type EngineRunInput = {
    * OPTIONAL, and its absence is the whole pre-M3 behaviour. Must not throw.
    */
   compaction?: CompactionPort;
+  /**
+   * EXTRA ENV FOR THE ENGINE'S WHOLE BACKEND PROCESS (org-harness-sync §3.4,
+   * §7.5). Only an engine that spawns a backend process uses it — the Agent SDK
+   * engine, whose built-in `Bash` has no per-command env and so can only get the
+   * org harness env (`HARNESS_CLIENT`, the cic token) through the CLI process.
+   * Engines that run commands through runtime executors ignore it; those get
+   * their env per command (`orgCommandEnv`).
+   *
+   * A function, called ONCE when the engine starts the turn, so a secret in it is
+   * read at that moment and held nowhere else. A string value sets the name; an
+   * `undefined` value REMOVES it from the inherited env. Returning undefined, or
+   * throwing, adds nothing. The values must never be logged.
+   */
+  backendEnv?: () => Record<string, string | undefined> | undefined;
   signal: AbortSignal;
 };
 
