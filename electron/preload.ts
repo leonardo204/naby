@@ -359,9 +359,14 @@ const fsOps = {
    * pushed onto every call site as a second, undistinguishable branch.
    *
    * `message` is the prompt shown above the panel (macOS only, per Electron).
+   * `defaultPath` is the folder it opens at; main validates it and opens at
+   * home when it is not an existing absolute directory.
    */
-  pickFolder: async (message?: string): Promise<string | null> => {
-    const res: Result<string | null> = await ipcRenderer.invoke('fs:pickFolder', { message });
+  pickFolder: async (message?: string, defaultPath?: string): Promise<string | null> => {
+    const res: Result<string | null> = await ipcRenderer.invoke('fs:pickFolder', {
+      message,
+      defaultPath,
+    });
     return res.ok ? res.value : null;
   },
 };

@@ -40,6 +40,7 @@ import {
 } from 'electron';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { stat } from 'node:fs/promises';
 import type { CredentialVault } from './credentials.js';
 import { CredentialError } from './credentials.js';
 import type { ProviderProfileStore } from './providers.js';
@@ -214,6 +215,8 @@ export const CHANNELS = [
   // The odd one out of this group: it takes no `{cwd, rel}`, because there is
   // no project yet — choosing one is the point. It cannot read, list or return
   // anything the user did not select in person, so there is nothing to contain.
+  // Its optional `defaultPath` only says where the panel OPENS; main checks it
+  // is an existing absolute directory and otherwise opens at home.
   //
   // It exists because the web shell's fallback (/api/pick-folder) shells out to
   // `osascript`/`powershell`/`zenity`, and a panel owned by a MENULESS helper
@@ -646,7 +649,7 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
   // a sender whose window has already gone; with neither, the parentless form
   // still opens a usable app-owned panel rather than failing the call.
   handle('fs:pickFolder', async (payload, event) => {
-    const { message } = asObject(payload);
+    const { message, defaultPath } = asObject(payload);
     if (message !== undefined && typeof message !== 'string') {
       return fail('INTERNAL', 'message must be a string when present');
     }
@@ -654,7 +657,10 @@ export function registerIpcHandlers(deps: IpcDeps): () => void {
       // `createDirectory` is what puts the "New Folder" button in the panel —
       // the button whose text field this fix is about.
       properties: ['openDirectory', 'createDirectory'],
-      defaultPath: homedir(),
+      // Where the panel opens (the shell resolves it from the configured
+      // default / the last picked folder). Validated rather than trusted, and
+      // NEVER a refusal: a stale or malformed start folder opens at home.
+      defaultPath: await pickFolderStart(defaultPath),
       ...(message ? { message } : {}),
     };
     const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow();
@@ -758,6 +764,27 @@ function isAllowedFrame(event: IpcMainInvokeEvent, allowedOrigin: string): boole
 /** Structured clone gives us `unknown`; narrow it once, in one place. */
 function asObject(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+}
+
+/**
+ * The folder chooser's start folder: the renderer's `defaultPath` when it is an
+ * absolute path to an existing directory, home otherwise.
+ *
+ * The main-process twin of the shell's `usableStartDir`
+ * (shell/src/lib/projectFolderStart.ts), a second copy for the same reason as
+ * `absWithin` below: main must not depend on the submodule. It only has to
+ * decide where a panel OPENS — the user still picks the folder in person — so
+ * anything doubtful (wrong type, relative, missing, a file, NUL, unreadable)
+ * quietly becomes home instead of an error the renderer would have to explain.
+ */
+async function pickFolderStart(candidate: unknown): Promise<string> {
+  if (typeof candidate !== 'string' || !candidate || candidate.includes('\0')) return homedir();
+  if (!isAbsolute(candidate)) return homedir();
+  try {
+    return (await stat(candidate)).isDirectory() ? candidate : homedir();
+  } catch {
+    return homedir();
+  }
 }
 
 // ---------------------------------------------------------------------------
