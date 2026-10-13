@@ -1,7 +1,10 @@
 // src/runtime/mcp-oauth.ts
 //
 // MCP OVER BROWSER OAUTH — the Atlassian remote MCP's one way in
-// (specs/org-harness-sync.md §3.8, M3).
+// (specs/org-harness-sync.md §3.8, M3), and since mcp-oauth-catalog every other
+// remote MCP that signs in through the browser (quick connect, the add form's
+// URL check in `mcp-oauth-probe.ts`). Nothing below is per-server except
+// `MCP_OAUTH_REQUIRED_TOOLS`.
 //
 // WHAT THIS FILE IS. An `OAuthClientProvider` for `@ai-sdk/mcp` 2.0.15 (the
 // `authProvider` of an http transport), the token store behind it, and the
@@ -622,10 +625,17 @@ export class McpOAuthRequiredError extends Error {
     readonly server: string,
     readonly status: McpOAuthStatus,
   ) {
+    // Where the user signs in: the org harness card and the System MCP row for
+    // Atlassian; the Connections list (quick connect or the server's own row)
+    // for every other browser-OAuth server (mcp-oauth-catalog §3).
+    const where =
+      server === ATLASSIAN_MCP_SERVER_NAME
+        ? 'Settings → Harness → Org harness, or the System MCP row'
+        : 'Settings → Connections';
     super(
       status === 'relogin'
-        ? `"${server}" needs you to sign in again (Settings → Harness → Org harness, or the System MCP row).`
-        : `"${server}" is not signed in yet (Settings → Harness → Org harness, or the System MCP row).`,
+        ? `"${server}" needs you to sign in again (${where}).`
+        : `"${server}" is not signed in yet (${where}).`,
     );
     this.name = 'McpOAuthRequiredError';
   }
@@ -721,8 +731,20 @@ export async function startMcpOAuthLogin(args: {
   /** Force a port (spikes). Default: the stored registration's, else ephemeral. */
   port?: number;
   now?: () => number;
+  /** The 401's `resource_metadata` a probe found (`probeMcpOAuth`), so discovery
+   *  starts where the probe's did — exactly what the transport hands `auth()`
+   *  after a 401 (mcp-oauth-catalog §3.2). Absent: the library's own order. */
+  resourceMetadataUrl?: string;
 }): Promise<McpOAuthLogin> {
   const now = args.now ?? Date.now;
+  let resourceMetadataUrl: URL | undefined;
+  if (args.resourceMetadataUrl) {
+    try {
+      resourceMetadataUrl = new URL(args.resourceMetadataUrl);
+    } catch {
+      throw new Error(`not a URL: ${args.resourceMetadataUrl}`);
+    }
+  }
   const rec = readMcpOAuthRecord(args.store, args.server) ?? blankRecord();
   // Drop the tokens (keep the registration) so the flow reaches the browser. They
   // are held here and put back if this login does not complete, so a cancelled
@@ -795,7 +817,11 @@ export async function startMcpOAuthLogin(args: {
 
   let first: string;
   try {
-    first = await auth(provider, { serverUrl: args.serverUrl, fetchFn: fetch });
+    first = await auth(provider, {
+      serverUrl: args.serverUrl,
+      ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}),
+      fetchFn: fetch,
+    });
   } catch (e) {
     close();
     restore();
@@ -858,6 +884,7 @@ export async function startMcpOAuthLogin(args: {
           serverUrl: args.serverUrl,
           authorizationCode: code,
           ...(state !== undefined ? { callbackState: state } : {}),
+          ...(resourceMetadataUrl ? { resourceMetadataUrl } : {}),
           fetchFn: fetch,
         });
         if (r !== 'AUTHORIZED') throw new Error(`unexpected authorization result ${r}`);

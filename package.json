@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.42.1",
+  "version": "1.43.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -47,6 +47,7 @@
     "spike:org-harness-ask": "npm run build:runtime && tsx src/spikes/spike-org-harness-ask.ts",
     "spike:org-harness-recheck": "tsx src/spikes/spike-org-harness-recheck.ts",
     "spike:mcp-oauth": "tsx src/spikes/spike-mcp-oauth.ts",
+    "spike:mcp-oauth-catalog": "tsx src/spikes/spike-mcp-oauth-catalog.ts",
     "spike:mcp-oauth-live": "tsx src/spikes/spike-mcp-oauth-live.ts",
     "spike:pin-order": "tsx src/spikes/spike-pin-order.ts",
     "spike:skill": "tsx src/spikes/spike-skill-inject.ts",

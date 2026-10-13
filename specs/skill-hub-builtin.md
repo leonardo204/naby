@@ -2,11 +2,11 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
 type: design
-version: 0.9.0
+version: 0.9.1
 status: active
 scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
-related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync]
-updated: 2026-10-08
+related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync, mcp-oauth-catalog]
+updated: 2026-10-13
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
@@ -16,6 +16,7 @@ updated: 2026-10-08
 ## 1. 배경과 원칙
 
 - skill-hub는 HTTP MCP다: `https://skills.altimedia.com/mcp` + `Authorization: Bearer shub_...`. 런타임 MCP 로더는 http+headers를 이미 끝까지 지원하므로(`src/runtime/mcp.ts`), 이 작업은 **새 전송 경로가 아니라 프리셋 UX**다.
+- 사내 표준이 아닌 원격 MCP(Notion·Linear 같은 바로 연결 서버, URL로 추가한 OAuth 서버)는 System MCP 프리셋이 아니다. 일반 MCP 목록에서 다루고, 규칙은 [mcp-oauth-catalog](mcp-oauth-catalog.md)가 정한다.
 - 원칙: **사용자가 아는 것은 토큰뿐이다.** URL·transport·헤더 이름은 제품이 안다. 일반 MCP 추가 폼과 달리 skill-hub 입력은 토큰 필드 하나다.
 - 토큰 저장은 기존 MCP 관례를 따른다 — `mcp_servers.payload`의 headers에 저장하고, 읽기는 키 이름만 노출(redact). 브라우저 OAuth 프리셋(atlassian)은 예외로, 토큰과 클라이언트 등록 정보를 `settings`의 `mcp.oauth.<server>`에 둔다(org-harness-sync §3.8). 텔레그램 봇 토큰과 같은 등급이며 vault 승격은 이 스펙의 범위 밖이다.
 

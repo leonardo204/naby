@@ -2,11 +2,11 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.10.0
+version: 0.10.1
 status: active
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
-related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution, chat-connection-status, phase-1-contracts]
-updated: 2026-10-12
+related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution, chat-connection-status, phase-1-contracts, mcp-oauth-catalog]
+updated: 2026-10-13
 ---
 
 # 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
@@ -242,6 +242,8 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 - 공식 OAuth MCP의 쓰기 도구는 "기록"으로 잡힌다. naby는 MCP 도구 이름을 `mcp__atlassian__createConfluencePage` 꼴로 넘기고(§3.5), 0.8.0의 판정 규칙은 이 꼴과 플러그인 쪽 이름을 모두 잡는다.
 
 ### 3.8 Atlassian은 OAuth 하나로 간다
+
+> Atlassian 밖의 원격 MCP(바로 연결 목록, URL 자동 감지)에 같은 OAuth 코드를 쓰는 규칙은 [mcp-oauth-catalog](mcp-oauth-catalog.md)가 정한다. 토큰 저장·갱신·재로그인은 이 절을 그대로 따른다.
 
 시스템 MCP 프리셋 `atlassian`을 **공식 원격 MCP + 브라우저 OAuth**로 바꾼다. API 토큰을 받아 `mcp-atlassian`(uvx stdio)을 띄우던 방식은 없앤다. 조직 하네스를 쓰지 않는 사용자에게도 같다. Atlassian 연결 방식은 이것 하나다.
 
@@ -627,6 +629,7 @@ pdoc의 템플릿 받기(`template_source.py`)는 cic 토큰을 `CIC_API_TOKEN`�
 
 ## 변경 이력
 
+- 0.10.1(2026-10-13): §3.8에 mcp-oauth-catalog 포인터를 더했다. Atlassian 밖의 원격 MCP도 같은 OAuth 코드를 쓴다.
 - 0.10.0(2026-10-12): 조직 하네스를 필수로 정하고 사용자가 끄는 설정을 없앴다(사용자 결정). §1에 결정을 더하고 §4.8을 "끄는 스위치는 없다"로 다시 썼다. 저장된 `harness.org.enabled`는 읽지 않고 지우지도 않는다. 꺼짐은 키 없음·키 거부·개발용 `NABY_ORG_HARNESS=0` 셋만 남는다. §3.1, §3.4, §3.9, §4.9의 4번, 7.2, 7.7, 7.11에서 토글을 가리키던 문구를 고치고 §4.9에 12번을, 7.12를 더했다.
 - 0.9.4(2026-10-12): §3.4에 환경을 읽는 시점을 7.11과 같게 적었다(턴 시작에 한 번, 자율 실행이면 단계마다). 0.9.3 항목의 §6 문구를 실제 변경대로 고쳤다.
 - 0.9.3(2026-10-12): Claude 엔진에서 cic 토큰과 `HARNESS_CLIENT`, `CLAUDE_PROJECT_DIR`을 CLI 프로세스 환경에 넣는다(§3.4, 7.11, 사용자 결정). 토큰은 사용자가 naby에 넣은 값을 naby가 내준다. §7.6 "아직 정하는 중이다"의 cic 항목을 풀고 §6의 cic 포인터를 지웠다. 7.5의 제약 문구에 새 동작과 노출 범위의 차이를 적었다.

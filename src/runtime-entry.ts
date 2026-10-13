@@ -666,6 +666,14 @@ export {
   type McpOAuthStatus,
   type McpOAuthStore,
 } from './runtime/mcp-oauth.js';
+// The URL check of the general MCP form (mcp-oauth-catalog §3.2).
+export {
+  extractResourceMetadataUrl,
+  MCP_OAUTH_PROBE_TIMEOUT_MS,
+  probeMcpOAuth,
+  type McpOAuthProbeResult,
+  type McpOAuthProbeVerdict,
+} from './runtime/mcp-oauth-probe.js';
 export {
   applyAtlassianOAuthSwapIfDue,
   ATLASSIAN_MIGRATION_SETTING,
