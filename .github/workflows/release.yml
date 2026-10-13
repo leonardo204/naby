@@ -21,6 +21,12 @@
 # TAG-TRIGGERED. A release is `git tag v1.2.3 && git push --tags`. Pushing to a
 # branch builds nothing; there is a manual `workflow_dispatch` for dry runs that
 # deliberately does NOT publish.
+#
+# NO RELEASE WITHOUT RELEASE NOTES. The `release-notes` job below runs first and
+# every build job `needs:` it, so a release whose version has no entry at the top
+# of the shell's RELEASE_NOTES_MARKDOWN stops before any runner installs, builds,
+# signs or notarises anything. 1.40.0–1.42.0 shipped without one because nothing
+# looked — see scripts/check-release-notes.mjs.
 
 name: Release
 
@@ -47,10 +53,47 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Preflight — the in-app release notes must exist for this version
+  # ---------------------------------------------------------------------------
+  # ONE PREFLIGHT JOB, NOT A STEP IN EACH BUILD JOB. The check is the same on
+  # every OS and needs nothing but Node and the checked-out tree, so running it
+  # three times would only triple the places it can drift. As a job it also fails
+  # on a cheap Linux runner BEFORE the macOS runner is even allocated — a step
+  # inside the build jobs would let all three start in parallel and spend
+  # runner minutes on `npm ci` before failing. `needs: release-notes` on each
+  # build job is what makes a failure here stop the release; nothing else
+  # enforces it.
+  #
+  # The check reads package.json's version and, on a tag push, GITHUB_REF_NAME
+  # (`vX.Y.Z`); the two must agree and the FIRST `## ` entry in
+  # shell/packages/feature/workspace/src/client/releaseNotes.ts must be that
+  # version with a valid date and non-empty `### en` and `### ko` bodies. A
+  # `workflow_dispatch` dry run from a branch checks package.json's version only.
+  # No `npm ci`: the script is plain Node with no dependencies, and
+  # `npm run` needs only package.json.
+  release-notes:
+    name: Release notes present
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The notes live in the shell, which is a submodule.
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check in-app release notes
+        run: npm run release:check-notes
+
+  # ---------------------------------------------------------------------------
   # macOS — the only job that signs, notarises and staples
   # ---------------------------------------------------------------------------
   macos:
     name: macOS (dmg + zip, signed & notarised)
+    needs: release-notes
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
@@ -201,6 +244,7 @@ jobs:
   # ---------------------------------------------------------------------------
   windows:
     name: Windows (NSIS, unsigned)
+    needs: release-notes
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -289,6 +333,7 @@ jobs:
   # ---------------------------------------------------------------------------
   linux:
     name: Linux (AppImage + deb)
+    needs: release-notes
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
