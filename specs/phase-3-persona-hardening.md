@@ -2,14 +2,16 @@
 id: phase-3-persona-hardening
 title: Phase 3 P3-M9 — 페르소나 하드닝 (위임 가능한 잠긴 에이전트)
 type: design
-version: 0.2.1
+version: 0.2.2
 status: active
 scope: 편집 불가로 잠근 내장 페르소나가 @ 위임을 감당할 수 있게 만드는 하드닝. 자율 설정의 소유권 이동, @ 게이트 일원화, 시드 프롬프트의 운영 프로토콜, 자율 루프의 검증 스텝(M9)과 메모리 위생·주권(M10 개요)을 다룬다. 신뢰 판정은 butterfly-trust-meter, 학습 루프는 continuous-learning, 원장은 checkin-contracts가 계속 소유한다.
-related: [phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-continuous-learning, phase-3-checkin-contracts, personalization-strategy]
-updated: 2026-08-04
+related: [multi-agent-chat, phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-continuous-learning, phase-3-checkin-contracts, personalization-strategy]
+updated: 2026-10-16
 ---
 
 # Phase 3 P3-M9 — 페르소나 하드닝 (위임 가능한 잠긴 에이전트)
+
+> **2026-10-16 개정([multi-agent-chat](multi-agent-chat.md) §8.3·persona-agent §8.3)**: G2의 `isAddressable` 게이트는 **나비와 custom에만** 적용된다. 참가자(`kind='participant'`)는 원장이 없고 이 게이트를 지나지 않는다 — 세션 참가자 목록이 참가자의 게이트다.
 
 > 상태: 설계 확정(2026-07-30). **G1~G4 구현 완료**(§6.1). 업계·연구 문헌 조사(벤더 4사 공식 문서, 논문 20여 편, 선두 제품 3사 + Lindy·OSS) 기반의 완비성 감사에서 나온 공백 G1~G4를 구현한다. M10(§7)은 후속이다.
 > 한 줄 요약: 페르소나를 잠근 대신 시드와 배선을 단단하게 만든다 — 정체성은 시드가, 자율 수준은 사용자가, 위임 자격은 나비 게이트가 소유한다.

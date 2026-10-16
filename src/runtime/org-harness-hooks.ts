@@ -41,6 +41,7 @@
 //   at most `ORG_SESSION_END_CAP_MS` in total (app quit must not hang). A hook
 //   still running then is left to finish on its own; ctx writes its marker first.
 
+import { isUserAuthored } from './participants.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, normalize, resolve, sep } from 'node:path';
@@ -669,6 +670,10 @@ export function claudeTranscriptLines(
       if (m.turn) entry.timestamp = new Date(m.turn.endedAt).toISOString();
     } else {
       entry = { type: 'user', message: { role: 'user', content: m.content } };
+      // naby's hand-off to a participant (multi-agent-chat §8.1) is not something
+      // the user typed: Claude Code marks such lines `isMeta`, so a hook that
+      // reads the user's prompts skips it exactly as it skips Claude Code's own.
+      if (!isUserAuthored(m)) entry.isMeta = true;
     }
     lines.push(
       JSON.stringify({

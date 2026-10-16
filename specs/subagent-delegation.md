@@ -1,10 +1,11 @@
 ---
 id: subagent-delegation
 type: design
-version: 0.1.3
+version: 0.1.4
 status: draft
 scope: 값싼 내장 서브에이전트(탐색 haiku·구현 sonnet)와 위임 정책으로 메인 대화 기록을 작게 유지하는 것, 서브에이전트가 실제로 쓴 모델을 보이게 하는 것, 엔진 동작을 바꾸는 환경변수를 드러내는 것
 related:
+  - multi-agent-chat
   - model-auto-routing
   - harness-standalone
   - naby-activity-log
@@ -13,10 +14,12 @@ related:
   - claude-multi-account
   - phase-3-persona-agent
   - settings-ia-reorg
-updated: 2026-10-02
+updated: 2026-10-16
 ---
 
 # 서브에이전트 위임과 모델 관측
+
+> **2026-10-16 참조([multi-agent-chat](multi-agent-chat.md) §2·§8.9)**: 참가자 위임은 이 문서의 위임과 **다른 계약**이다. 서브에이전트는 결론만 돌려주고 부모가 말하지만, 참가자는 채팅에 직접 답한다. 참가자 턴에는 `naby_delegate`·`Task`가 들어가지 않는다.
 
 ## 1. 문제
 

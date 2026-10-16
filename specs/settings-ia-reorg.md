@@ -1,20 +1,23 @@
 ---
 id: settings-ia-reorg
 type: design
-version: 0.1.1
+version: 0.1.2
 status: implemented
 scope: 설정 모달의 정보 구조 재편 — 의도별 내비게이션 재그룹(일반/프로바이더/연결/나비/기억/하네스/권한/정보), 기억 결정 대기함(내비 배지는 IA-3c에서 뗐다), 성장 패널의 대시보드 분리(리포트 오버레이), 프로바이더 탭 분할. 개별 기능의 동작은 바꾸지 않는다 — 배치와 노출만 바꾼다.
 related:
+  - multi-agent-chat
   - phase-3-memory-hygiene
   - phase-3-conversational-learning-hardening
   - phase-3-persona-agent
   - phase-3-butterfly-trust-meter
   - skill-hub-builtin
   - chat-connection-status
-updated: 2026-10-08
+updated: 2026-10-16
 ---
 
 # 설정 정보 구조 재편
+
+> **2026-10-16 확장([multi-agent-chat](multi-agent-chat.md) D7·§8.5)**: 나비 탭 안에 "참가자" 절이 생긴다(목록·추가·편집·복제·삭제·가져오기·내보내기). 탭 수(8개)는 그대로다.
 
 ## 1. 문제
 
@@ -160,4 +163,5 @@ IA-3a의 툴팁으로도 배지는 읽히지 않았다. 사용자는 기억 행�
 
 ## 변경 이력
 
+- 0.1.2 (2026-10-16): multi-agent-chat 참조·개정 표시를 더했다(related 포함).
 - 0.1.1(2026-10-08): `related`에 chat-connection-status를 더했다. 채팅 상태 줄이 설정 창을 하네스 칸으로 바로 연다(`OpenSettings`의 `section`). 칸 구성은 바꾸지 않았다.

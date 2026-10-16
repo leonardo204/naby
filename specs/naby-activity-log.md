@@ -1,17 +1,20 @@
 ---
 id: naby-activity-log
 type: design
-version: 0.1.1
+version: 0.1.2
 status: active
 scope: 활동 로그 — 요청·응답·판단·트랜잭션을 파일로 남기고 30일 뒤 스스로 지운다
 related:
+  - multi-agent-chat
   - phase-3-persona-agent
   - telegram-chat
   - subagent-delegation
-updated: 2026-09-14
+updated: 2026-10-16
 ---
 
 # 활동 로그
+
+> **2026-10-16 확장([multi-agent-chat](multi-agent-chat.md) §8.6)**: `ActivityKind`에 `participant_route` · `participant_proposal` · `participant_mention_ignored` · `participant_cap` · `round_completed`가 더해진다. 발언의 토큰은 기존 `usage`가 `agentId/agentName`으로 구분한다.
 
 ## 1. 문제
 

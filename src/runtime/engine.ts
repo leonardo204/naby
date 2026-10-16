@@ -179,6 +179,21 @@ export type TurnStats = {
   endedAt: number;
 };
 
+/** The agent that spoke a row (multi-agent-chat §8.1). */
+export type MessageSpeaker = { agentId: string; name: string };
+
+/** A routing step recorded on a row (multi-agent-chat §8.1). */
+export type MessageRouting = {
+  kind: 'delegate' | 'propose' | 'return' | 'end';
+  targetAgentId?: string;
+  /** The target's `@` handle at the time of the hand-off (MAC-M2). Stored so a
+   *  history view can label the row `[나비 → @x]` without a db join, and so a
+   *  renamed or deleted participant still reads sensibly in an old transcript. */
+  targetName?: string;
+  reason?: string;
+  brief?: string;
+};
+
 export type RuntimeMessage =
   | {
       role: 'user' | 'assistant';
@@ -190,6 +205,18 @@ export type RuntimeMessage =
        *  provider payload is built from it (providers map role/content/toolCalls
        *  field by field), so it round-trips as inert JSON. */
       turn?: TurnStats;
+      /** WHO SPOKE (multi-agent-chat §8.1, R2.2). Absent = the user (on a user
+       *  row) or naby (on an assistant row) — so every row written before
+       *  participants existed reads as it always did. A participant's line is
+       *  `role:'assistant', speaker:{participant}`; naby's hand-off to a
+       *  participant is `role:'user', speaker:{naby}, routing:{kind:'delegate'}`.
+       *  Inert JSON in the payload column — no migration. */
+      speaker?: MessageSpeaker;
+      /** How the round moved at this row (multi-agent-chat §8.1). A user row that
+       *  carries `routing` (or `speaker`) was NOT typed by the user — see
+       *  `isUserAuthored` (participants.ts). `'end'` is never stored; the end of a
+       *  round is a stream event only. */
+      routing?: MessageRouting;
     }
   | {
       role: 'tool';

@@ -544,7 +544,10 @@ export function createMainWindow(
     // leaving full screen lands back on the size the user actually chose.
     fullscreen: start.fullScreen,
     show: opts.show ?? true,
-    backgroundColor: '#111111',
+    // The dark theme's page background (shell globals.css `.dark --background`,
+    // #17181F). The window paints this before the first frame, so a mismatch
+    // shows as a flash of a different near-black on every open.
+    backgroundColor: '#17181F',
     // WINDOWS/LINUX ONLY, and deliberately NOT `Menu.setApplicationMenu(null)`.
     // The menu (now built in menu.ts — the default roles minus the Cmd/Ctrl+W
     // close binding) is a File/Edit/View/Window bar the product never asked to

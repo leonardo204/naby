@@ -46,6 +46,7 @@ import { sameMemoryValue } from './store.js';
 // can never disagree about the cap.
 import { STRENGTH_CAP } from '../memory-hygiene.js';
 import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
+import type { ParticipantProfile } from '../participants.js';
 import type {
   Agent,
   AgentInput,
@@ -78,6 +79,9 @@ import type {
   PolicyRuleInput,
   Project,
   ReflectionCursor,
+  SessionParticipant,
+  SessionParticipantAddedBy,
+  SessionParticipantStatus,
   ScopedMemoryQuery,
   SessionRef,
   Store,
@@ -286,7 +290,17 @@ function openSilently(path: string): DatabaseSyncType {
 // "duplicate column name". NO BACKFILL, and NULL is the honest reading in all
 // three cases: no session that predates this was continued from another one, and
 // none of them ever folded a payload.
-export const SCHEMA_VERSION = 13;
+//
+// v14 — CONVERSATION PARTICIPANTS (multi-agent-chat §8.1, MAC-M1). Two additive
+// changes. `agents.profile` (TEXT, JSON ParticipantProfile) holds a participant's
+// identity, knowledge and guardrails in ONE column, so both drivers and `toAgent`
+// change once rather than per field; it is NULL for persona/custom rows. Added by
+// the same column-absence-gated ALTER as v10-v13 (and present in the CREATE for a
+// fresh database). `session_participants` is a new table (IF NOT EXISTS), keyed
+// (session_id, agent_id), recording which participants a session holds and
+// whether the user declined one — naby itself is never a row. No backfill: no
+// session had participants before this.
+export const SCHEMA_VERSION = 14;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -559,9 +573,20 @@ CREATE TABLE IF NOT EXISTS agents (
   memory_scope  TEXT NOT NULL,          -- session | project | user | org
   autonomy      TEXT NOT NULL,          -- JSON AgentAutonomy
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  profile       TEXT                    -- v14: JSON ParticipantProfile (kind=participant only)
 );
 CREATE INDEX IF NOT EXISTS agents_by_kind ON agents (kind);
+
+-- conversation participants per session (multi-agent-chat §8.1, v14). naby is
+-- never stored (always in the roster). Session-keyed: deleted with its session,
+-- and with its agent when a participant is removed.
+CREATE TABLE IF NOT EXISTS session_participants (
+  session_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+  status TEXT NOT NULL,            -- 'active' | 'removed' | 'declined'
+  added_by TEXT NOT NULL,          -- 'user' | 'naby'
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, agent_id));
 `;
 
 // ---------------------------------------------------------------------------
@@ -1020,7 +1045,41 @@ type AgentRow = {
   autonomy: string;
   created_at: number;
   updated_at: number;
+  // v14. Optional on the type for the same reason as the session columns: a row
+  // read mid-migration or through a partial SELECT may not carry it.
+  profile?: string | null;
 };
+
+/** The stored profile JSON, or undefined. An unreadable value (hand edit, a
+ *  truncated write) reads as ABSENT rather than throwing: one bad row must not
+ *  take down `listAgents`, and with it every turn that resolves an agent. */
+function parseStoredProfile(raw: string | null | undefined): ParticipantProfile | undefined {
+  if (raw == null || raw === '') return undefined;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as ParticipantProfile) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type SessionParticipantRow = {
+  session_id: string;
+  agent_id: string;
+  status: string;
+  added_by: string;
+  updated_at: number;
+};
+
+function toSessionParticipant(row: SessionParticipantRow): SessionParticipant {
+  return {
+    sessionId: row.session_id,
+    agentId: row.agent_id,
+    status: row.status as SessionParticipantStatus,
+    addedBy: row.added_by as SessionParticipantAddedBy,
+    updatedAt: Number(row.updated_at),
+  };
+}
 
 function toAgent(row: AgentRow): Agent {
   const agent: Agent = {
@@ -1036,6 +1095,8 @@ function toAgent(row: AgentRow): Agent {
   if (row.description != null) agent.description = row.description;
   if (row.model != null) agent.model = row.model;
   if (row.tool_refs != null) agent.toolRefs = JSON.parse(row.tool_refs) as string[];
+  const profile = parseStoredProfile(row.profile);
+  if (profile) agent.profile = profile;
   return agent;
 }
 
@@ -1184,6 +1245,14 @@ export class SqliteStore implements Store {
         }
       }
     }
+    // v?->v14 (multi-agent-chat §8.1): the participant profile column. Column-
+    // gated for the same reason as every ALTER above; nullable and backfill-free —
+    // NULL is the truth for every persona and custom row.
+    const agentCols = this.db.prepare('PRAGMA table_info(agents)').all() as { name: string }[];
+    if (agentCols.length > 0 && !agentCols.some((c) => c.name === 'profile')) {
+      this.db.exec('ALTER TABLE agents ADD COLUMN profile TEXT');
+    }
+
     // The stale-review index, created HERE rather than in the DDL because it names
     // the column added just above — see the note where the other memory_items
     // indexes are declared. IF NOT EXISTS, so it is a no-op on every later open,
@@ -1343,6 +1412,9 @@ export class SqliteStore implements Store {
     // LEDGER still survives (invariant 4) — deleting a chat must not erase what
     // the agent proved.
     this.db.prepare('DELETE FROM reflection_state WHERE session_id = ?').run(sessionId);
+    // The session's participant roster (multi-agent-chat §8.1) is session state,
+    // not a record of the agents — the participants themselves survive.
+    this.db.prepare('DELETE FROM session_participants WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
   }
 
@@ -2468,12 +2540,14 @@ export class SqliteStore implements Store {
 
   listAgents(): Agent[] {
     this.assertOpen();
-    // Built-in persona first (kind='persona' sorts before 'custom'), then oldest
-    // first within a kind.
+    // Built-in persona first, then custom agents, then participants (multi-
+    // agent-chat §8.1), oldest first within a kind. An unknown kind (a newer
+    // build's row) sorts last rather than disappearing.
     const rows = this.db
       .prepare(
         `SELECT * FROM agents
-         ORDER BY CASE kind WHEN 'persona' THEN 0 ELSE 1 END ASC, created_at ASC`,
+         ORDER BY CASE kind WHEN 'persona' THEN 0 WHEN 'custom' THEN 1 WHEN 'participant' THEN 2 ELSE 3 END ASC,
+                  created_at ASC`,
       )
       .all() as AgentRow[];
     return rows.map(toAgent);
@@ -2536,12 +2610,26 @@ export class SqliteStore implements Store {
     if (nameHolder && nameHolder.id !== (existing?.id ?? '')) {
       throw new Error(`agent name '${input.name}' is already in use`);
     }
+    // ...and unique IGNORING CASE, since `@Name` and `@name` address the same
+    // agent (parseMentions folds case). Enforced here rather than by changing the
+    // column to `UNIQUE COLLATE NOCASE`: that would need a table rebuild, and an
+    // existing DB may already hold two rows differing only in case. So the check
+    // runs only on a NEW name (a create or a rename) through `putAgent` — an
+    // unchanged legacy name and the persona restore (boot) are never refused.
+    if (!opts.allowPersona && existing?.name !== input.name) {
+      const foldHolder = this.db
+        .prepare(`SELECT id, name FROM agents WHERE name = ? COLLATE NOCASE AND id <> ?`)
+        .get(input.name, existing?.id ?? '') as { id: string; name: string } | undefined;
+      if (foldHolder) {
+        throw new Error(`agent name '${input.name}' is already in use (as '${foldHolder.name}')`);
+      }
+    }
     const id = existing ? existing.id : input.id ?? mintAgentId();
     this.db
       .prepare(
         `INSERT INTO agents
-           (id, name, kind, description, system_prompt, model, tool_refs, memory_scope, autonomy, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, name, kind, description, system_prompt, model, tool_refs, memory_scope, autonomy, created_at, updated_at, profile)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            name = excluded.name,
            kind = excluded.kind,
@@ -2551,7 +2639,8 @@ export class SqliteStore implements Store {
            tool_refs = excluded.tool_refs,
            memory_scope = excluded.memory_scope,
            autonomy = excluded.autonomy,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at,
+           profile = excluded.profile`,
       )
       .run(
         id,
@@ -2565,6 +2654,9 @@ export class SqliteStore implements Store {
         JSON.stringify(input.autonomy),
         existing ? Number(existing.created_at) : now,
         now,
+        // Saved verbatim, NOT validated — parseParticipantProfile is the gate and
+        // it runs above the store (§8.1).
+        input.profile !== undefined ? JSON.stringify(input.profile) : null,
       );
     const row = this.db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id) as AgentRow;
     return toAgent(row);
@@ -2577,7 +2669,57 @@ export class SqliteStore implements Store {
       | { kind: string }
       | undefined;
     if (!row || row.kind === 'persona') return;
+    // A participant's session rows go with it (multi-agent-chat §8.1), FIRST, so
+    // a crash between the two leaves a live agent with no roster rows rather than
+    // roster rows pointing at nothing. Run for every kind: only participants ever
+    // have rows, and a stray one is junk.
+    this.db.prepare(`DELETE FROM session_participants WHERE agent_id = ?`).run(id);
     this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(id);
+  }
+
+  // -- session participants (multi-agent-chat §8.1, MAC-M1) ----------------
+
+  listSessionParticipants(sessionId: string): SessionParticipant[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM session_participants WHERE session_id = ?
+         ORDER BY updated_at ASC, agent_id ASC`,
+      )
+      .all(sessionId) as SessionParticipantRow[];
+    return rows.map(toSessionParticipant);
+  }
+
+  putSessionParticipant(
+    sessionId: string,
+    agentId: string,
+    input: { status: SessionParticipantStatus; addedBy: SessionParticipantAddedBy },
+  ): SessionParticipant {
+    this.assertOpen();
+    this.db
+      .prepare(
+        `INSERT INTO session_participants (session_id, agent_id, status, added_by, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (session_id, agent_id) DO UPDATE SET
+           status = excluded.status,
+           added_by = excluded.added_by,
+           updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, agentId, input.status, input.addedBy, Date.now());
+    const row = this.db
+      .prepare(`SELECT * FROM session_participants WHERE session_id = ? AND agent_id = ?`)
+      .get(sessionId, agentId) as SessionParticipantRow;
+    return toSessionParticipant(row);
+  }
+
+  removeSessionParticipant(sessionId: string, agentId: string): void {
+    this.assertOpen();
+    this.db
+      .prepare(
+        `UPDATE session_participants SET status = 'removed', updated_at = ?
+         WHERE session_id = ? AND agent_id = ?`,
+      )
+      .run(Date.now(), sessionId, agentId);
   }
 
   // -- eval-event ledger (Phase 3 P3-M5, realizing P15-03) ------------------
@@ -2928,6 +3070,10 @@ export class SqliteStore implements Store {
         // The reflection cursor follows its transcript out (P3-M8a) — same
         // reasoning as in deleteSession.
         this.db.prepare('DELETE FROM reflection_state WHERE session_id = ?').run(session_id);
+        // The roster follows its session out (multi-agent-chat §8.1).
+        this.db
+          .prepare('DELETE FROM session_participants WHERE session_id = ?')
+          .run(session_id);
       }
       // The project's OWN scope='project' memory (scopeKey = cwd) goes with it.
       // user/org memory is NOT project-owned and MUST survive — it is never

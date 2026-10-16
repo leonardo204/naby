@@ -90,6 +90,12 @@ export type SkillInjectionQuery = {
    *  is budgeted FIRST, and may be any kind. Empty/omitted ⇒ nothing about the
    *  turn changes. */
   explicitNames?: string[];
+  /** ONLY the named rows (multi-agent-chat §8.3, MAC-M2). A conversation
+   *  participant carries its own skill set (`profile.skills`); the user's
+   *  trigger-matched and always-on skills are naby's, not the participant's, so
+   *  with this set nothing but `explicitNames` can be injected. Absent/false ⇒
+   *  the established selection. */
+  explicitOnly?: boolean;
   /** ON-DEMAND SKILLS (org-harness-sync §3.3) — see ON-DEMAND ROWS below. Absent
    *  ⇒ an on-demand row is never listed or loaded (it is still excluded and
    *  counted when its tools are absent, which is what an older build does). */
@@ -277,6 +283,7 @@ export function selectSkillsForInjection(
   availableTools?: ReadonlySet<string>,
   explicitNames?: readonly string[],
   onDemandQuery?: OnDemandQuery,
+  explicitOnly?: boolean,
 ): InjectedSkills {
   const budget = Math.max(0, Math.floor(tokenBudget));
   const explicit = explicitNameSet(explicitNames);
@@ -296,6 +303,7 @@ export function selectSkillsForInjection(
   const relevant = candidates.filter((c) => {
     if (c.status !== 'enabled') return false;
     if (isExplicitlyNamed(c, explicit)) return harnessBody(c).length > 0;
+    if (explicitOnly) return false;
     return c.kind === 'skill' && c.skill !== undefined && skillMatchesTurn(c, userText);
   });
 
@@ -509,6 +517,7 @@ export function retrieveSkillsForInjection(
     query.availableTools ? new Set(query.availableTools) : undefined,
     query.explicitNames,
     query.onDemand,
+    query.explicitOnly,
   );
 }
 

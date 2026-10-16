@@ -54,6 +54,9 @@ import type {
   Project,
   ReflectionCursor,
   ScopedMemoryQuery,
+  SessionParticipant,
+  SessionParticipantAddedBy,
+  SessionParticipantStatus,
   SessionRef,
   Store,
   TrustTier,
@@ -155,6 +158,18 @@ function cloneHarness(item: HarnessItem): HarnessItem {
   return out;
 }
 
+/** listAgents order by kind (multi-agent-chat §8.1) — the SQL driver's CASE. */
+const AGENT_KIND_ORDER: Record<string, number> = { persona: 0, custom: 1, participant: 2 };
+
+/** A row copy the caller may mutate freely: the profile is nested, so a spread
+ *  alone would hand out the stored object. */
+function cloneAgent(a: Agent): Agent {
+  const out: Agent = { ...a, autonomy: { ...a.autonomy } };
+  if (a.toolRefs) out.toolRefs = [...a.toolRefs];
+  if (a.profile) out.profile = JSON.parse(JSON.stringify(a.profile)) as Agent['profile'];
+  return out;
+}
+
 export class MemoryStore implements Store {
   private readonly sessions = new Map<string, SessionState>();
   private readonly mcp = new Map<string, McpEntry>();
@@ -199,6 +214,9 @@ export class MemoryStore implements Store {
   // naby agents (Phase 3, P3-M1), keyed by id. Store-level, global (no scope),
   // never per-session and never cascaded — like harness/policy.
   private readonly agents = new Map<string, Agent>();
+  /** Session participant rows (multi-agent-chat §8.1), keyed `sessionId\u0000agentId`
+   *  — the composite primary key of the SQLite table. */
+  private readonly sessionParticipants = new Map<string, SessionParticipant>();
   /** The eval-event ledger (P3-M5). A flat list: the meter always reads an
    *  agent's rows in time order, so an array beats a keyed map here. */
   private readonly evalEvents: EvalEvent[] = [];
@@ -266,6 +284,8 @@ export class MemoryStore implements Store {
     // The reflection cursor is a bookmark into the transcript that just went, so
     // it goes too (P3-M8a). The eval-event LEDGER survives — invariant 4.
     this.reflectionCursors.delete(sessionId);
+    // The session's participant roster goes too; the participants survive.
+    this.forgetSessionParticipants(sessionId);
     // CASCADE EXEMPTION (phase-1_5-memory-contracts §2/§6): remove ONLY this
     // session's scope='session' memory. user/project/org rows have no session
     // owner and MUST survive a session delete.
@@ -979,23 +999,24 @@ export class MemoryStore implements Store {
 
   listAgents(): Agent[] {
     return [...this.agents.values()]
-      .map((a) => ({ ...a }))
+      .map(cloneAgent)
       .sort((a, b) => {
-        // Built-in persona first, then oldest first within a kind.
-        const ka = a.kind === 'persona' ? 0 : 1;
-        const kb = b.kind === 'persona' ? 0 : 1;
+        // Built-in persona first, then custom, then participants (multi-agent-
+        // chat §8.1), oldest first within a kind — the SQL driver's CASE order.
+        const ka = AGENT_KIND_ORDER[a.kind] ?? 3;
+        const kb = AGENT_KIND_ORDER[b.kind] ?? 3;
         return ka !== kb ? ka - kb : a.createdAt - b.createdAt;
       });
   }
 
   getAgent(id: string): Agent | undefined {
     const a = this.agents.get(id);
-    return a ? { ...a } : undefined;
+    return a ? cloneAgent(a) : undefined;
   }
 
   getAgentByName(name: string): Agent | undefined {
     const a = [...this.agents.values()].find((x) => x.name === name);
-    return a ? { ...a } : undefined;
+    return a ? cloneAgent(a) : undefined;
   }
 
   putAgent(input: AgentInput): Agent {
@@ -1029,6 +1050,17 @@ export class MemoryStore implements Store {
     if (nameHolder && nameHolder.id !== (existing?.id ?? '')) {
       throw new Error(`agent name '${input.name}' is already in use`);
     }
+    // ...and unique ignoring case, on a NEW name only (sqlite-store explains why).
+    // SQLite's NOCASE folds ASCII only, so this folds ASCII only too.
+    if (!opts.allowPersona && existing?.name !== input.name) {
+      const fold = (n: string) => n.replace(/[A-Z]/g, (c) => c.toLowerCase());
+      const foldHolder = [...this.agents.values()].find(
+        (x) => x.id !== (existing?.id ?? '') && fold(x.name) === fold(input.name),
+      );
+      if (foldHolder) {
+        throw new Error(`agent name '${input.name}' is already in use (as '${foldHolder.name}')`);
+      }
+    }
     const id = existing ? existing.id : input.id ?? `a-mem-${(this.agentIdCounter += 1)}`;
     const stored: Agent = {
       id,
@@ -1043,15 +1075,71 @@ export class MemoryStore implements Store {
     if (input.description !== undefined) stored.description = input.description;
     if (input.model !== undefined) stored.model = input.model;
     if (input.toolRefs !== undefined) stored.toolRefs = [...input.toolRefs];
+    // A JSON copy, exactly what the SQL driver's column round-trip yields: the
+    // caller's object can be mutated afterwards without reaching the store, and
+    // `undefined` fields drop out on both drivers alike.
+    if (input.profile !== undefined) {
+      stored.profile = JSON.parse(JSON.stringify(input.profile)) as Agent['profile'];
+    }
     this.agents.set(id, stored);
-    return { ...stored };
+    return cloneAgent(stored);
   }
 
   removeAgent(id: string): void {
     // The built-in persona (kind='persona') is UNDELETABLE (spec §4).
     const a = this.agents.get(id);
     if (!a || a.kind === 'persona') return;
+    // A participant's session rows go with it (multi-agent-chat §8.1).
+    for (const [key, row] of this.sessionParticipants) {
+      if (row.agentId === id) this.sessionParticipants.delete(key);
+    }
     this.agents.delete(id);
+  }
+
+  // -- session participants (multi-agent-chat §8.1, MAC-M1) ----------------
+
+  listSessionParticipants(sessionId: string): SessionParticipant[] {
+    return [...this.sessionParticipants.values()]
+      .filter((r) => r.sessionId === sessionId)
+      .sort((a, b) =>
+        a.updatedAt !== b.updatedAt
+          ? a.updatedAt - b.updatedAt
+          : a.agentId < b.agentId
+            ? -1
+            : a.agentId > b.agentId
+              ? 1
+              : 0,
+      )
+      .map((r) => ({ ...r }));
+  }
+
+  putSessionParticipant(
+    sessionId: string,
+    agentId: string,
+    input: { status: SessionParticipantStatus; addedBy: SessionParticipantAddedBy },
+  ): SessionParticipant {
+    const row: SessionParticipant = {
+      sessionId,
+      agentId,
+      status: input.status,
+      addedBy: input.addedBy,
+      updatedAt: Date.now(),
+    };
+    this.sessionParticipants.set(`${sessionId}\u0000${agentId}`, row);
+    return { ...row };
+  }
+
+  removeSessionParticipant(sessionId: string, agentId: string): void {
+    const key = `${sessionId}\u0000${agentId}`;
+    const row = this.sessionParticipants.get(key);
+    if (!row) return;
+    this.sessionParticipants.set(key, { ...row, status: 'removed', updatedAt: Date.now() });
+  }
+
+  private forgetSessionParticipants(sessionId: string): void {
+    for (const [key, row] of this.sessionParticipants) {
+      if (row.sessionId === sessionId) this.sessionParticipants.delete(key);
+    }
   }
 
   // -- eval-event ledger (P3-M5) --------------------------------------------
@@ -1212,6 +1300,7 @@ export class MemoryStore implements Store {
       // the session's vote on every surviving memory item (P3-M8b §5.3).
       this.reflectionCursors.delete(sessionId);
       this.forgetObservationsFromSession(sessionId);
+      this.forgetSessionParticipants(sessionId);
     }
     const removedMemoryIds: string[] = [];
     for (const [id, item] of this.memoryItems) {

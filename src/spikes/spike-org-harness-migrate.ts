@@ -435,8 +435,10 @@ async function case1(): Promise<void> {
   record('[§3.1] executable bits survive extraction (unix)', process.platform === 'win32' || exec !== 0, `mode&111=${exec}`);
   const dump = dumpTables(dbPath);
   record(
-    '[§4.1] SCHEMA_VERSION stays 13 and the DB reports user_version 13',
-    SCHEMA_VERSION === 13 && dump.userVersion === 13,
+    // The org harness adds no schema of its own. Pinned to the CURRENT version
+    // rather than a literal since v14 (multi-agent-chat §8.1) moved it on.
+    '[§4.1] the org harness adds no schema version: the DB reports the current user_version',
+    SCHEMA_VERSION >= 13 && dump.userVersion === SCHEMA_VERSION,
     `SCHEMA_VERSION=${SCHEMA_VERSION} user_version=${dump.userVersion}`,
   );
   const injected = retrieveSkillsForInjection(
@@ -487,7 +489,10 @@ async function case2(): Promise<void> {
   );
   record('[case 2] harness_items byte-identical before/after', before.harness === after.harness);
   record('[case 2] settings byte-identical before/after', before.settings === after.settings);
-  record('[case 2] user_version unchanged (13)', before.userVersion === 13 && after.userVersion === 13);
+  record(
+    '[case 2] user_version unchanged (current)',
+    before.userVersion === SCHEMA_VERSION && after.userVersion === SCHEMA_VERSION,
+  );
   record('[case 2] nothing written under <NABY_HOME>/org', !existsSync(join(home, 'org')));
   record(
     '[case 2] the state reader reports "not configured" without writing',

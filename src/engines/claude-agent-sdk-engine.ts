@@ -1296,7 +1296,32 @@ function renderHistoryLine(m: RuntimeMessage): string | null {
     }
     return m.content ? `Assistant: ${m.content}` : null;
   }
+  // WHO SAID IT (multi-agent-chat §8.3). A row the history view relabelled — naby's
+  // or another participant's speech, or a hand-off — keeps its `speaker`, and the
+  // label rides as an attribute so "the user" is never credited with an agent's
+  // words. Rows without one (every row of a session with no participant) render
+  // exactly as before.
+  if (m.speaker) return m.content ? `User (speaker="@${m.speaker.name}"): ${m.content}` : null;
   return m.content ? `User: ${m.content}` : null;
+}
+
+/** The speaker of the newest user row, when it is a hand-off rather than the
+ *  user's own message (multi-agent-chat §8.3). */
+function lastUserSpeaker(
+  messages: EngineRunInput['messages'],
+): { name: string; selfNote: boolean } | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m?.role !== 'user') continue;
+    if (!m.speaker) return undefined;
+    return {
+      name: m.speaker.name,
+      // naby's note to ITSELF (a follow-up speech): the round's instruction, not
+      // a message from someone else.
+      selfNote: m.routing?.targetAgentId !== undefined && m.routing.targetAgentId === m.speaker.agentId,
+    };
+  }
+  return undefined;
 }
 
 /** The prompt for this turn: prior history as context, then the new user text. */
@@ -1317,13 +1342,20 @@ export function renderPrompt(messages: EngineRunInput['messages']): string {
     .filter((l): l is string => l !== null && l.length > 0);
   if (lines.length === 0) return current;
 
+  // A hand-off is naby speaking, not the user: the header says so, so a
+  // participant never reads naby's brief as the user's own request.
+  const speaker = lastUserSpeaker(messages);
   return [
     'Earlier messages in this conversation, for context only — do not answer them again:',
     '<conversation_history>',
     ...lines,
     '</conversation_history>',
     '',
-    'The user now says:',
+    speaker
+      ? speaker.selfNote
+        ? 'Your next step in this conversation:'
+        : `@${speaker.name} (the host) now says to you:`
+      : 'The user now says:',
     current,
   ].join('\n');
 }

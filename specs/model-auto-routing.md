@@ -1,19 +1,22 @@
 ---
 id: model-auto-routing
 type: design
-version: 0.2.1
+version: 0.2.2
 status: draft
 scope: Claude 구독 엔진에서 모델을 `auto`로 두면 naby가 요청마다 sonnet·opus·fable 중 하나를 고르고(haiku는 메인 대화의 후보가 아니다), 고른 모델을 화면에 보여주는 것
 related:
+  - multi-agent-chat
   - claude-multi-account
   - session-context-management
   - naby-voice-layer
   - phase-3-persona-agent
   - phase-3-fast-evolution
-updated: 2026-09-28
+updated: 2026-10-16
 ---
 
 # 모델 자동 선택 (auto)
+
+> **2026-10-16 참조([multi-agent-chat](multi-agent-chat.md) §8.2)**: 나비의 참가자 라우팅 호출은 `routine` 등급과 같은 모델을 쓰되, `routeModelTier`를 거치지 않고 `ROUTE_TIER` 상수로 등급을 직접 정한다. 이 문서의 `sticky`·`window-fit`·`budget-cap` 규칙은 그 호출에 적용되지 않는다.
 
 ## 1. 문제
 

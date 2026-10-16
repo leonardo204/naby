@@ -2,11 +2,11 @@
 id: harness-portability-strategy
 title: Naby 하네스 이식성 전략 — 스킬·서브에이전트·커맨드를 벤더 밖 내 자산으로
 type: design
-version: 0.2.0
+version: 0.2.1
 status: review
 scope: 하네스(스킬·서브에이전트·슬래시커맨드)를 특정 엔진(Claude Code)에 묶인 상속물이 아니라 Naby Layer가 소유하고 옮기고 나누는 1급 자산으로 다시 정의하는 전략. 지금 하네스 평면이 둘로 갈라진 상태와 dev/prod 비대칭을 진단하고, 설계 결정 여섯 가지, 프로바이더 독립 하네스 런타임, import/export와 팀 공유, 임포트한 하네스의 오염 방어를 다룬다. v0.2에서 phase 경계를 정리했다. 코어는 Phase 1.6으로 Phase 2보다 먼저 하고, 툴 실행에 의존하는 조각만 Phase 2.5로 미룬다.
-related: [personalized-agent-desktop-app, personalization-strategy, phase-1-contracts, phase-2-personalization-hitl, phase-1_5-memory-contracts, phase-1_6-harness-ownership, phase-1_6-harness-contracts]
-updated: 2026-07-23
+related: [agent-import-adapters, multi-agent-chat, personalized-agent-desktop-app, personalization-strategy, phase-1-contracts, phase-2-personalization-hitl, phase-1_5-memory-contracts, phase-1_6-harness-ownership, phase-1_6-harness-contracts]
+updated: 2026-10-16
 ---
 
 # Naby 하네스 이식성 전략

@@ -16,7 +16,10 @@ import type {
   EngineEvent,
   Executor,
   Gate,
+  MessageRouting,
+  MessageSpeaker,
   ModelSelection,
+  RollingSummary,
   RuntimeImage,
   SubagentSpec,
   ToolOutput,
@@ -30,7 +33,8 @@ import {
   type InjectedSkills,
   type SkillInjectionQuery,
 } from './skill-inject.js';
-import type { InjectedMemory, MemoryInjectionQuery, Store } from './store/store.js';
+import type { InjectedMemory, MemoryInjectionQuery, MemoryScope, Store } from './store/store.js';
+import { viewHistoryFor } from './participants.js';
 
 export type RunTurnOptions = {
   engine: Engine;
@@ -50,6 +54,29 @@ export type RunTurnOptions = {
    *  engine, which maps them if it supports native delegation (Claude Agent SDK)
    *  or ignores them (AI-SDK). */
   subagents?: SubagentSpec[];
+  // -- conversation participants (multi-agent-chat §8.1, §8.3, MAC-M2) ------
+  //
+  // OPT-IN, and absent on every turn of a session that never had a participant:
+  // with none of these set and no labelled row in the transcript, the history
+  // view below is the identity and the rows written are the rows always written.
+
+  /** WHO SPEAKS this turn, when it is a participant (§8.3). The assistant rows
+   *  this turn writes carry it, and the history is viewed from its seat (only
+   *  its own past speech stays `assistant`). Absent = naby speaks. */
+  speaker?: MessageSpeaker;
+  /** The HAND-OFF that opens this turn (§8.1): the user row is written as
+   *  `{role:'user', speaker: from, routing}` — naby's instruction to the speaker,
+   *  NOT the user's words (`isUserAuthored` is false for it). Absent = the user
+   *  row is the user's own message, exactly as before. */
+  routing?: MessageRouting & { from: MessageSpeaker };
+  /** naby's own identity, for labelling naby's rows in a participant's view
+   *  (`[@naby] …`). Defaults to the handle `naby`. */
+  hub?: MessageSpeaker;
+  /** Stamp a `routing` on the assistant TEXT row this turn writes — the round
+   *  loop's RETURN marker (`{kind:'return', reason:'asked'}` when a participant
+   *  addressed `@naby`). Called once per stored text block; undefined = none. */
+  assistantRouting?: (text: string) => MessageRouting | undefined;
+
   /** System prompt for this turn. Passed to the engine on its OWN field, never
    * appended to the history — `ai@7` rejects `role:'system'` inside `messages`
    * and a system prompt is not part of the transcript we replay (contract §6). */
@@ -142,6 +169,9 @@ export type RunTurnOptions = {
     userId?: string;
     /** org-scope key — omit unless in-house org memory is in play. */
     orgId?: string;
+    /** Read only these scopes (a participant's `memoryScope`, multi-agent-chat
+     *  D6). Omit for the established read across every scope. */
+    scopes?: readonly MemoryScope[];
   };
   /** Called once with what was injected (items, tokensUsed, droppedForBudget) so
    * the caller can record the per-turn memory log (contract §5). Fires only when
@@ -185,6 +215,9 @@ export type RunTurnOptions = {
      *  once per user turn (org-harness-sync §4.7), so every step of an autonomous
      *  run lists and loads from the same package. Omit ⇒ never listed. */
     onDemand?: SkillInjectionQuery['onDemand'];
+    /** Inject ONLY `explicitNames` (a participant's own `profile.skills`,
+     *  multi-agent-chat §8.3). Omit for the established selection. */
+    explicitOnly?: boolean;
   };
   /** Called once with what was injected (skills, tokensUsed, droppedForBudget,
    * excludedForTools) so the caller can log/inspect the per-turn skill selection.
@@ -312,7 +345,15 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   // provider id touches storage, and it is a hint — see SessionRef.providerId.
   store.touchSession(sessionId, model.providerId);
 
-  store.appendMessage(sessionId, { role: 'user', content: userText });
+  // A HAND-OFF ROW when the round loop opened this turn (multi-agent-chat §8.1):
+  // naby's instruction to the speaker is stored as a labelled user row, so no
+  // learner reads it as something the user typed (`isUserAuthored`).
+  if (opts.routing) {
+    const { from, ...routing } = opts.routing;
+    store.appendMessage(sessionId, { role: 'user', content: userText, speaker: from, routing });
+  } else {
+    store.appendMessage(sessionId, { role: 'user', content: userText });
+  }
 
   // -- MEMORY INJECTION (Phase 1.5, P15-02) ---------------------------------
   // Retrieve confirmed, scope-appropriate memory within a hard token budget and
@@ -334,6 +375,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
         : {}),
       ...(opts.memoryInjection.queryText !== undefined
         ? { queryText: opts.memoryInjection.queryText }
+        : {}),
+      ...(opts.memoryInjection.scopes !== undefined
+        ? { scopes: opts.memoryInjection.scopes }
         : {}),
     };
     const injectOpts: { userId?: string; orgId?: string } = {};
@@ -403,6 +447,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       ...(opts.skillInjection.onDemand !== undefined
         ? { onDemand: opts.skillInjection.onDemand }
         : {}),
+      ...(opts.skillInjection.explicitOnly ? { explicitOnly: true } : {}),
     };
     const skillOpts: { userId?: string; orgId?: string } = {};
     if (opts.skillInjection.userId !== undefined)
@@ -458,7 +503,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
      *  the naby layer was not allowed to touch (see `deliverText`). */
     note?: Record<string, string>,
   ): void => {
-    store.appendMessage(sessionId, { role: 'assistant', content: ev.text });
+    // WHO SAID IT (multi-agent-chat §8.1): a participant's line carries its
+    // speaker, and the round loop may mark it as a return to naby. Neither is
+    // set on any turn outside a round, so this row is what it always was.
+    const routing = opts.assistantRouting?.(ev.text);
+    store.appendMessage(sessionId, {
+      role: 'assistant',
+      content: ev.text,
+      ...(opts.speaker ? { speaker: opts.speaker } : {}),
+      ...(routing ? { routing } : {}),
+    });
     // THE RESPONSE, IN FULL — but only once. A streaming engine emits the same
     // sentence twice, as `partial` token deltas and then as one complete event;
     // logging both would write the answer to disk character by character and then
@@ -611,7 +665,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   // to the engine without being persisted or replayed later. Attaching before
   // the loop keeps the engine seam unchanged (it just sees a user message that
   // happens to carry images).
-  const turnMessages = store.getMessages(sessionId);
+  // THE VIEW FROM THE SPEAKER'S SEAT (multi-agent-chat §8.3, R2.3). Only the
+  // speaker's own past speech stays `assistant`; everybody else's is labelled
+  // user-side context. The identity for a session with no labelled rows, which
+  // is every session before participants — byte-for-byte the old input.
+  const turnMessages = viewHistoryFor(store.getMessages(sessionId), opts.speaker, {
+    hubName: opts.hub?.name ?? opts.routing?.from.name ?? 'naby',
+    ...(opts.hub?.agentId ?? opts.routing?.from.agentId
+      ? { hubId: (opts.hub?.agentId ?? opts.routing?.from.agentId)! }
+      : {}),
+  });
   if (opts.images && opts.images.length > 0) {
     for (let i = turnMessages.length - 1; i >= 0; i -= 1) {
       const m = turnMessages[i];
@@ -653,25 +716,41 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       // transcript stays exactly what was said (contract §6), which is what lets
       // the same session continue on the Agent SDK engine, whose own compaction
       // knows nothing about this summary.
-      rollingSummary: {
-        load: () => {
-          try {
-            return store.getSessionRollingSummary(sessionId);
-          } catch {
-            // A store that cannot answer reads as "nothing folded yet": the turn
-            // regenerates a summary rather than failing over a cache.
-            return undefined;
-          }
-        },
-        save: (summary) => {
-          try {
-            store.setSessionRollingSummary(sessionId, summary);
-          } catch {
-            // Documented as non-throwing on the port: a failed write costs the
-            // next turn one regeneration and nothing else.
-          }
-        },
-      },
+      //
+      // NABY'S VIEW ONLY (multi-agent-chat §8.3). The summary is ONE row per
+      // session and its `foldedCount` counts messages of the array the engine was
+      // handed — which, with participants, is a per-viewer VIEW (another
+      // speaker's tool rows dropped, its speech relabelled). A participant's view
+      // and naby's differ in length and content, so a count written from one is
+      // meaningless against the other, and a participant's summary would put its
+      // own-seat reading into naby's context. So a participant's turn gets NO port
+      // (it folds without reuse, and never writes); naby's view is a row-by-row
+      // map of the transcript, so a prefix of it is the view of a prefix — every
+      // naby turn counts in the same coordinates. A session without participants
+      // is the identity view, i.e. exactly the old behaviour.
+      ...(opts.speaker
+        ? {}
+        : {
+            rollingSummary: {
+              load: () => {
+                try {
+                  return store.getSessionRollingSummary(sessionId);
+                } catch {
+                  // A store that cannot answer reads as "nothing folded yet": the
+                  // turn regenerates a summary rather than failing over a cache.
+                  return undefined;
+                }
+              },
+              save: (summary: RollingSummary) => {
+                try {
+                  store.setSessionRollingSummary(sessionId, summary);
+                } catch {
+                  // Documented as non-throwing on the port: a failed write costs
+                  // the next turn one regeneration and nothing else.
+                }
+              },
+            },
+          }),
       signal,
     })) {
       // Cancellation: stop consuming the moment the turn is aborted. Breaking out
@@ -808,6 +887,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
         store.appendMessage(sessionId, {
           role: 'assistant',
           content: '',
+          ...(opts.speaker ? { speaker: opts.speaker } : {}),
           toolCalls: [
             {
               toolCallId: ev.toolCallId,

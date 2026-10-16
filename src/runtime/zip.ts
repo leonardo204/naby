@@ -329,12 +329,14 @@ export function listZipEntries(zip: Uint8Array): string[] {
   return readCentralDirectory(buf).map((e) => e.name);
 }
 
-// -- writing (fixtures) -------------------------------------------------------
+// -- writing ------------------------------------------------------------------
 //
-// The product never writes a zip. This exists so a spike and a shell test can
-// build a package (or a hostile one) from a directory listing without a binary
-// fixture in the tree. It deliberately writes WHATEVER NAME IT IS GIVEN — the
-// zip-slip test needs a `../` entry, and refusing it here would make that test
+// Two users. A spike and a shell test build a package (or a hostile one) from a
+// directory listing without a binary fixture in the tree. And the participant
+// bundle export (participant-export.ts, agent-import-adapters §5) writes its
+// zip in memory with it — the caller names every entry, from sanitised
+// basenames. It deliberately writes WHATEVER NAME IT IS GIVEN — the zip-slip
+// test needs a `../` entry, and refusing it here would make that test
 // impossible to write.
 
 export type ZipWriteEntry = {

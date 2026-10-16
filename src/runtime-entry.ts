@@ -33,6 +33,9 @@ export type {
   RollingSummaryPort,
   CompactionPort,
   RuntimeMessage,
+  // Who spoke a row and how the round moved there (multi-agent-chat §8.1).
+  MessageSpeaker,
+  MessageRouting,
   SubagentSpec,
   ToolCall,
   ToolOutput,
@@ -330,6 +333,10 @@ export type {
   AgentKind,
   AgentEscalation,
   AgentAutonomy,
+  // Conversation participants per session (multi-agent-chat §8.1, MAC-M1).
+  SessionParticipant,
+  SessionParticipantStatus,
+  SessionParticipantAddedBy,
   // The eval-event ledger (Phase 3, P3-M5) — realizes the stream P15-03 reserved.
   // The shell appends check-in / autonomous / tripwire observations here and the
   // trust meter reads them. NEVER exposed to the agent itself.
@@ -435,6 +442,47 @@ export {
   parseAgentAddress,
   seedBuiltinPersona,
 } from './runtime/agents.js';
+
+// CONVERSATION PARTICIPANTS (specs/multi-agent-chat.md §8.1–§8.3, MAC-M1). Pure:
+// the profile gate the shell's `participant.put` runs before a write, the `@`
+// mention parser, naby's routing prompt and its strict parser, the participant's
+// system prompt, and the "did the user write this row" test every learner uses.
+export {
+  composeParticipantSystem,
+  defaultParticipantProfile,
+  handoffPrefix,
+  HUB_MENTION_ALIASES,
+  isUserAuthored,
+  mentionsHub,
+  speakerPrefix,
+  viewHistoryFor,
+  matchKnowledgeKeywords,
+  parseMentions,
+  parseParticipantProfile,
+  parseRouteDecision,
+  routePrompt,
+  selectKnowledge,
+  PARTICIPANT_MAX_EMOJI_CHARS,
+  PARTICIPANT_MAX_EXAMPLE_BYTES,
+  PARTICIPANT_MAX_EXAMPLES,
+  PARTICIPANT_MAX_EXTENSIONS_BYTES,
+  PARTICIPANT_MAX_GREETING_BYTES,
+  PARTICIPANT_MAX_IMAGE_BYTES,
+  PARTICIPANT_MAX_POLICY_BYTES,
+  PARTICIPANT_MAX_PROFILE_BYTES,
+  PARTICIPANT_MAX_INLINE_BYTES,
+  PARTICIPANT_MAX_KNOWLEDGE,
+  PARTICIPANT_RULES,
+  ROUTE_BRIEF_MAX_CHARS,
+  ROUTE_RECENT_LIMIT,
+  ROUTE_TIER,
+  type KnowledgeItem,
+  type ParticipantProfile,
+  // Aliased: `RouteDecision` already names the model router's decision above.
+  type RouteAction as ParticipantRouteAction,
+  type RouteDecision as ParticipantRouteDecision,
+  type RoutePromptInput as ParticipantRoutePromptInput,
+} from './runtime/participants.js';
 
 // Phase 1.5 — the deterministic memory write gate (P15-05) and the turn-time
 // retrieval/injection helpers (P15-02). The gate is pure; the store's putMemory
@@ -1218,6 +1266,60 @@ export {
   type AgentImportReport,
   type AgentImportResult,
 } from './runtime/agent-import.js';
+
+// -- participants in and out (multi-agent-chat MAC-M4, agent-import-adapters) --
+// Adapters turn a foreign agent definition (Claude Code `.md`, a naby sidecar
+// v1/v2, a character card V2/V3 as JSON or PNG) into a participant PLAN; the
+// common pipeline (`finalizePlan`) owns every trust rule. Pure — the shell's
+// `participant.import` applies a plan on a second request. The export writes
+// the `.md` + sidecar v2 pair, or a zip of several.
+export {
+  importParticipant,
+  detectImportFormat,
+  runtimeToolNames,
+  finalizePlan,
+  freeParticipantName,
+  sha256Hex,
+  parseFrontmatter,
+  parseSubagentArtifact,
+  subagentFromFrontmatter,
+  claudeColorName,
+  parseMesExample,
+  buildPng,
+  readPngTextChunks,
+  stripPngTextChunks,
+  loadYamlLite,
+  PARTICIPANT_ADAPTERS,
+  DETECT_THRESHOLD,
+  CLAUDE_AGENT_COLORS,
+  CLAUDE_BUILTIN_TOOLS,
+  CARD_USER_LABEL,
+  EMPTY_IMPORT_ENV,
+  IMPORT_IGNORED_KEYS,
+  IMPORT_MAX_SYSTEM_PROMPT_BYTES,
+  SUBAGENT_CORE_KEYS,
+  type FinalizeEnv,
+  type FrontmatterParser,
+  type ImportDraft,
+  type ImportEnv,
+  type ImportFormat,
+  type ImportInput,
+  type ImportLoss,
+  type ImportPlan,
+  type ImportResult,
+  type ParsedSubagent,
+  type ParticipantAdapter,
+  type PngTextChunk,
+} from './runtime/import/index.js';
+export {
+  buildParticipantExport,
+  buildParticipantBundle,
+  GUARDRAILS_HEADING,
+  PARTICIPANT_EXPORT_FORMAT_VERSION,
+  type ParticipantBundle,
+  type ParticipantExportReport,
+  type ParticipantExportResult,
+} from './runtime/participant-export.js';
 
 // -- the check-in itself (Phase 3, P3-M5) ------------------------------------
 // What the meter measures: the agent's own proposal, the user's pick, and the

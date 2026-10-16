@@ -37,6 +37,7 @@
 // of the agent only by pointing at something the user actually typed.
 
 import type { RuntimeMessage } from './engine.js';
+import { isUserAuthored } from './participants.js';
 import type {
   MemoryItem,
   MemoryScope,
@@ -473,7 +474,10 @@ export type ReflectionCaseInput = {
 /** Text of a user message, trimmed and truncated; '' for anything that is not a
  *  user message with content. */
 function userText(msg: RuntimeMessage): string {
-  if (msg.role !== 'user') return '';
+  // ONLY WHAT THE USER TYPED (multi-agent-chat §8.1, R3.8). naby's hand-off to a
+  // participant is stored as a labelled user row; read as the user's words it
+  // would become evidence for a correction or a memory the user never gave.
+  if (msg.role !== 'user' || !isUserAuthored(msg)) return '';
   const text = typeof msg.content === 'string' ? msg.content.trim() : '';
   return text.length > REFLECTION_MESSAGE_CHARS ? text.slice(0, REFLECTION_MESSAGE_CHARS) : text;
 }
@@ -514,10 +518,22 @@ export function buildReflectionCases(input: ReflectionCaseInput): ReflectionCase
   const windowStart = Math.max(0, messages.length - messageCap);
   if (cap === 0) return [];
 
-  // Tool-message positions per bare tool name, in transcript order.
+  // A PARTICIPANT'S tool calls are not naby's (multi-agent-chat §8.3, R3.8). Its
+  // gate writes no ledger row, so its `tool` rows have no gate row to pair with —
+  // counted here they would shift every later naby anchor onto the wrong action
+  // (and the wrong user messages). Its calls are found by the `speaker` on the
+  // assistant row that made them; naby's own assistant rows carry none.
+  const participantCalls = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || msg.speaker === undefined) continue;
+    for (const c of msg.toolCalls ?? []) participantCalls.add(c.toolCallId);
+  }
+
+  // Tool-message positions per bare tool name, in transcript order — naby's only.
   const toolPositions = new Map<string, number[]>();
   messages.forEach((msg, index) => {
     if (msg.role !== 'tool') return;
+    if (participantCalls.has(msg.toolCallId)) return;
     const list = toolPositions.get(msg.toolName);
     if (list) list.push(index);
     else toolPositions.set(msg.toolName, [index]);

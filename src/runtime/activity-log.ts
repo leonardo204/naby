@@ -150,6 +150,18 @@ export type ActivityKind =
   | 'telegram_out'
   | 'escalation'
   | 'scheduled_task_run'
+  // -- conversation participants (multi-agent-chat §8.6, MAC-M2) -------------
+  //
+  // naby's DECISIONS in a round, not engine events: who it handed the turn to
+  // and why (`participant_route`, with the routing call's own tokens), a
+  // proposal to add a participant and the user's answer, a participant's `@` to
+  // another participant that was ignored, a round limit reached, and the end
+  // of the round. A speech's tokens stay on `usage`, attributed by agent.
+  | 'participant_route'
+  | 'participant_proposal'
+  | 'participant_mention_ignored'
+  | 'participant_cap'
+  | 'round_completed'
   // -- accounting -----------------------------------------------------------
   | 'usage';
 

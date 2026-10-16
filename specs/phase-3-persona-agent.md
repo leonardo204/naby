@@ -2,11 +2,11 @@
 id: phase-3-persona-agent
 title: Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
 type: design
-version: 0.12.5
+version: 0.13.0
 status: review
 scope: naby 자체의 에이전트 레이어 — 페르소나 에이전트 데이터 모델, @ 라우팅, Settings 재편, 마일스톤 M1~M6(모델·라우팅·자율/에스컬레이션·학습·신뢰지표·내보내기). 신뢰 지표 알고리즘은 butterfly-trust-meter, 원장 계약은 checkin-contracts, 내보내기는 agent-export로 내려간다.
-related: [phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-3-fast-evolution, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts, settings-ia-reorg]
-updated: 2026-10-12
+related: [multi-agent-chat, phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-agent-export, phase-3-continuous-learning, phase-3-persona-hardening, phase-3-memory-hygiene, phase-3-fast-evolution, phase-2-2.5-plan, personalization-strategy, harness-portability-strategy, phase-1_5-memory-contracts, settings-ia-reorg]
+updated: 2026-10-16
 ---
 
 # Phase 3 — Personal Persona Agent (naby 자체 에이전트 레이어)
@@ -43,7 +43,7 @@ updated: 2026-10-12
 `agents` 스토어 슬라이스(하네스와 별개):
 ```
 Agent {
-  id, name, kind: 'persona' | 'custom',
+  id, name, kind: 'persona' | 'custom' | 'participant',   // participant: multi-agent-chat §8.1 (2026-10-16)
   systemPrompt,            // 페르소나 지시 (학습 컨텍스트는 주입으로 합성)
   model?,
   toolRefs?,               // 허용 도구
@@ -59,9 +59,10 @@ Agent {
 
 ## 5. 호출 라우팅 (`@`)
 
-- `ChatInput`과 디스패치에서 줄이 `@<agentName> ...`으로 시작하면 그 에이전트로 턴을 라우팅한다.
+- `ChatInput`과 디스패치에서 줄이 `@<agentName> ...`으로 시작하면 그 에이전트로 턴을 라우팅한다. *(2026-10-16 개정: 참가자 이름은 줄 어디에 있어도 멘션이다 — 아래 개정 표시 참조.)*
   - ⚠️ 지금 `@`는 두 가지로 쓰인다. 하나는 서브에이전트 커맨드(`@verb`), 하나는 파일 절대경로 삽입이다. **충돌을 정리해야 한다.** 우선순위는 `@에이전트명`(등록된 agent) > `@하네스subagent` > 파일이며, 등록된 에이전트 이름을 먼저 맞춰 본다.
 - 라우팅한 턴은 에이전트의 systemPrompt, 주입된 메모리, 에이전트 toolRefs, autonomy 모드로 구성된다. `resolveCommandPrompt`와 `runTurn`을 확장한다.
+  - ⚠️ **2026-10-16 개정([`multi-agent-chat`](multi-agent-chat.md) §8.2)**: `@`는 더 이상 줄 맨 앞 하나만 보지 않는다. 메시지 안의 모든 `@이름` 가운데 **등록된 참가자 이름과 맞는 것**은 멘션으로 해석해 나비가 그 순서로 위임한다. 우선순위(등록 에이전트 > 하네스 서브에이전트 > 파일)는 그대로다. 이 계약은 multi-agent-chat이 소유한다.
 
 ## 6. Settings 재편
 
@@ -181,8 +182,17 @@ Agent {
   - 없애는 것은 **생성 경로뿐이다.** `kind='custom'` 행은 런타임에 그대로 있고, 임포트는 계속 그것을 만들며, 목록·편집·삭제·성장·내보내기도 그대로 동작한다. 다른 기기에서 가져온 에이전트를 쓰지 못하게 만드는 것은 이 결정의 목적이 아니다.
   - `agent.put` API는 그대로 둔다(페르소나 행은 여전히 거부한다). 편집이 그 API를 쓰고, 생성은 UI에서만 사라진다.
 
+## 8.3. 결정 사항 (2026-10-16 사용자 결정) — 대화 참가자
+
+- ✅ **나비는 여전히 유일한 1급 에이전트다. 그 아래에 나비가 관리하는 "참가자"를 둔다.** §8.2의 "나비 레이어의 에이전트는 하나"는 **나비만이 사용자를 대리하고 학습하고 성장한다**는 뜻으로 유지한다. 참가자(`kind='participant'`)는 사용자를 대리하지 않고 성장하지 않으며, 나비가 위임할 때만 말한다. 설계·요구사항은 [`multi-agent-chat`](multi-agent-chat.md)이 소유한다.
+  - 사용자의 질의는 **항상 나비가 먼저 받는다.** 나비가 직접 답하거나 참가자에게 위임하거나, 세션에 없는 등록 참가자를 **승인을 받아** 추가한다. 위임받은 참가자는 채팅에 직접 답한다. 에이전트 간 대화는 나비 ↔ 참가자뿐이다.
+  - §8.2가 없앤 **생성 UI는 참가자용으로 되살아난다**(설정 → 나비 탭 → 참가자). custom 생성 UI는 여전히 없다.
+  - `@` 게이트([`phase-3-persona-hardening`](phase-3-persona-hardening.md) G2 `isAddressable`)는 **나비와 custom에만** 적용된다. 참가자는 그 게이트를 지나지 않는다 — 세션 참가자 목록이 참가자의 게이트다.
+  - 참가자가 있는 세션에서 나비의 발언은 `maxSteps=1`이다(1차 제약, multi-agent-chat §8.9). 자율 루프와 발언 루프를 겹치지 않는다.
+  - 기존 메시지는 전부 나비의 발언으로 읽는다. 마이그레이션이 없다.
+
 ### 착수 시 남은 세부 결정 (P3-M1에서 확정)
-1. `@` 충돌 정리 규칙: **등록된 에이전트 이름 > 하네스 subagent(`@verb`) > 파일 참조**. 줄 맨 앞의 `@name`이 등록된 agent면 라우팅하고, 아니면 기존 동작을 따른다.
+1. `@` 충돌 정리 규칙: **등록된 에이전트 이름 > 하네스 subagent(`@verb`) > 파일 참조**. 줄 맨 앞의 `@name`이 등록된 agent면 라우팅하고, 아니면 기존 동작을 따른다. *(2026-10-16 개정: 참가자(`kind='participant'`)는 줄 맨 앞이 아니어도 멘션으로 해석한다. multi-agent-chat §8.2.)*
 2. 자율 실행 안전장치: `autonomy.maxSteps` 상한, 모든 툴콜에 M1/M2 게이트 강제, 텔레그램 승인이 반드시 필요한 도구 목록.
 3. 텔레그램 통합 방식: naby 런타임에 채널을 새로 만들지, 기존 dotclaude-messenger에 브리지를 놓을지 — 착수할 때 조사한다.
 
@@ -191,6 +201,7 @@ Agent {
 
 ## 변경 이력
 
+- 0.13.0(2026-10-16): §8.3 대화 참가자 결정을 더했다. §4 `kind`에 `participant`, §5에 `@` 다중 멘션 개정 표시. related에 `multi-agent-chat`. 설계는 그 문서가 소유한다.
 - 0.12.5(2026-10-12): P3-M5의 사용자 결정 대기 항목을 결정 완료로 바꿨다(보정은 표시만, 능력 거부는 트립와이어에서 제외). `spike:growth` 수를 38/38로 고쳤다.
 - 0.12.4(2026-10-12): §6에 settings-ia-reorg 개정 표시를 달았다(메모리는 기억 탭, 텔레그램은 연결 탭). related에 `settings-ia-reorg`를 넣었다.
 - 0.12.3(2026-10-12): P3-M5 2차 축을 완료로 표시했다. 보정 판정 다섯 가지와 돌아보지 않은 자율 행동 제외를 적었다. 상세는 phase-3-butterfly-trust-meter 0.8.0 §9.3에 있다.

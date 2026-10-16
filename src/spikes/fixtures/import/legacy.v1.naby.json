@@ -1,0 +1,20 @@
+{
+  "formatVersion": 1,
+  "source": "naby",
+  "exportedAt": 1784000000000,
+  "agent": {
+    "name": "reviewer",
+    "description": "Reviews pull requests for risky changes.",
+    "systemPrompt": "You review code changes and point out risks.",
+    "model": "sonnet",
+    "toolRefs": ["read_file", "Bash"],
+    "memoryScope": "user",
+    "autonomy": { "escalation": "telegram", "maxSteps": 6 }
+  },
+  "origin": { "agentId": "agent-old-123", "kind": "custom", "createdAt": 1700000000000 },
+  "memories": [
+    { "key": "prefers-small-prs", "value": "Likes PRs under 300 lines.", "scope": "user", "type": "semantic", "status": "confirmed" }
+  ],
+  "ledger": [ { "kind": "checkin", "at": 1783000000000, "hit": true } ],
+  "growthAtExport": { "stage": "butterfly", "percent": 100, "hits": 40, "trials": 40 }
+}

@@ -108,6 +108,7 @@ import { MemoryStore } from '../runtime/store/memory-store.js';
 import { SCHEMA_VERSION, SqliteStore } from '../runtime/store/sqlite-store.js';
 import type { MemoryItem, MemoryWriteRequest, Store } from '../runtime/store/store.js';
 import {
+  buildReflectionCases,
   CORROBORATION_THRESHOLD,
   isGlobalStyleMemoryKey,
   isStyleMemoryKey,
@@ -161,7 +162,7 @@ import {
   writeLearningEnabled,
 } from '../runtime/memory-hygiene.js';
 import { buildQueryOptions } from '../engines/claude-agent-sdk-engine.js';
-import type { EngineRunInput } from '../runtime/engine.js';
+import type { EngineRunInput, RuntimeMessage } from '../runtime/engine.js';
 import {
   activateSupersession,
   MEMORY_AUTO_CONFIRM_KEY,
@@ -1349,6 +1350,58 @@ function checkValidatorDirectly(): void {
 }
 
 // ---------------------------------------------------------------------------
+// (mac) a participant's tool rows never anchor naby's ledger rows (MAC R3.8)
+// ---------------------------------------------------------------------------
+
+/**
+ * multi-agent-chat §8.3: a participant's gate writes NO ledger row, but its tool
+ * calls are stored in the same transcript. A participant's denied Bash, then the
+ * user talking to the participant, then naby's own Bash run: naby's ONE
+ * `autonomous` Bash row must anchor to naby's tool row, so the user's words to the
+ * participant (said BEFORE naby acted) are not evidence about naby's action —
+ * while the user's reply after naby's run still is.
+ */
+function checkParticipantToolRowsSkipped(): void {
+  const translator = { agentId: 'p-translator', name: 'translator' };
+  const messages: RuntimeMessage[] = [
+    { role: 'user', content: '@translator please run the build' },
+    { role: 'user', content: 'Run the build.', speaker: { agentId: 'naby', name: 'naby' }, routing: { kind: 'delegate', targetAgentId: 'p-translator' } },
+    { role: 'assistant', content: '', speaker: translator, toolCalls: [{ toolCallId: 'p-1', toolName: 'Bash', input: { command: 'npm run build' } }] },
+    { role: 'tool', toolCallId: 'p-1', toolName: 'Bash', output: { content: 'Denied by policy gate: participant @translator is limited to its allowed tools', isError: true } },
+    { role: 'assistant', content: 'I am not allowed to run that.', speaker: translator },
+    { role: 'user', content: 'translator, that is wrong — you should have asked first' },
+    { role: 'assistant', content: '', toolCalls: [{ toolCallId: 'n-1', toolName: 'Bash', input: { command: 'npm run build' } }] },
+    { role: 'tool', toolCallId: 'n-1', toolName: 'Bash', output: { content: 'ok' } },
+    { role: 'assistant', content: 'Built.' },
+    { role: 'user', content: 'thanks, looks good' },
+  ];
+  const cases = buildReflectionCases({
+    messages,
+    events: [{ id: 'ev-naby-bash', kind: 'autonomous', at: 1, toolName: 'Bash' }],
+  });
+  const only = cases[0];
+  // Control: without the participant's speaker the SAME transcript anchors to the
+  // first Bash row — what the bug did.
+  const unlabelled = buildReflectionCases({
+    messages: messages.map((m) => {
+      if (m.role !== 'assistant' || !m.speaker) return m;
+      const { speaker: _s, ...rest } = m;
+      void _s;
+      return rest;
+    }),
+    events: [{ id: 'ev-naby-bash', kind: 'autonomous', at: 1, toolName: 'Bash' }],
+  });
+  record(
+    "(mac) a participant's tool rows do not shift naby's reflection anchor; words to the participant are not evidence",
+    cases.length === 1 &&
+      only?.caseId === 'ev-naby-bash' &&
+      JSON.stringify(only.laterUserMessages) === JSON.stringify(['thanks, looks good']) &&
+      (unlabelled[0]?.laterUserMessages ?? []).some((t) => t.startsWith('translator, that is wrong')),
+    `labelled=${JSON.stringify(only?.laterUserMessages)} unlabelled=${JSON.stringify(unlabelled[0]?.laterUserMessages)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // (i) migration v7 -> v8 on a real file
 // ---------------------------------------------------------------------------
 
@@ -2200,6 +2253,7 @@ async function main(tmpDir: string): Promise<boolean> {
   await runDriverChecks(() => new MemoryStore(), 'MemoryStore');
   await runDriverChecks(() => new SqliteStore({ path: ':memory:' }), 'SqliteStore');
   checkValidatorDirectly();
+  checkParticipantToolRowsSkipped();
   checkHeadlessJudgeIsolation();
   // P3-M13a §3.1 step 3: the decision table itself, driven directly — it is pure,
   // and it is what decides every operation above.

@@ -264,9 +264,9 @@ export function buildSummaryPrompt(
       const calls = m.toolCalls?.length
         ? ` [called: ${m.toolCalls.map((c) => c.toolName).join(', ')}]`
         : '';
-      lines.push(`Assistant: ${m.content}${calls}`);
+      lines.push(`Assistant: ${speakerLabelled(m)}${calls}`);
     } else {
-      lines.push(`User: ${m.content}`);
+      lines.push(`User: ${speakerLabelled(m)}`);
     }
   }
   const body = lines.join('\n');
@@ -277,6 +277,21 @@ export function buildSummaryPrompt(
       ? `…(older material trimmed)…\n${body.slice(body.length - SUMMARY_INPUT_MAX_CHARS)}`
       : body;
   return `${head}\n${trimmed}`;
+}
+
+/**
+ * WHO SAID A FOLDED LINE (multi-agent-chat §8.1). A row with a `speaker` — a
+ * participant's speech, or naby's hand-off — keeps `[@name] ` in the summary input,
+ * so the summary still says who said what after the rows themselves are gone. A row
+ * the history view already labelled is not labelled twice. Rows without a speaker
+ * (every row of a session with no participant) are unchanged.
+ */
+function speakerLabelled(m: Extract<RuntimeMessage, { role: 'user' | 'assistant' }>): string {
+  if (!m.speaker) return m.content;
+  const label = `[@${m.speaker.name}] `;
+  return m.content.startsWith(label) || m.content.startsWith('[나비 → @')
+    ? m.content
+    : `${label}${m.content}`;
 }
 
 /** Bound and tidy whatever the summariser returned. Empty in, empty out — the

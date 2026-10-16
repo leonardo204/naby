@@ -432,19 +432,27 @@ export function gatherCandidates(
   opts?: { userId?: string; orgId?: string },
 ): MemoryItem[] {
   const out: MemoryItem[] = [];
+  // multi-agent-chat D6: a participant's read is narrowed to its own scope(s).
+  // Absent = every scope, which is the established read.
+  const wants = (scope: MemoryScope): boolean =>
+    query.scopes === undefined || query.scopes.includes(scope);
   // session scope (always)
-  out.push(
-    ...store.getScopedMemory('session', query.sessionId, { status: 'confirmed' }),
-  );
+  if (wants('session')) {
+    out.push(
+      ...store.getScopedMemory('session', query.sessionId, { status: 'confirmed' }),
+    );
+  }
   // project scope (only when the session is projected)
-  if (query.cwd) {
+  if (query.cwd && wants('project')) {
     out.push(...store.getScopedMemory('project', query.cwd, { status: 'confirmed' }));
   }
   // user scope (a constant scopeKey on a single-user machine)
   const userId = opts?.userId ?? DEFAULT_USER_ID;
-  out.push(...store.getScopedMemory('user', userId, { status: 'confirmed' }));
+  if (wants('user')) {
+    out.push(...store.getScopedMemory('user', userId, { status: 'confirmed' }));
+  }
   // org scope (only when an org id is supplied — org memory is in-house-only)
-  if (opts?.orgId) {
+  if (opts?.orgId && wants('org')) {
     out.push(...store.getScopedMemory('org', opts.orgId, { status: 'confirmed' }));
   }
   return out;

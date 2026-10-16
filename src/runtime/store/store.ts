@@ -21,6 +21,7 @@
 // what answered last, and switching it mid-session changes nothing else.
 
 import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
+import type { ParticipantProfile } from '../participants.js';
 
 // ---------------------------------------------------------------------------
 // Session index (contract §6)
@@ -407,6 +408,13 @@ export type MemoryInjectionQuery = {
   queryText?: string;
   /** HARD cap on injected memory tokens for this turn. */
   tokenBudget: number;
+  /**
+   * Read ONLY these scopes (multi-agent-chat D6, MAC-M2). A conversation
+   * participant reads its own `memoryScope` and nothing wider. Absent = every
+   * scope the query can reach (session, project when projected, user, org when
+   * supplied) — exactly the pre-M2 read, so no existing caller changes.
+   */
+  scopes?: readonly MemoryScope[];
 };
 
 /** The selected, ranked, within-budget memory for one turn (contract §5). */
@@ -1077,8 +1085,12 @@ export type ReflectionCursor = {
   reflectedAt: number;
 };
 
-/** built-in persona (learns the user, seeded once) | user-added custom agent. */
-export type AgentKind = 'persona' | 'custom';
+/** built-in persona (learns the user, seeded once) | user-added custom agent |
+ *  conversation participant (multi-agent-chat §8.1) — an agent naby manages in a
+ *  conversation. A participant has no autonomy of its own (its row still carries
+ *  `{escalation:'inline'}` because the column is NOT NULL, but nothing reads it)
+ *  and its identity, knowledge and guardrails live in `profile`. */
+export type AgentKind = 'persona' | 'custom' | 'participant';
 
 /** Where a critical decision is escalated to a human when the agent runs
  *  autonomously (Phase 3 P3-M3 wires the telegram channel; inline reuses the M2
@@ -1114,9 +1126,35 @@ export type Agent = {
   /** Which memory scope this agent reads and writes as its learned memory. */
   memoryScope: MemoryScope;
   autonomy: AgentAutonomy;
+  /** kind='participant' only (multi-agent-chat §8.1): display identity,
+   *  knowledge, guardrails and provenance. The store saves it verbatim and does
+   *  NOT validate it — `parseParticipantProfile` (participants.ts) is the gate,
+   *  and it runs at the shell action before the write. An unreadable stored
+   *  value reads back as absent rather than throwing. */
+  profile?: ParticipantProfile;
   /** epoch ms */
   createdAt: number;
   /** epoch ms */
+  updatedAt: number;
+};
+
+/** A participant's standing in one session (multi-agent-chat §8.1).
+ *  `declined` = naby proposed it and the user said no — the record that stops
+ *  naby proposing it again in the same session (R3.9). A user adding it directly
+ *  later overwrites it with `active`. */
+export type SessionParticipantStatus = 'active' | 'removed' | 'declined';
+
+/** Who put the participant in the session: the user (roster `+`, `@` palette)
+ *  or naby (an approved proposal). */
+export type SessionParticipantAddedBy = 'user' | 'naby';
+
+/** One `session_participants` row. naby is never stored (always present). */
+export type SessionParticipant = {
+  sessionId: string;
+  agentId: string;
+  status: SessionParticipantStatus;
+  addedBy: SessionParticipantAddedBy;
+  /** epoch ms of the last status change. */
   updatedAt: number;
 };
 
@@ -1516,8 +1554,9 @@ export interface Store {
   // `@`. Global (no scope); keyed by id; `name` is a UNIQUE addressing handle.
   // See the type block above for the built-in-persona invariant.
 
-  /** All agents. The built-in persona (kind='persona') sorts FIRST; the rest
-   *  follow by createdAt asc. */
+  /** All agents. Ordered by kind — the built-in persona (kind='persona') FIRST,
+   *  then custom agents, then conversation participants (multi-agent-chat §8.1)
+   *  — and by createdAt asc within a kind. */
   listAgents(): Agent[];
 
   getAgent(id: string): Agent | undefined;
@@ -1551,8 +1590,29 @@ export interface Store {
   restoreBuiltinPersona(input: AgentInput): Agent;
 
   /** Delete one agent by id. NO-OP for the built-in persona (kind='persona' is
-   *  undeletable, spec §4) and no-op if absent. */
+   *  undeletable, spec §4) and no-op if absent. Deleting a participant also
+   *  deletes its `session_participants` rows (multi-agent-chat §8.1). */
   removeAgent(id: string): void;
+
+  // -- session participants (multi-agent-chat §8.1, MAC-M1) ----------------
+  //
+  // Which participants a session holds. naby itself is NEVER stored — it is
+  // always in the roster (R2.1). The per-session cap (R2.4) is a SETTING, so the
+  // shell action counts it; the store only records state.
+
+  /** Every row for the session (any status), oldest update first. */
+  listSessionParticipants(sessionId: string): SessionParticipant[];
+
+  /** Upsert the (session, agent) row's status and who set it. Returns the row. */
+  putSessionParticipant(
+    sessionId: string,
+    agentId: string,
+    input: { status: SessionParticipantStatus; addedBy: SessionParticipantAddedBy },
+  ): SessionParticipant;
+
+  /** Mark the (session, agent) row `removed` (the row is kept, so the history of
+   *  who was in the conversation survives). No-op when there is no row. */
+  removeSessionParticipant(sessionId: string, agentId: string): void;
 
   // -- eval-event ledger (Phase 3 P3-M5, realizing P15-03) -----------------
 

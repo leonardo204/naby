@@ -2,11 +2,11 @@
 id: phase-3-agent-export
 title: Phase 3 P3-M6 — 학습된 에이전트 내보내기 (Claude Code 서브에이전트 형식)
 type: design
-version: 0.3.0
+version: 0.4.0
 status: active
 scope: 학습이 쌓인 페르소나 에이전트를 다른 환경에서 쓰기 위해 Claude Code 표준 서브에이전트 `.md`와 무손실 사이드카로 패키징하는 설계. 무엇을 담고 무엇을 빼는지, 단계 표기를 어떻게 위조 불가하게 두는지를 정한다. 신뢰 지표 계산은 butterfly-trust-meter, 기억 캡처는 persona-agent P3-M4가 다룬다.
-related: [phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-3-checkin-contracts, harness-portability-strategy, phase-1_6-harness-contracts, phase-1_5-memory-contracts]
-updated: 2026-07-26
+related: [agent-import-adapters, multi-agent-chat, phase-3-butterfly-trust-meter, phase-3-persona-agent, phase-3-checkin-contracts, harness-portability-strategy, phase-1_6-harness-contracts, phase-1_5-memory-contracts]
+updated: 2026-10-16
 ---
 
 # 학습된 에이전트 내보내기
@@ -52,6 +52,9 @@ Claude Code는 무시하고 naby는 정확히 되읽는다.
 | 기억 데이터셋 전체 + provenance | `.md`는 값만 담는다. 출처·신뢰도·시각이 있어야 재수입 후에도 쓰기 게이트가 판단할 수 있다 |
 | 성장 원장 (`eval_events`) | 재수입 시 알 단계로 초기화되지 않고 단계를 **다시 계산**한다 |
 | `formatVersion` | 나중에 마이그레이션이 필요할 때 |
+| `agent.profile`(v2, 참가자일 때만) | 참가자 명세(지식·가드레일·외부 자원·스킬·아바타·출처·extensions). 형식은 [agent-import-adapters](agent-import-adapters.md) §5 |
+
+> **2026-10-16 개정 — 참가자 사이드카만 `formatVersion` 2.** 참가자([multi-agent-chat](multi-agent-chat.md))를 내보내면서 사이드카에 `agent.profile`이 생겼다. `AGENT_EXPORT_FORMAT_VERSION`(=1)은 그대로이고 나비·custom의 사이드카는 계속 v1이다. 참가자 내보내기만 `PARTICIPANT_EXPORT_FORMAT_VERSION`(=2)을 쓴다. 참가자 임포터는 v1·v2를 읽고, 이 문서의 `agent.import`는 그대로 v2를 거부한다 — §7.3의 규칙이고 의도된 동작이다. 참가자의 사이드카는 `memories=[]`·`ledger=[]`이고 `growthAtExport`가 없다(참가자는 성장하지 않는다).
 
 ## 2. 무엇을 빼는가
 
@@ -94,7 +97,7 @@ Claude Code는 무시하고 naby는 정확히 되읽는다.
 ## 6. 미결정
 
 - 1차는 **브라우저 저장(Blob 내려받기) 파일 두 개**다. 서버가 파일을 쓰지 않으니 경로 검증 표면이 늘지 않고, 패키지 앱과 브라우저에서 같게 동작한다. zip 하나로 묶을지는 하네스 셋 export(D5)와 형식을 맞출 때 함께 정한다.
-- 여러 에이전트를 한 번에 내보낼 때의 매니페스트. D5의 "하네스 셋" 번들 형식을 그대로 쓸 후보.
+- ~~여러 에이전트를 한 번에 내보낼 때의 매니페스트.~~ **결정(2026-10-16)**: zip 하나에 `<name>.md`+`<name>.naby.json` 쌍 N개와 `manifest.json {formatVersion:2, exportedAt, agents:[…]}`. 상세는 [agent-import-adapters](agent-import-adapters.md) §5. 1차 UI는 한 명씩이다.
 - **MCP 도구 이름은 `tools:`에 그대로 나간다.** 받는 환경에 그 MCP 서버가 없으면 존재하지 않는 도구를 가리킨다. 순정 Claude Code는 없는 도구 이름을 무시하므로 깨지지는 않지만, 사이드카에 필요한 서버 목록을 함께 실을지는 정하지 않았다.
 - `report.droppedSession`은 실무에서 항상 0이다. 셸이 session 스코프를 아예 조회하지 않기 때문이다. 런타임 쪽 필터는 다른 호출자를 위한 이중 방어로 남긴다.
 
@@ -120,7 +123,7 @@ Claude Code는 무시하고 naby는 정확히 되읽는다.
 ### 7.3 파일이 절대 주장할 수 없는 것
 
 - **`id`는 버린다.** 복원하면 받는 기기의 행과 충돌하거나 덮어쓴다. `origin`에 provenance로만 남는다.
-- **`kind`는 항상 `custom`이다.** 기기마다 내장 페르소나는 하나이고, 임포트가 그 자리를 주장할 수 없다.
+- **`kind`는 파일이 아니라 가져오기 경로가 정한다.** 이 액션(`agent.import`)으로 들어온 것은 항상 `custom`이고, 참가자 가져오기(`participant.import`, [agent-import-adapters](agent-import-adapters.md))로 들어온 것은 항상 `participant`다. 파일 안의 `kind` 값은 어느 경로에서도 읽지 않는다. 기기마다 내장 페르소나는 하나이고, 임포트가 그 자리를 주장할 수 없다. *(2026-10-16 개정. 이전 문장: "`kind`는 항상 `custom`이다.")*
 - **이름이 겹치면 새 이름으로 들어온다**(`persona` → `persona-imported` → `-2`). 덮어쓰지 않고, 늦게 실패하지도 않고, 바뀐 이름을 보고한다.
 - **단계·`trusted` 같은 필드를 손으로 넣어도 갈 곳이 없다.** 읽는 코드가 없다.
 - **시크릿 3차 검사.** 캡처가 거부하고 내보내기가 훑었어도, 파일은 그 사이에 손으로 고쳐질 수 있다.
@@ -130,3 +133,8 @@ Claude Code는 무시하고 naby는 정확히 되읽는다.
 ### 7.4 두 단계
 
 첫 요청은 **파싱만 하고 보고**한다(아무것도 쓰지 않는다). 사용자가 담긴 것을 보고 결정한 뒤 두 번째 요청이 쓴다. 동료의 파일이 무엇을 들고 왔는지는 **들어오기 전에** 보여야 한다.
+
+## 변경 이력
+
+- 0.4.0 (2026-10-16) — 참가자 내보내기·가져오기에 맞춰 개정. §1 사이드카 v2(`agent.profile`), §6 묶음 매니페스트 결정, §7.3 `kind`는 경로가 정한다. related에 agent-import-adapters·multi-agent-chat.
+- 0.3.0 이전의 변경 이력은 이 문서에 기록하지 않았다.

@@ -1,0 +1,8 @@
+{
+  "formatVersion": 3,
+  "source": "naby",
+  "exportedAt": 1784000000000,
+  "agent": { "name": "from-the-future", "systemPrompt": "You come from a newer naby.", "memoryScope": "session", "autonomy": { "escalation": "inline" } },
+  "memories": [],
+  "ledger": []
+}
