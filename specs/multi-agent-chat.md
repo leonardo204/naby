@@ -2,7 +2,7 @@
 id: multi-agent-chat
 title: 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자 (요구사항 검토 리포트)
 type: design
-version: 0.2.7
+version: 0.3.1
 status: review
 scope: 한 대화 세션에 나비 외의 대화형 에이전트(참가자)를 여럿 두는 기능. 나비가 기본 참가자이자 관리자다. 사용자의 질의를 나비가 확인해 참가자에게 위임하고, 위임받은 참가자가 채팅에 직접 답한다. 에이전트 간 대화는 나비와 참가자 사이로 한정한다. 참가자 명세(지식·지시·가드레일·외부 자원·스킬), 사용자 추가와 외부 정의 가져오기·변환, 다중 참가자 대화의 UI/UX와 관리를 다룬다. §1~§6은 요구사항과 결정(2026-10-16 승인), §8은 설계다. 가져오기 어댑터는 agent-import-adapters, 룩앤필은 shell-look-and-feel이 맡는다. 나비의 학습·신뢰 지표는 persona-agent와 butterfly-trust-meter가, 단일 에이전트 내보내기·가져오기 형식은 agent-export가 그대로 맡는다.
 related: [agent-import-adapters, shell-look-and-feel, phase-3-persona-agent, phase-3-persona-hardening, phase-3-agent-export, phase-3-butterfly-trust-meter, phase-1_5-memory-contracts, subagent-delegation, session-context-management, skill-hub-builtin, mcp-oauth-catalog, telegram-chat, settings-ia-reorg, naby-activity-log, model-auto-routing]
@@ -491,6 +491,35 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 | **MAC-M5** 후속 | `end` 액션 다듬기, 반복 발언 탐지, 나머지 어댑터, 자율 루프 결합 | 각각 별도 스펙으로 | — |
 
 
+### 8.12 대화에서 참가자 만들기·고치기 (MAC-M5a, 2026-10-16 사용자 결정)
+
+사용자가 나비에게 "번역가 참가자 만들어 줘"라고 하면 나비가 명세 초안을 짜고, 사용자가 카드에서 승인하면 저장된다. 설정 화면으로 보내지 않는다. 같은 길로 기존 참가자의 지시·설명을 고치는 제안도 한다.
+
+**R8.1 [필수] 도구.** 나비 턴에만 들어가는 도구 `naby_participant_draft`(참가자 턴·서브에이전트에는 없다). 입력:
+
+```ts
+{ action: 'create' | 'update';
+  id?: string;                       // update 때 참가자 id
+  name?: string; displayName?: string; description?: string;
+  instructions?: string; guardrailsPolicy?: string; greeting?: string;
+  avatar?: string; color?: string;   // 이모지·hex
+  addToSession?: boolean }           // 승인 뒤 이 세션 명단에 넣을지
+```
+
+도구·MCP·스킬·모델·기억 범위는 **입력에 없다.** 초안은 늘 `toolRefs: []`·`mcpServers: []`·`skills: []`·`memoryScope: 'session'`으로 만들어지고, 넓히는 일은 설정 편집기에서만 한다(R4.3과 같은 안전 기본값). `update`는 `kind='participant'` 행에만, 위 필드만 바꾼다.
+
+**R8.2 [필수] 승인이 먼저.** 실행기는 `parseParticipantProfile`과 이름 규칙으로 초안을 검증한 뒤 **쓰지 않고** 승인을 요청한다 — `approval_request {tool_name:'participant.create'|'participant.update', source:'participant_draft', input: 초안(+update면 변경 전후)}`를 기존 승인 연결 경로(`registerApproval`, 텔레그램 에스컬레이션)로 보낸다. 이 도구는 정책 규칙·"항상 허용"으로 자동 허용되지 않는다(`remember` 무시, allow-all 바탕 정책도 이 도구는 항상 묻는다). 승인·거절·시간 초과·중단의 처리는 도구 승인과 같다.
+
+**R8.3 [필수] 카드.** `ToolApprovalPrompt`의 세 번째 변형 **초안 카드**: 아바타·이름·핸들·설명은 그 자리에서 고칠 수 있고(가져오기 미리보기와 같은 입력), 지시·가드레일·첫 인사는 접힌 미리보기다. 버튼은 "만들고 대화에 추가" · "만들기만" · "거절"(update는 "적용" · "거절", 바뀐 필드만 전후로 보임). 고친 값은 `approval.resolve {edits}`로 서버에 가고 저장 전에 다시 검증한다. 텔레그램에서는 요약과 승인·거절만 되며 승인하면 초안의 `addToSession`대로 한다.
+
+**R8.4 [필수] 저장과 결과.** 승인되면 `participant.put` 경로로 저장하고(이름 충돌은 기존 규칙으로 거부·보고), `addToSession`이면 `session.participants.add`(상한 검사). 도구 결과 텍스트로 나비에게 돌려준다("@translator를 만들고 이 대화에 추가했어요" / "거절됐어요"). 거절되면 나비는 다시 시도하지 않고 사용자에게 묻는다. 활동 로그 `participant_draft {action, decision, agentId?}`.
+
+**R8.5 [필수] 나비 지시.** 허브 규칙 블록에 한 줄을 더한다 — 참가자를 만들거나 고치는 요청은 이 도구로 초안을 내고 승인을 기다린다, 설정으로 안내하지 않는다, 사용자가 말하지 않은 도구·권한을 초안에 넣지 않는다.
+
+**검증.** 셸 vitest: 도구 스키마가 나비 턴에만 있고 참가자 턴·서브에이전트에 없음 · 실행기 검증 거부(이름 규칙·크기) · 승인 allow(만들기만/추가)·deny·timeout·abort · `edits` 적용과 재검증 · `remember` 무시와 allow-all에서도 묻기 · update가 비참가자 id를 거부 · 초안 카드 렌더(세 버튼, 편집 입력) · 텔레그램 메시지 분기 · 활동 로그. 실기: "번역가 참가자 만들어 줘" → 카드 → 추가 → 다음 메시지에서 위임.
+
+**범위 밖.** 도구·MCP·스킬·모델을 대화로 바꾸기(편집기 전용), 참가자 삭제(사용자만), 참가자가 참가자를 만들기.
+
 ### 8.11 구현 상태
 
 | 마일스톤 | 상태 | 검증 |
@@ -499,6 +528,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 | MAC-M1 명세·저장 | ✅ 2026-10-16 | `spike:participants` 96/96 · 회귀 `spike:agents` 172 · `export` 11/11 · `import` 11/11 · `org-harness-migrate` 93/93 · `autonomy` 34/34 · 셸 224 파일 / 4296 통과(+30 `participantsApi.test.ts`, +2 `commands.test.ts`) · 타입체크 기준선(셸 12·루트 30) 유지 · 스키마 v14 |
 | MAC-M2 라운드 루프 | ✅ 2026-10-16 | 셸 229 파일 / 4370 통과(`participantRound.test.ts` 35 = §8.8의 spike-participant-round, `nabyParticipantRound.test.ts` 9는 실제 `createNabySpec`에 각본 모델, `participantProposal`·`toChatMessagesSpeakers`·`applyStreamEventSpeakers` 28) · `spike:participant-history` 45/45 · 회귀 participants 96 · agents · autonomy 34 · 02 5 · export 11 · import 11 · reflection 96 · compaction · skill · p15 · voice · org-harness-hooks 77 · 타입체크 기준선 유지. 실제 모델 호출은 임시 HOME에 로그인이 없어 생략(격리 유지) |
 | MAC-M3 UI | ✅ 2026-10-16 | 셸 234 파일 / 4448 통과(M3 몫 59, 4개 파일) · 타입체크 기준선 · prod 빌드 + 스크린샷 라이트·다크 각 9장(`m3-shots/`: 명단·참가자 말풍선·라우팅 칩 숨김/보임·명단 메뉴·팔레트·제안 카드·거절 뒤·설정 참가자 절·편집기) · Fable이 스크린샷으로 프로토타입과 대조 |
+| MAC-M5a 대화에서 참가자 만들기 | ✅ 2026-10-16 | 셸 **240 파일 / 4555** 통과(새 파일 3개 56건, §8.12 검증 목록 전부) · 타입체크 기준선(셸 12·루트 29) · `spike:autonomy` 34 · `02` 5 · `participants` 116 · prod 빌드 · 초안 카드 스크린샷 라이트·다크(create·update) · 릴리스 1.45.0 |
 | MAC-M4 가져오기 | ✅ 2026-10-16 | `spike:participant-import` 64/64 · 회귀 export 11 · import 11 · participants 116 · participant-history 48 · autonomy 34 · 02 5 · 셸 **236 파일 / 4481** 통과 · 타입체크 셸 12 / 루트 29(기존 오류 1건을 고쳐 기준선보다 하나 적음) · 스크린샷 라이트·다크 3장씩(가져오기 미리보기·손실 보고·출처 배지 카드) · `build:app` exit 0(M3 상태 기준) |
 
 **MAC-M1 구현 결정(Opus, Fable 확인).**
@@ -545,6 +575,8 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 7. 설정의 참가자는 에이전트 행이 아니라 새 절에만 나온다(에이전트 행 편집은 `agent.put`을 불러 거부된다). 편집기의 도구 권한은 default/plan 선택 + 도구 칩(프로토타입의 3단 스위치 아님). 가져오기·내보내기 버튼은 MAC-M4까지 비활성(툴팁). 활동 로그 드로어는 클라이언트 뷰어가 없어 생략. Electron 창 배경을 `#17181F`로 맞췄다.
 8. **MAC-M4로 넘긴 서버 일**: `participantRound.ts`의 `emitNotice`(세션에 없음·상한 알약) 삭제, §8.7(a) 미러 발언자 표기를 📁 줄 바로 뒤로(`MirrorTurn`에 발언자 전달), 라우팅 이벤트에 토큰·상한값 싣기, `participant.export` 액션과 도구 카탈로그 액션.
 9. 스크린샷으로 못 본 것: 진행 중 라운드의 "다음" 스트립, 세션에 없음·상한 줄(저장 행으로 재현 불가, 테스트로만 덮음).
+
+**MAC-M5a 구현 결정(Opus, Fable 확인).** (1) "항상 묻는다"는 세 겹이다 — 게이트의 첫 검사가 `naby_participant_draft`를 단계 계약·정책 엔진보다 먼저 다루어 서브에이전트 호출과 도구를 받지 않은 턴을 거부하고, `deny` 규칙·조직 훅 거부만 적용하며, allow-all 바탕·`allow`·`ask` 규칙은 보지 않는다(원장 기록 없음). 실행기가 카드를 직접 띄운다. `approval.resolve`는 이 도구 이름들(`participant.create`·`participant.update`·`naby_participant_draft`)에 `remember`를 저장하지 않는다. 엔진 테스트가 allow-all·allow·ask에서 카드가 정확히 하나, deny에서 없음을 고정한다. (2) `update`는 id 또는 `@핸들`을 받는다(나비는 id를 모른다). (3) 초안 상한: 표시 이름 80자·설명 1000자·지시 32 KB. (4) 텔레그램 전송은 제안과 같은 규칙(턴의 에스컬레이션 또는 나비 설정이 telegram/both). (5) 아바타·색 프리셋과 핸들 규칙은 feature-agent로 옮기고 `participantForm.ts`가 재수출한다(의존 방향). (6) R8.5 줄은 `HUB_ROUND_RULES` 바로 뒤 별도 블록이고 참가자가 0명일 때도 들어간다. (7) 카드는 `ParticipantDraftCard.tsx`. (8) `participant.put`·`session.participants.add`는 공용 `putParticipant`·`addParticipantToSession`을 쓰도록 정리했다. 활동 로그 종류 `participant_draft` 추가.
 
 **MAC-M4 구현 상태.** 상세는 [agent-import-adapters](agent-import-adapters.md) §8. M3가 넘긴 서버 4건은 전부 끝냈다 — `participantRound.ts`의 중복 알약 제거, 텔레그램 미러의 발언자 줄을 📁 줄 바로 뒤로(한 명이면 `이름:`, 여럿이면 `A · B`, 나비만의 턴은 그대로), 라우팅 이벤트에 `tokens`(사용자 지목은 0)·상한 이벤트에 `limit`(칩이 둘 다 보임), `participant.export`·`participant.exportBundle`·`tools.list` 액션. 편집기의 도구 칩은 `tools.list`를 쓴다.
 
@@ -594,6 +626,8 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 ## 변경 이력
 
+- 0.3.1 (2026-10-16) — §8.11 MAC-M5a 완료와 구현 결정 8건.
+- 0.3.0 (2026-10-16) — §8.12 대화에서 참가자 만들기·고치기(MAC-M5a, R8.1~R8.5). 사용자 결정.
 - 0.2.7 (2026-10-16) — 1.44.0 실기 피드백: 명단 상시 표시, 나비 아바타·말풍선 카드. §8.11 M3 결정 2 개정, R6.1·R6.2 의미 보강.
 - 0.2.6 (2026-10-16) — §8.11 MAC-M4 완료. 1차 출시 범위 + 가져오기까지 구현 완료, 실제 모델 실기·커밋·릴리스 전.
 - 0.2.5 (2026-10-16) — §8.11 MAC-M3 완료와 구현 결정 9건. 1차 출시 범위(M0~M3) 구현 완료, 실제 모델 실기 전.

@@ -159,6 +159,9 @@ export type ActivityKind =
   // of the round. A speech's tokens stay on `usage`, attributed by agent.
   | 'participant_route'
   | 'participant_proposal'
+  // naby's DRAFT of a participant, made in the conversation (§8.12, MAC-M5a):
+  // create or update, what the user answered, and the participant it saved.
+  | 'participant_draft'
   | 'participant_mention_ignored'
   | 'participant_cap'
   | 'round_completed'
