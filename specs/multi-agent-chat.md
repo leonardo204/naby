@@ -2,7 +2,7 @@
 id: multi-agent-chat
 title: 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자 (요구사항 검토 리포트)
 type: design
-version: 0.2.6
+version: 0.2.7
 status: review
 scope: 한 대화 세션에 나비 외의 대화형 에이전트(참가자)를 여럿 두는 기능. 나비가 기본 참가자이자 관리자다. 사용자의 질의를 나비가 확인해 참가자에게 위임하고, 위임받은 참가자가 채팅에 직접 답한다. 에이전트 간 대화는 나비와 참가자 사이로 한정한다. 참가자 명세(지식·지시·가드레일·외부 자원·스킬), 사용자 추가와 외부 정의 가져오기·변환, 다중 참가자 대화의 UI/UX와 관리를 다룬다. §1~§6은 요구사항과 결정(2026-10-16 승인), §8은 설계다. 가져오기 어댑터는 agent-import-adapters, 룩앤필은 shell-look-and-feel이 맡는다. 나비의 학습·신뢰 지표는 persona-agent와 butterfly-trust-meter가, 단일 에이전트 내보내기·가져오기 형식은 agent-export가 그대로 맡는다.
 related: [agent-import-adapters, shell-look-and-feel, phase-3-persona-agent, phase-3-persona-hardening, phase-3-agent-export, phase-3-butterfly-trust-meter, phase-1_5-memory-contracts, subagent-delegation, session-context-management, skill-hub-builtin, mcp-oauth-catalog, telegram-chat, settings-ia-reorg, naby-activity-log, model-auto-routing]
@@ -537,7 +537,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 **MAC-M3 구현 결정(Opus, Fable 확인).**
 1. 클라이언트 순수 규칙은 `client/participants.ts`(칩 가시성·전달 칩·라운드 진행·명단 접기·팔레트 순서·제안 파싱)에 모았고, 참가자 목록은 `ParticipantsContext`가 채팅당 한 번 읽어 공유한다. 컴포넌트: `ParticipantAvatar`·`ParticipantRoster`(+라우팅 보기 토글)·`RoutingChip`·`RoundProgressStrip`; 설정 쪽 `ParticipantSection`·`ParticipantEditor`·`participantForm.ts`.
-2. **명단 위치**: 탭 작업 공간에서는 `ChatHeader`가 숨겨지므로 엔진 줄 오른쪽 끝에 둔다. 독립 레이아웃에서는 헤더 자리. 참가자가 하나도 없으면 명단 자체를 보이지 않는다.
+2. **명단 위치**: 탭 작업 공간에서는 `ChatHeader`가 숨겨지므로 엔진 줄 오른쪽 끝에 둔다. 독립 레이아웃에서는 헤더 자리. ~~참가자가 하나도 없으면 명단 자체를 보이지 않는다.~~ **2026-10-16 개정(사용자 피드백, 1.44.0 실기)**: 명단은 **항상** 보인다 — 나비(고정)와 `+` 버튼만 있어도. 나비는 전용 아바타 `NabyAvatar`(귀여운 나비 SVG)로 명단·말풍선 머리줄·생각 말풍선·설정 카드·제안 카드·라우팅 칩에 나온다. 나비의 말풍선도 참가자와 같은 카드 모양이다(강조색은 브랜드).
 3. 라우팅 칩은 점선 브랜드 칩(`나비 → @translator · 이유`, `나비가 이어서 답해요`, `↩ 나비에게 되물음`)이고 라우팅 보기가 켜졌을 때만 그린다. 라우팅 이벤트에 토큰 수가 없어 칩에는 토큰을 보이지 않는다(활동 로그에만). "세션에 없음"·상한은 칩이 담당하므로 서버의 하네스 알약은 클라이언트가 숨긴다.
 4. "다음: @b" 스트립은 전달 직후 `speaker` 이벤트가 바로 따라와 짧게만 보인다. 스트립이 보이는 동안 생각 말풍선의 정지 버튼은 숨겨 정지가 하나만 있게 한다.
 5. `@` 팔레트에서 세션 밖 참가자를 고르면 확인 없이 바로 추가하고 멘션을 쓴다. 첫 전송 전(세션 없음)에는 멘션만 쓴다.
@@ -594,6 +594,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 ## 변경 이력
 
+- 0.2.7 (2026-10-16) — 1.44.0 실기 피드백: 명단 상시 표시, 나비 아바타·말풍선 카드. §8.11 M3 결정 2 개정, R6.1·R6.2 의미 보강.
 - 0.2.6 (2026-10-16) — §8.11 MAC-M4 완료. 1차 출시 범위 + 가져오기까지 구현 완료, 실제 모델 실기·커밋·릴리스 전.
 - 0.2.5 (2026-10-16) — §8.11 MAC-M3 완료와 구현 결정 9건. 1차 출시 범위(M0~M3) 구현 완료, 실제 모델 실기 전.
 - 0.2.4 (2026-10-16) — §8.11 M1/M2 코드 리뷰 11건과 수정 7건, 남긴 4건.

@@ -2,7 +2,7 @@
 id: shell-look-and-feel
 title: 셸 룩앤필 — 프로토타입 팔레트를 토큰으로 옮긴다
 type: design
-version: 0.2.0
+version: 0.2.1
 status: review
 scope: naby 셸(cockpit)의 색·모서리·그림자·글꼴을 대화형 다중 에이전트 프로토타입(`demo/multi-agent-chat/index.html`)에 맞추는 설계. 토큰 교체, 하드코딩 상태색 이관, 표면별 모양 변경, HTML 출력 스타일 동기화, 스크린샷 검증을 다룬다. multi-agent-chat R7의 설계이고 마일스톤 MAC-M0다. 참가자 UI 자체(명단·말풍선 발언자·승인 카드의 동작)는 multi-agent-chat이 맡는다.
 related: [multi-agent-chat, settings-ia-reorg, packaging-path-resolution]
@@ -97,7 +97,7 @@ Inter는 유지한다. `fontSettings.ts`의 `system` 스택에서 `"Apple SD Got
 | 표면 | 파일 | 바꾸는 것 | 프로토타입 기준 |
 |---|---|---|---|
 | 사용자 말풍선 | `feature/agent/src/client/MessageBubble.tsx` | `bg-user-bubble text-user-bubble-foreground`, 오른쪽 정렬, `rounded-xl` | 시나리오 3 1단계 |
-| 에이전트 말풍선 | 같은 파일 | 아바타(이모지 또는 이미지)·이름 줄 + `bg-card border` 카드. 나비는 지금처럼 아바타 없이 평문 유지 | 시나리오 3 2단계 |
+| 에이전트 말풍선 | 같은 파일 | 아바타(이모지 또는 이미지)·이름 줄 + `bg-card border` 카드. ~~나비는 지금처럼 아바타 없이 평문 유지~~ **2026-10-16 개정(사용자 피드백)**: 나비도 같은 카드 모양이다. 머리줄에 나비 아바타(`NabyAvatar`, 귀여운 나비 SVG, 브랜드 그라데이션)와 이름, 강조색은 브랜드 | 시나리오 3 2단계 |
 | 채팅 헤더 | `feature/agent/src/client/ChatHeader.tsx` | 세션 제목 아래 보조 줄, 오른쪽에 명단 자리(M3에서 채움)와 토글 영역 | 시나리오 2 |
 | 작성기 | `feature/agent/src/client/ChatInput.tsx` | `bg-card border rounded-xl`, 보내기 버튼 `bg-brand-gradient` 원형 | 모든 시나리오 |
 | 승인 카드 | `feature/agent/src/client/ToolApprovalPrompt.tsx` | `border-brand/40 bg-card`, 제목 칩 `bg-accent text-accent-foreground`, 승인 버튼 `bg-primary` | 시나리오 4 2단계 |
@@ -149,6 +149,7 @@ Opus 에이전트가 구현했고 Fable 5.1이 스크린샷으로 확인했다. 
 
 ## 변경 이력
 
+- 0.2.1 (2026-10-16) — 사용자 피드백(1.44.0 실기): 나비 말풍선을 카드로 되돌리고 나비 아바타(`NabyAvatar`)를 둔다. §5 개정.
 - 0.2.0 (2026-10-16) — §9 구현 상태(MAC-M0.1~M0.4 완료, 검증 결과, 구현 결정 4건, 남은 차이).
 - 0.1.1 (2026-10-16) — spec-guard·교정 반영: violet은 9~11만 있어 12단계를 새로 정의(§3.1, 순서 명시), `bg-primary` 중립 버튼 점검, 마일스톤 접두어 `MAC-`, status review.
 - 0.1.0 (2026-10-16) — 초안. multi-agent-chat 0.1.3 R7·D14·D15의 설계. 토큰 표(HSL), 신설 토큰 6개와 `-foreground` 짝·그림자 2개, 상태색 이관 규칙, 표면 8개, 검증 5항목, MAC-M0 작업 순서.
