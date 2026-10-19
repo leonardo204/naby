@@ -47,6 +47,7 @@ import { sameMemoryValue } from './store.js';
 import { STRENGTH_CAP } from '../memory-hygiene.js';
 import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
 import type { ParticipantProfile } from '../participants.js';
+import { RECOMMEND_BACKFILL_LIMIT, RECOMMEND_EVERY } from '../participant-recommend.js';
 import type {
   Agent,
   AgentInput,
@@ -78,6 +79,13 @@ import type {
   PolicyRule,
   PolicyRuleInput,
   Project,
+  ParticipantRecommendation,
+  ParticipantRecommendationDraft,
+  ParticipantRecommendationInput,
+  ParticipantRecommendationKind,
+  ParticipantRecommendationStatus,
+  RecommendationCandidate,
+  RecommendationCursor,
   ReflectionCursor,
   SessionParticipant,
   SessionParticipantAddedBy,
@@ -300,7 +308,16 @@ function openSilently(path: string): DatabaseSyncType {
 // (session_id, agent_id), recording which participants a session holds and
 // whether the user declined one — naby itself is never a row. No backfill: no
 // session had participants before this.
-export const SCHEMA_VERSION = 14;
+//
+// v15 — PARTICIPANT RECOMMENDATIONS (multi-agent-chat §8.13, MAC-M6). Two new
+// tables, both IF NOT EXISTS and both session state: `participant_recommendations`
+// (naby's background suggestions — an `existing` participant by `agent_id`, or a
+// `new` draft as JSON — with their pending/accepted/dismissed status) and
+// `participant_recommendation_cursor` (how many user messages the last analysis
+// of each session saw). Purely additive, no ALTER, no backfill: an upgraded
+// database simply has no recommendations and no cursors, which is exactly what
+// lets the boot sweep back-fill it (D18).
+export const SCHEMA_VERSION = 15;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -587,6 +604,29 @@ CREATE TABLE IF NOT EXISTS session_participants (
   added_by TEXT NOT NULL,          -- 'user' | 'naby'
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (session_id, agent_id));
+
+-- participant recommendations (multi-agent-chat §8.13, v15). Session state:
+-- deleted with the session; an 'existing' row goes with its participant.
+CREATE TABLE IF NOT EXISTS participant_recommendations (
+  id            TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL,
+  kind          TEXT NOT NULL,            -- 'existing' | 'new'
+  agent_id      TEXT,                     -- existing
+  draft         TEXT,                     -- new: DraftFields JSON
+  specialty     TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  evidence      TEXT NOT NULL,            -- JSON number[]
+  status        TEXT NOT NULL,            -- 'pending' | 'accepted' | 'dismissed'
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prec_session ON participant_recommendations(session_id, status);
+CREATE TABLE IF NOT EXISTS participant_recommendation_cursor (
+  session_id          TEXT PRIMARY KEY,
+  user_message_count  INTEGER,            -- NULL = never analysed (a failure-only row)
+  analyzed_at         INTEGER,            -- last successful analysis
+  failed_at           INTEGER             -- last failed analysis (cooldown); NULL = none
+);
 `;
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1121,59 @@ function toSessionParticipant(row: SessionParticipantRow): SessionParticipant {
   };
 }
 
+type RecommendationRow = {
+  id: string;
+  session_id: string;
+  kind: string;
+  agent_id: string | null;
+  draft: string | null;
+  specialty: string;
+  reason: string;
+  evidence: string;
+  status: string;
+  created_at: number;
+  updated_at: number;
+};
+
+/** A stored row back to the type. Unreadable JSON reads as absent / empty — a
+ *  damaged row must not break the roster read. */
+function toRecommendation(row: RecommendationRow): ParticipantRecommendation {
+  const out: ParticipantRecommendation = {
+    id: row.id,
+    sessionId: row.session_id,
+    kind: row.kind as ParticipantRecommendationKind,
+    specialty: row.specialty,
+    reason: row.reason,
+    evidence: [],
+    status: row.status as ParticipantRecommendationStatus,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+  if (row.agent_id) out.agentId = row.agent_id;
+  if (row.draft) {
+    try {
+      out.draft = JSON.parse(row.draft) as ParticipantRecommendationDraft;
+    } catch {
+      /* unreadable draft: absent */
+    }
+  }
+  try {
+    const ev = JSON.parse(row.evidence) as unknown;
+    if (Array.isArray(ev)) out.evidence = ev.filter((n): n is number => typeof n === 'number');
+  } catch {
+    /* unreadable evidence: empty */
+  }
+  return out;
+}
+
+let recommendationCounter = 0;
+function mintRecommendationId(): string {
+  recommendationCounter += 1;
+  return `pr-${Date.now().toString(36)}-${recommendationCounter.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
 function toAgent(row: AgentRow): Agent {
   const agent: Agent = {
     id: row.id,
@@ -1253,6 +1346,36 @@ export class SqliteStore implements Store {
       this.db.exec('ALTER TABLE agents ADD COLUMN profile TEXT');
     }
 
+    // v15 (pre-release shape): the recommendation cursor first had NOT NULL
+    // count/analyzed columns and no `failed_at`. Rebuilt once, rows kept, so a
+    // development database made before the cooldown existed can record a
+    // failure for a session that was never analysed.
+    const curCols = this.db.prepare('PRAGMA table_info(participant_recommendation_cursor)').all() as {
+      name: string;
+      notnull: number;
+    }[];
+    if (
+      curCols.length > 0 &&
+      (!curCols.some((c) => c.name === 'failed_at') ||
+        curCols.some((c) => c.name === 'user_message_count' && Number(c.notnull) === 1))
+    ) {
+      this.db.exec('BEGIN');
+      try {
+        this.db.exec(`
+          ALTER TABLE participant_recommendation_cursor RENAME TO participant_recommendation_cursor_old;
+          CREATE TABLE participant_recommendation_cursor (
+            session_id TEXT PRIMARY KEY, user_message_count INTEGER, analyzed_at INTEGER, failed_at INTEGER);
+          INSERT INTO participant_recommendation_cursor (session_id, user_message_count, analyzed_at)
+            SELECT session_id, user_message_count, analyzed_at FROM participant_recommendation_cursor_old;
+          DROP TABLE participant_recommendation_cursor_old;
+        `);
+        this.db.exec('COMMIT');
+      } catch (e) {
+        this.db.exec('ROLLBACK');
+        throw e;
+      }
+    }
+
     // The stale-review index, created HERE rather than in the DDL because it names
     // the column added just above — see the note where the other memory_items
     // indexes are declared. IF NOT EXISTS, so it is a no-op on every later open,
@@ -1415,6 +1538,9 @@ export class SqliteStore implements Store {
     // The session's participant roster (multi-agent-chat §8.1) is session state,
     // not a record of the agents — the participants themselves survive.
     this.db.prepare('DELETE FROM session_participants WHERE session_id = ?').run(sessionId);
+    // Its recommendations and their cursor are session state too (§8.13).
+    this.db.prepare('DELETE FROM participant_recommendations WHERE session_id = ?').run(sessionId);
+    this.db.prepare('DELETE FROM participant_recommendation_cursor WHERE session_id = ?').run(sessionId);
     this.db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
   }
 
@@ -2674,6 +2800,9 @@ export class SqliteStore implements Store {
     // roster rows pointing at nothing. Run for every kind: only participants ever
     // have rows, and a stray one is junk.
     this.db.prepare(`DELETE FROM session_participants WHERE agent_id = ?`).run(id);
+    // An 'existing' recommendation of a participant that is gone recommends
+    // nothing (§8.13).
+    this.db.prepare(`DELETE FROM participant_recommendations WHERE agent_id = ?`).run(id);
     this.db.prepare(`DELETE FROM agents WHERE id = ?`).run(id);
   }
 
@@ -2720,6 +2849,191 @@ export class SqliteStore implements Store {
          WHERE session_id = ? AND agent_id = ?`,
       )
       .run(Date.now(), sessionId, agentId);
+  }
+
+  // -- participant recommendations (multi-agent-chat §8.13, MAC-M6) ---------
+
+  listParticipantRecommendations(
+    sessionId: string,
+    status?: ParticipantRecommendationStatus,
+  ): ParticipantRecommendation[] {
+    this.assertOpen();
+    const rows = (
+      status
+        ? this.db
+            .prepare(
+              `SELECT * FROM participant_recommendations WHERE session_id = ? AND status = ?
+               ORDER BY created_at ASC, id ASC`,
+            )
+            .all(sessionId, status)
+        : this.db
+            .prepare(
+              `SELECT * FROM participant_recommendations WHERE session_id = ?
+               ORDER BY created_at ASC, id ASC`,
+            )
+            .all(sessionId)
+    ) as RecommendationRow[];
+    return rows.map(toRecommendation);
+  }
+
+  getParticipantRecommendation(id: string): ParticipantRecommendation | undefined {
+    this.assertOpen();
+    const row = this.db.prepare(`SELECT * FROM participant_recommendations WHERE id = ?`).get(id) as
+      | RecommendationRow
+      | undefined;
+    return row ? toRecommendation(row) : undefined;
+  }
+
+  putParticipantRecommendation(input: ParticipantRecommendationInput): ParticipantRecommendation {
+    this.assertOpen();
+    const id = input.id ?? mintRecommendationId();
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO participant_recommendations
+           (id, session_id, kind, agent_id, draft, specialty, reason, evidence, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           session_id = excluded.session_id,
+           kind = excluded.kind,
+           agent_id = excluded.agent_id,
+           draft = excluded.draft,
+           specialty = excluded.specialty,
+           reason = excluded.reason,
+           evidence = excluded.evidence,
+           status = excluded.status,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        id,
+        input.sessionId,
+        input.kind,
+        input.agentId ?? null,
+        input.draft ? JSON.stringify(input.draft) : null,
+        input.specialty,
+        input.reason,
+        JSON.stringify(input.evidence ?? []),
+        input.status ?? 'pending',
+        now,
+        now,
+      );
+    return this.getParticipantRecommendation(id)!;
+  }
+
+  setParticipantRecommendationStatus(
+    id: string,
+    status: ParticipantRecommendationStatus,
+  ): ParticipantRecommendation | undefined {
+    this.assertOpen();
+    this.db
+      .prepare(`UPDATE participant_recommendations SET status = ?, updated_at = ? WHERE id = ?`)
+      .run(status, Date.now(), id);
+    return this.getParticipantRecommendation(id);
+  }
+
+  getRecommendationCursor(sessionId: string): RecommendationCursor | undefined {
+    this.assertOpen();
+    const row = this.db
+      .prepare(`SELECT * FROM participant_recommendation_cursor WHERE session_id = ?`)
+      .get(sessionId) as
+      | { session_id: string; user_message_count: number | null; analyzed_at: number | null; failed_at: number | null }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      sessionId: row.session_id,
+      ...(row.user_message_count !== null ? { userMessageCount: Number(row.user_message_count) } : {}),
+      ...(row.analyzed_at !== null ? { analyzedAt: Number(row.analyzed_at) } : {}),
+      ...(row.failed_at !== null ? { failedAt: Number(row.failed_at) } : {}),
+    };
+  }
+
+  markRecommendationFailed(sessionId: string, at: number): void {
+    this.assertOpen();
+    this.db
+      .prepare(
+        `INSERT INTO participant_recommendation_cursor (session_id, failed_at) VALUES (?, ?)
+         ON CONFLICT (session_id) DO UPDATE SET failed_at = excluded.failed_at`,
+      )
+      .run(sessionId, at);
+  }
+
+  setRecommendationCursor(sessionId: string, userMessageCount: number, analyzedAt: number): void {
+    this.assertOpen();
+    this.db
+      .prepare(
+        `INSERT INTO participant_recommendation_cursor (session_id, user_message_count, analyzed_at, failed_at)
+         VALUES (?, ?, ?, NULL)
+         ON CONFLICT (session_id) DO UPDATE SET
+           user_message_count = excluded.user_message_count,
+           analyzed_at = excluded.analyzed_at,
+           failed_at = NULL`,
+      )
+      .run(sessionId, userMessageCount, analyzedAt);
+  }
+
+  listSessionsForRecommendation(opts: {
+    limit: number;
+    minUserMessages: number;
+    every?: number;
+    window?: number;
+    skipFailedSince?: number;
+  }): RecommendationCandidate[] {
+    this.assertOpen();
+    const every = opts.every ?? RECOMMEND_EVERY;
+    const window = opts.window ?? RECOMMEND_BACKFILL_LIMIT;
+    if (opts.limit <= 0 || window <= 0) return [];
+    // The window is the `window` most recently used sessions, temporary ones
+    // included (they are still "recent"), and only then are temporary sessions
+    // left out — so turning a session temporary never pulls an older one in.
+    // User-authored = `isUserAuthored`: a user row with no speaker and no routing.
+    const rows = this.db
+      .prepare(
+        `WITH recent AS (
+           SELECT session_id, last_used_at, no_learn FROM sessions
+           ORDER BY last_used_at DESC, session_id DESC LIMIT ?
+         )
+         SELECT r.session_id AS session_id, r.last_used_at AS last_used_at,
+                (SELECT COUNT(*) FROM messages m
+                  WHERE m.session_id = r.session_id AND m.role = 'user'
+                    AND json_extract(m.payload, '$.speaker') IS NULL
+                    AND json_extract(m.payload, '$.routing') IS NULL) AS user_count,
+                c.user_message_count AS cursor,
+                c.failed_at AS failed_at
+         FROM recent r
+         LEFT JOIN participant_recommendation_cursor c ON c.session_id = r.session_id
+         WHERE r.no_learn = 0
+         ORDER BY r.last_used_at DESC, r.session_id DESC`,
+      )
+      .all(window) as {
+      session_id: string;
+      last_used_at: number;
+      user_count: number;
+      cursor: number | null;
+      failed_at: number | null;
+    }[];
+    const out: RecommendationCandidate[] = [];
+    for (const r of rows) {
+      if (
+        opts.skipFailedSince !== undefined &&
+        r.failed_at !== null &&
+        r.failed_at !== undefined &&
+        Number(r.failed_at) >= opts.skipFailedSince
+      ) {
+        continue;
+      }
+      const count = Number(r.user_count);
+      const cursor = r.cursor === null || r.cursor === undefined ? undefined : Number(r.cursor);
+      const due = cursor === undefined ? count >= opts.minUserMessages : count - cursor >= every;
+      if (!due) continue;
+      out.push({
+        sessionId: r.session_id,
+        userMessageCount: count,
+        ...(cursor !== undefined ? { cursor } : {}),
+        lastUsedAt: Number(r.last_used_at),
+      });
+      if (out.length >= opts.limit) break;
+    }
+    return out;
   }
 
   // -- eval-event ledger (Phase 3 P3-M5, realizing P15-03) ------------------
@@ -3074,6 +3388,9 @@ export class SqliteStore implements Store {
         this.db
           .prepare('DELETE FROM session_participants WHERE session_id = ?')
           .run(session_id);
+        // ...and so do its recommendations and their cursor (§8.13).
+        this.db.prepare('DELETE FROM participant_recommendations WHERE session_id = ?').run(session_id);
+        this.db.prepare('DELETE FROM participant_recommendation_cursor WHERE session_id = ?').run(session_id);
       }
       // The project's OWN scope='project' memory (scopeKey = cwd) goes with it.
       // user/org memory is NOT project-owned and MUST survive — it is never

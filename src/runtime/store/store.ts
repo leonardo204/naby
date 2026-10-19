@@ -1158,6 +1158,86 @@ export type SessionParticipant = {
   updatedAt: number;
 };
 
+/** A participant recommendation's kind (multi-agent-chat §8.13, R9.2):
+ *  `existing` = a registered participant that is not in the session;
+ *  `new` = a draft of a participant nobody has made yet. */
+export type ParticipantRecommendationKind = 'existing' | 'new';
+
+/** `pending` waits on the user (a dashed roster chip); `accepted` = saved and/or
+ *  added; `dismissed` = the user threw it away — never made again for the same
+ *  target in the same session (R9.5). */
+export type ParticipantRecommendationStatus = 'pending' | 'accepted' | 'dismissed';
+
+/** A `new` recommendation's draft — the same fields as the shell's `DraftFields`
+ *  (§8.12 R8.1). Tools, MCP servers, skills and the model are NOT here: a saved
+ *  draft starts with none, and `memoryScope: 'session'` (R9.2). */
+export type ParticipantRecommendationDraft = {
+  name: string;
+  displayName: string;
+  description: string;
+  instructions: string;
+  guardrailsPolicy: string;
+  greeting: string;
+  avatar: ParticipantProfile['avatar'];
+  color: string;
+};
+
+/** One `participant_recommendations` row (§8.13, schema v15). */
+export type ParticipantRecommendation = {
+  id: string;
+  sessionId: string;
+  kind: ParticipantRecommendationKind;
+  /** `existing` only. */
+  agentId?: string;
+  /** `new` only. */
+  draft?: ParticipantRecommendationDraft;
+  /** The specialty naby named (R9.1a). Never empty. */
+  specialty: string;
+  /** naby's one-line reason, shown on the chip and the editor banner. */
+  reason: string;
+  /** The user-message numbers (1-based, user-authored only) the
+   *  recommendation rests on (R9.1). */
+  evidence: number[];
+  status: ParticipantRecommendationStatus;
+  /** epoch ms */
+  createdAt: number;
+  /** epoch ms of the last status change. */
+  updatedAt: number;
+};
+
+/** Upsert input: `id` omitted = mint one; `status` omitted = `pending`.
+ *  Timestamps are store-owned (`createdAt` survives an upsert). */
+export type ParticipantRecommendationInput = Omit<
+  ParticipantRecommendation,
+  'id' | 'status' | 'createdAt' | 'updatedAt'
+> & { id?: string; status?: ParticipantRecommendationStatus };
+
+/** The analysis cursor of one session (§8.13 R9.4): how many user-authored
+ *  messages the last analysis saw. */
+export type RecommendationCursor = {
+  sessionId: string;
+  /** User-authored messages the last SUCCESSFUL analysis saw; absent = the
+   *  session was never analysed (the row only records a failure). */
+  userMessageCount?: number;
+  /** epoch ms of the last successful analysis. */
+  analyzedAt?: number;
+  /** epoch ms of the last FAILED analysis (the judge threw), cleared by the
+   *  next successful one. The sweep skips the session for
+   *  `RECOMMEND_FAILURE_COOLDOWN_MS` after it. */
+  failedAt?: number;
+};
+
+/** A session due for analysis, as `listSessionsForRecommendation` returns it. */
+export type RecommendationCandidate = {
+  sessionId: string;
+  /** User-authored messages in the session now. */
+  userMessageCount: number;
+  /** The cursor's count; absent = never analysed. */
+  cursor?: number;
+  /** epoch ms */
+  lastUsedAt: number;
+};
+
 /** Upsert input. `id` is OPTIONAL: omit to mint a new agent, or supply an
  *  existing id to update that row. createdAt/updatedAt are store-owned. Name
  *  uniqueness is enforced by the store (a different row with the same name is
@@ -1613,6 +1693,62 @@ export interface Store {
   /** Mark the (session, agent) row `removed` (the row is kept, so the history of
    *  who was in the conversation survives). No-op when there is no row. */
   removeSessionParticipant(sessionId: string, agentId: string): void;
+
+  // -- participant recommendations (multi-agent-chat §8.13, MAC-M6) ---------
+  //
+  // naby's background suggestions of a participant for a session. Session
+  // state: deleted with the session (and the project that owns it). Removing a
+  // participant drops the `existing` rows that name it.
+
+  /** The session's recommendations, oldest first; `status` narrows. */
+  listParticipantRecommendations(
+    sessionId: string,
+    status?: ParticipantRecommendationStatus,
+  ): ParticipantRecommendation[];
+
+  /** One recommendation by id. */
+  getParticipantRecommendation(id: string): ParticipantRecommendation | undefined;
+
+  /** Insert or replace a recommendation. Returns the row as stored. */
+  putParticipantRecommendation(row: ParticipantRecommendationInput): ParticipantRecommendation;
+
+  /** Move a recommendation to `status`. Returns the updated row, or undefined
+   *  when there is no such id. */
+  setParticipantRecommendationStatus(
+    id: string,
+    status: ParticipantRecommendationStatus,
+  ): ParticipantRecommendation | undefined;
+
+  /** The session's analysis cursor, or undefined when it was never analysed. */
+  getRecommendationCursor(sessionId: string): RecommendationCursor | undefined;
+
+  /** Upsert the session's analysis cursor (a successful analysis). Clears
+   *  `failedAt`. */
+  setRecommendationCursor(sessionId: string, userMessageCount: number, analyzedAt: number): void;
+
+  /** Record a FAILED analysis at `at`, leaving the cursor's count as it was
+   *  (or absent). */
+  markRecommendationFailed(sessionId: string, at: number): void;
+
+  /**
+   * Sessions due for analysis, most recently used first: no cursor and at
+   * least `minUserMessages` user-authored messages, or a cursor at least
+   * `every` messages behind. Only the `window` most recently used sessions are
+   * considered at all (D18 — older sessions are never back-filled), temporary
+   * sessions (`noLearn`) never. At most `limit` are returned. User-authored =
+   * a `user` row with no `speaker` and no `routing` (`isUserAuthored`).
+   */
+  listSessionsForRecommendation(opts: {
+    limit: number;
+    minUserMessages: number;
+    /** default `RECOMMEND_EVERY` (8) */
+    every?: number;
+    /** default `RECOMMEND_BACKFILL_LIMIT` (30) */
+    window?: number;
+    /** Leave out sessions whose last failed analysis is at or after this
+     *  epoch ms (the failure cooldown). Absent = failures are not considered. */
+    skipFailedSince?: number;
+  }): RecommendationCandidate[];
 
   // -- eval-event ledger (Phase 3 P3-M5, realizing P15-03) -----------------
 

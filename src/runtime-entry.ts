@@ -337,6 +337,14 @@ export type {
   SessionParticipant,
   SessionParticipantStatus,
   SessionParticipantAddedBy,
+  // Participant recommendations per session (multi-agent-chat §8.13, MAC-M6).
+  ParticipantRecommendation,
+  ParticipantRecommendationDraft,
+  ParticipantRecommendationInput,
+  ParticipantRecommendationKind,
+  ParticipantRecommendationStatus,
+  RecommendationCandidate,
+  RecommendationCursor,
   // The eval-event ledger (Phase 3, P3-M5) — realizes the stream P15-03 reserved.
   // The shell appends check-in / autonomous / tripwire observations here and the
   // trust meter reads them. NEVER exposed to the agent itself.
@@ -450,6 +458,8 @@ export {
 export {
   composeParticipantSystem,
   defaultParticipantProfile,
+  defuseUntrusted,
+  participantHandleProblem,
   handoffPrefix,
   HUB_MENTION_ALIASES,
   isUserAuthored,
@@ -483,6 +493,41 @@ export {
   type RouteDecision as ParticipantRouteDecision,
   type RoutePromptInput as ParticipantRoutePromptInput,
 } from './runtime/participants.js';
+
+// PARTICIPANT RECOMMENDATIONS (specs/multi-agent-chat.md §8.13, MAC-M6). Pure:
+// the cursor rule, the transcript the recommender reads, its prompt and the
+// strict parser that applies the threshold (R9.1) and the dedupe rules (R9.5).
+// The shell's background sweep runs the model call and writes the rows.
+export {
+  countUserMessages,
+  defuseMarkers,
+  parseRecommendations,
+  recommendationDue,
+  recommendPrompt,
+  recommendTranscript,
+  RECOMMEND_BACKFILL_LIMIT,
+  RECOMMEND_DRAFT_LIMITS,
+  RECOMMEND_EVERY,
+  RECOMMEND_FAILURE_COOLDOWN_MS,
+  RECOMMEND_FIRST_AT,
+  RECOMMEND_MAX_PENDING,
+  RECOMMEND_MAX_RAW_ITEMS,
+  RECOMMEND_MIN_EVIDENCE,
+  RECOMMEND_REASON_MAX_CHARS,
+  RECOMMEND_RECENT_LIMIT,
+  RECOMMEND_SPECIALTY_MAX_CHARS,
+  RECOMMEND_SWEEP_SESSIONS,
+  RECOMMEND_TIER,
+  RECOMMEND_USER_MESSAGE,
+  type KnownRecommendation,
+  type ParsedRecommendation,
+  type RecommendDropReason,
+  type RecommendLine,
+  type RecommendParseContext,
+  type RecommendParseResult,
+  type RecommendPromptInput,
+  type RecommendTranscript,
+} from './runtime/participant-recommend.js';
 
 // Phase 1.5 — the deterministic memory write gate (P15-05) and the turn-time
 // retrieval/injection helpers (P15-02). The gate is pure; the store's putMemory

@@ -503,7 +503,17 @@ const UNTRUSTED_DESCRIPTIONS = 'untrusted_participant_descriptions';
  *  that types `</untrusted_transcript>` cannot close the fence early and have
  *  what follows read as naby's own instructions. */
 function untrusted(s: string, max: number): string {
-  return clip(s, max).replace(/<(\/?)\s*(untrusted_[a-z_]*)/gi, '‹$1$2');
+  // `<\s*\/?\s*`: whitespace on either side of the slash (`< /untrusted_…`)
+  // must not slip a closing tag past the defusing either.
+  return clip(s, max).replace(/<\s*(\/?)\s*(untrusted_[a-z_]*)/gi, '‹$1$2');
+}
+
+/** The untrusted-data defusing `routePrompt` applies, for the other prompts
+ *  that fence participant- or user-written text the same way (the
+ *  recommendation prompt, §8.13): whitespace folded, clipped to `max`, and any
+ *  `<untrusted_…>` / `</untrusted_…>` tag written inside the data neutralised. */
+export function defuseUntrusted(s: string, max: number): string {
+  return untrusted(s, max);
 }
 
 /**
@@ -771,6 +781,28 @@ export function isUserAuthored(m: RuntimeMessage): boolean {
 /** The spellings of the hub a participant may use to address it back (R3.4).
  *  `@naby` is the stored handle; `@나비` is how a Korean conversation writes it. */
 export const HUB_MENTION_ALIASES: readonly string[] = ['naby', '나비'];
+
+/**
+ * The PURE half of the participant handle rule (MAC-M1 decision 3): present, no
+ * whitespace, no `@` inside, no leading `/`, `.` or `~` (those read as a file
+ * reference), and not one of the hub's handles (`HUB_MENTION_ALIASES` plus
+ * `hubNames`). One leading `@` is forgiven and stripped. Uniqueness against the
+ * registry is the caller's half (the shell's `validateParticipantName` reads the
+ * store); this is what a model-written draft can be checked with in isolation.
+ */
+export function participantHandleProblem(
+  raw: unknown,
+  hubNames: readonly string[] = [],
+): { ok: true; name: string } | { ok: false; error: string } {
+  const name = typeof raw === 'string' ? raw.trim().replace(/^@/, '') : '';
+  if (!name) return { ok: false, error: 'name is required' };
+  if (/\s/.test(name)) return { ok: false, error: 'name cannot contain spaces' };
+  if (name.includes('@')) return { ok: false, error: "name cannot contain '@'" };
+  if (/^[/.~]/.test(name)) return { ok: false, error: "name cannot start with '/', '.' or '~'" };
+  const reserved = new Set([...HUB_MENTION_ALIASES, ...hubNames].map((n) => n.toLowerCase()));
+  if (reserved.has(name.toLowerCase())) return { ok: false, error: `'${name}' is the built-in agent's name` };
+  return { ok: true, name };
+}
 
 /** Does this text address the hub (`@naby` / `@나비`, or the persona's own handle
  *  when an install renamed it)? Same token rules as `parseMentions`. */

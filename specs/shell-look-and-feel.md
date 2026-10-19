@@ -2,11 +2,11 @@
 id: shell-look-and-feel
 title: 셸 룩앤필 — 프로토타입 팔레트를 토큰으로 옮긴다
 type: design
-version: 0.2.1
+version: 0.2.2
 status: review
 scope: naby 셸(cockpit)의 색·모서리·그림자·글꼴을 대화형 다중 에이전트 프로토타입(`demo/multi-agent-chat/index.html`)에 맞추는 설계. 토큰 교체, 하드코딩 상태색 이관, 표면별 모양 변경, HTML 출력 스타일 동기화, 스크린샷 검증을 다룬다. multi-agent-chat R7의 설계이고 마일스톤 MAC-M0다. 참가자 UI 자체(명단·말풍선 발언자·승인 카드의 동작)는 multi-agent-chat이 맡는다.
 related: [multi-agent-chat, settings-ia-reorg, packaging-path-resolution]
-updated: 2026-10-16
+updated: 2026-10-19
 ---
 
 # 셸 룩앤필 — 프로토타입 팔레트를 토큰으로 옮긴다
@@ -59,7 +59,7 @@ HSL 삼중항이다(셸 관례). 변환은 프로토타입 hex에서 했다.
 | `--brand`, `--ring` | `var(--violet-9)` | `var(--violet-9)` | `--pri` |
 | `--brand-foreground` | `var(--violet-11)` | `var(--violet-11)` | |
 | `--brand-2` **(신설)** | `255 100% 74%` | `254 100% 85%` | `--pri2`, 그라데이션 끝 |
-| `--user-bubble` **(신설)** | `252 100% 65%` | `251 41% 39%` | `--ubub` |
+| `--user-bubble` **(신설)** | `252 52% 57%` | `251 41% 39%` | `--ubub` |
 | `--user-bubble-foreground` **(신설)** | `0 0% 100%` | `253 100% 96%` | `--uink` |
 | `--success` | `159 80% 35%` | `157 63% 53%` | `--ok` |
 | `--warning` | `38 95% 39%` | `38 90% 61%` | `--warn` |
@@ -68,6 +68,8 @@ HSL 삼중항이다(셸 관례). 변환은 프로토타입 hex에서 했다.
 | `--code-surface` **(신설)** | `240 16% 96%` | `229 14% 15%` | `--code` |
 
 `--secondary-foreground`·`--destructive-foreground`는 그대로다. `success`·`warning`·`info`에는 `-foreground` 짝을 만든다(흰색 또는 `--foreground`).
+
+라이트 사용자 말풍선은 2026-10-19에 `252 52% 57%`로 낮췄다. 프로토타입의 `#6D4AFF`가 긴 메시지에서 너무 강해 눈이 아프다는 피드백 때문이다. 흰 글자 대비는 4.5:1 이상을 지킨다.
 
 ### 3.3 모서리·그림자
 
@@ -138,7 +140,7 @@ Opus 에이전트가 구현했고 Fable 5.1이 스크린샷으로 확인했다. 
 
 - ✅ **토큰**: violet 12단계(라이트·다크), §3.2 의미 토큰 전부, 신설 토큰, `--radius: 0.75rem`, 그림자 2종, `.bg-brand-gradient`. `MarkdownRenderer`의 인라인 코드·표 머리글은 `bg-accent`가 보라가 되어 `bg-code-surface`·`bg-muted`로 옮겼다. 브라우저 `theme-color`도 새 배경에 맞췄다.
 - ✅ **상태색 이관**: 약 50개 파일. grep(red·amber·emerald·green·violet·blue·orange) 0건. 식별색은 `info`(sky, 문서 탭)·`brand`(violet)·muted(slate)로. `bg-primary`는 두 곳뿐이라 중립 버튼 이동은 없었다.
-- ✅ **표면 8개**: 사용자 말풍선 `bg-user-bubble`, 나비 평문, 헤더 보조 줄 + 명단·토글 자리, 작성기 카드 + 그라데이션 원형 보내기 버튼(새 클릭 대상, Enter 경로 재사용), 승인 카드, 사이드바 `bg-sidebar` + 라벨(i18n `workspace.sidebarProjects/Sessions`), 설정 모달 `shadow-float` + nav 선택 `bg-accent text-brand-foreground`, 토스트. `AGENT_BUBBLE_CARD_CLASS`를 내보내 두었고 MAC-M3에서 쓴다.
+- ✅ **표면 8개**: 사용자 말풍선 `bg-user-bubble`, 나비 평문, 헤더 보조 줄 + 명단·토글 자리, 작성기 카드 + 그라데이션 원형 보내기 버튼(새 클릭 대상, Enter 경로 재사용), 승인 카드, 사이드바 `bg-sidebar` + 라벨(i18n `workspace.sidebarProjects`; 세션 라벨은 2026-10-19에 뺐다), 설정 모달 `shadow-float` + nav 선택 `bg-accent text-brand-foreground`, 토스트. `AGENT_BUBBLE_CARD_CLASS`를 내보내 두었고 MAC-M3에서 쓴다.
 - ✅ **글꼴·HTML**: `system` 스택에 Pretendard 삽입. `html-lib/theme.css`는 라이트·다크 블록에 모든 토큰을 다시 선언.
 - ✅ **검증**: 타입체크 기준선 유지(셸 12·루트 30, 같은 줄). 셸 테스트 223 파일 / 4264 통과(스타일 단언 테스트 11개 갱신). prod 빌드 통과. `shell/scripts/ui-screenshots.mjs`(`--base --out --themes`)로 라이트·다크 9장씩 촬영(임시 HOME·DB, 텔레그램 꺼짐, 서버는 PID로 종료). 메시지 쌍은 프로바이더 키가 없어 임시 DB에 직접 심었다.
 - ⏳ **MAC-M0.5 릴리스**: 아직. 커밋·릴리스 노트는 사용자 지시 때.

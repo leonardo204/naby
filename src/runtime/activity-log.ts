@@ -162,6 +162,10 @@ export type ActivityKind =
   // naby's DRAFT of a participant, made in the conversation (§8.12, MAC-M5a):
   // create or update, what the user answered, and the participant it saved.
   | 'participant_draft'
+  // naby's background RECOMMENDATION of a participant for a session (§8.13,
+  // MAC-M6): what it suggested and on which evidence, and later what the user
+  // did with it — or `decision: 'none'` when an analysis found nothing.
+  | 'participant_recommendation'
   | 'participant_mention_ignored'
   | 'participant_cap'
   | 'round_completed'

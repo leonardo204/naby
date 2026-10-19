@@ -2,11 +2,11 @@
 id: multi-agent-chat
 title: 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자 (요구사항 검토 리포트)
 type: design
-version: 0.3.1
+version: 0.4.2
 status: review
 scope: 한 대화 세션에 나비 외의 대화형 에이전트(참가자)를 여럿 두는 기능. 나비가 기본 참가자이자 관리자다. 사용자의 질의를 나비가 확인해 참가자에게 위임하고, 위임받은 참가자가 채팅에 직접 답한다. 에이전트 간 대화는 나비와 참가자 사이로 한정한다. 참가자 명세(지식·지시·가드레일·외부 자원·스킬), 사용자 추가와 외부 정의 가져오기·변환, 다중 참가자 대화의 UI/UX와 관리를 다룬다. §1~§6은 요구사항과 결정(2026-10-16 승인), §8은 설계다. 가져오기 어댑터는 agent-import-adapters, 룩앤필은 shell-look-and-feel이 맡는다. 나비의 학습·신뢰 지표는 persona-agent와 butterfly-trust-meter가, 단일 에이전트 내보내기·가져오기 형식은 agent-export가 그대로 맡는다.
 related: [agent-import-adapters, shell-look-and-feel, phase-3-persona-agent, phase-3-persona-hardening, phase-3-agent-export, phase-3-butterfly-trust-meter, phase-1_5-memory-contracts, subagent-delegation, session-context-management, skill-hub-builtin, mcp-oauth-catalog, telegram-chat, settings-ia-reorg, naby-activity-log, model-auto-routing]
-updated: 2026-10-16
+updated: 2026-10-19
 ---
 
 # 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자
@@ -261,7 +261,8 @@ updated: 2026-10-16
 1. ✅ §4 범위와 §5 결정 15건을 권장안대로 승인했다(2026-10-16).
 2. ✅ 0.2.0 설계를 썼다. 이 문서 §8(데이터 모델·발언 루프·엔진 직렬화·API·UI·검증·마일스톤), [agent-import-adapters](agent-import-adapters.md)(어댑터 인터페이스·포맷별 매핑·손실 보고), [shell-look-and-feel](shell-look-and-feel.md)(토큰·표면·스크린샷). 프로토타입 `demo/multi-agent-chat/index.html`이 MAC-M0·M3의 시각 기준이다.
 3. ✅ persona-agent(§4 `kind`, §5 `@` 해석, §8.3)와 agent-export(§1·§6·§7.3, `formatVersion` 2)를 개정했다.
-4. ⏳ 설계 승인 뒤 **Opus** 에이전트로 구현한다(모델을 호출에 명시). 마일스톤마다 Opus가 구현·테스트·스파이크를 끝내면 Fable 5.1이 스펙의 검증 상태와 구현 결정을 갱신한다. 모든 마일스톤에서 설계와 스펙은 Fable 5.1이, 코드는 Opus가 맡는다.
+4. ✅ MAC-M0~M5a를 Opus가 구현했고 1.44.0·1.44.1·1.45.0으로 냈다(§8.11).
+5. ⏳ MAC-M6 참가자 추천(§8.13)을 2026-10-19에 승인했다. **Opus** 에이전트로 구현한다(모델을 호출에 명시). 마일스톤마다 Opus가 구현·테스트·스파이크를 끝내면 Fable 5.1이 스펙의 검증 상태와 구현 결정을 갱신한다. 모든 마일스톤에서 설계와 스펙은 Fable 5.1이, 코드는 Opus가 맡는다.
 
 ## 8. 설계
 
@@ -427,7 +428,7 @@ END                                               // 스트림 result, 활동 �
 | `session.participants.add` | `{sessionId, agentId}` | 상한 검사(R2.4), `added_by:'user'` |
 | `session.participants.remove` | `{sessionId, agentId}` | 나비는 거부 |
 
-**설정 키**(`settings` 테이블, 기존 `persona.autonomy.*`와 같은 자리): `participants.proposals.enabled`(기본 `true`, D13) · `participants.maxPerSession`(5) · `participants.maxSpeechesPerRound`(6) · `participants.maxRoundTrips`(3) · `participants.showRouting`(기본 `false`, 클라이언트에서 토글하면 저장된다). `participants.get/set` 액션 하나로 읽고 쓴다.
+**설정 키**(`settings` 테이블, 기존 `persona.autonomy.*`와 같은 자리): `participants.proposals.enabled`(기본 `true`, D13) · `participants.maxPerSession`(5) · `participants.maxSpeechesPerRound`(6) · `participants.maxRoundTrips`(3) · `participants.showRouting`(기본 `false`, 클라이언트에서 토글하면 저장된다) · `participants.recommendations.enabled`(기본 `true`, §8.13). `participants.get/set` 액션 하나로 읽고 쓴다.
 
 **스트림 이벤트**(`ctx.emit`). 기존 `system/init`은 라운드 시작에 한 번만 나가고 `acting_agent`는 나비다. 발언마다 아래를 더한다.
 - `{type:'system', subtype:'speaker', agent:{id, name, displayName, avatar, color, persona:boolean}}` — 발언 시작 전. 클라이언트가 로딩 말풍선 이름과 아바타를 바꾼다.
@@ -454,7 +455,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 ### 8.6 활동 로그
 
-`ActivityKind`에 `participant_route` · `participant_proposal` · `participant_mention_ignored` · `participant_cap` · `round_completed`를 더한다(`RT/activity-log.ts:87`). 발언의 토큰은 기존 `usage`가 `activity.agentId/agentName`으로 구분한다. 라우팅 호출의 토큰은 `participant_route`에 `inputTokens/outputTokens`로 따로 남긴다. 미니 턴은 `runTurn`을 거치지 않아 `usage` 행이 저절로 생기지 않으므로, 라운드 모듈이 `store.appendUsage`와 `logActivity('usage', {source:'participant-route'})`를 직접 불러 비용 합계에 들어가게 한다(R6.6). [naby-activity-log](naby-activity-log.md) §3.3의 "하네스 이벤트는 남기지 않는다"와 충돌하지 않는다 — 이것은 엔진 사정이 아니라 나비의 결정이다.
+`ActivityKind`에 `participant_route` · `participant_proposal` · `participant_mention_ignored` · `participant_cap` · `round_completed`(§8.13에서 `participant_recommendation`)를 더한다(`RT/activity-log.ts:87`). 발언의 토큰은 기존 `usage`가 `activity.agentId/agentName`으로 구분한다. 라우팅 호출의 토큰은 `participant_route`에 `inputTokens/outputTokens`로 따로 남긴다. 미니 턴은 `runTurn`을 거치지 않아 `usage` 행이 저절로 생기지 않으므로, 라운드 모듈이 `store.appendUsage`와 `logActivity('usage', {source:'participant-route'})`를 직접 불러 비용 합계에 들어가게 한다(R6.6). [naby-activity-log](naby-activity-log.md) §3.3의 "하네스 이벤트는 남기지 않는다"와 충돌하지 않는다 — 이것은 엔진 사정이 아니라 나비의 결정이다.
 
 ### 8.7 텔레그램
 
@@ -489,6 +490,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 | **MAC-M3** UI | 8.5 전부, 8.7(a), i18n | 프로토타입 시나리오 1~4·6을 실제 앱에서 확인. **여기까지 1차 출시**(릴리스 노트) | Opus |
 | **MAC-M4** 가져오기 | [agent-import-adapters](agent-import-adapters.md) §5 어댑터 3종, `ParticipantImportDialog`, 사이드카 v2 | 그 문서 §6. 시나리오 5를 실제 앱에서 확인 | Opus |
 | **MAC-M5** 후속 | `end` 액션 다듬기, 반복 발언 탐지, 나머지 어댑터, 자율 루프 결합 | 각각 별도 스펙으로 | — |
+| **MAC-M6** 참가자 추천 | §8.13 전부: `RT/participant-recommend.ts`, 스키마 v15, `lib/participantRecommend.ts` 스윕, `session.recommendations.*` 액션, 명단 추천 칩, 편집기 프리필 | §8.13 검증. 독립 릴리스 | Opus |
 
 
 ### 8.12 대화에서 참가자 만들기·고치기 (MAC-M5a, 2026-10-16 사용자 결정)
@@ -520,6 +522,71 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 **범위 밖.** 도구·MCP·스킬·모델을 대화로 바꾸기(편집기 전용), 참가자 삭제(사용자만), 참가자가 참가자를 만들기.
 
+### 8.13 참가자 추천 (MAC-M6, 2026-10-19 사용자 결정)
+
+나비가 세션의 대화를 읽고, **어느 정도 전문성이 필요한 일이 반복된다고 판단될 때만** 참가자를 추천한다. 추천은 명단에 점선 칩으로 서고, 사용자가 설정 편집기에서 저장하거나 버린다. 추천은 제안(R3.9)과 다르다. 제안은 턴 안에서 "지금 이 질문"을 맡길 참가자를 묻고, 추천은 턴 밖에서 "이 세션의 일"에 맞는 참가자를 미리 만들어 두자고 권한다.
+
+**R9.1 [필수] 추천의 문턱.** 기본 결과는 "추천 없음"이다. 추천하려면 세 가지가 다 맞아야 한다. (a) 나비가 이름 붙일 수 있는 **뚜렷한 전문 분야**가 있다(번역·SQL 작성·릴리스 노트 교정처럼). (b) 그 일이 세션에서 **세 번 이상 반복**됐거나 사용자가 반복될 일이라고 말했다. (c) 그 일을 지금 세션의 참가자(나비 포함)가 아니라 전담 참가자에게 맡기는 편이 낫다. 출력에는 근거가 된 사용자 메시지의 번호를 `evidence[]`로 붙이고, 파서는 근거가 셋 미만이거나 (a)가 비어 있는 추천을 **버린다.** 일반 잡담·일회성 질문·코딩 작업 자체는 추천 대상이 아니다.
+
+**R9.2 [필수] 두 종류.** `existing` — 등록돼 있지만 이 세션에 없는 참가자(`agentId`). `new` — 아직 없는 참가자의 초안(`DraftFields`와 같은 필드: name · displayName · description · instructions · guardrailsPolicy · greeting · avatar · color). 초안의 도구·MCP·스킬은 비어 있고 `memoryScope`는 `session`이다(R8.1과 같은 안전 기본값).
+
+**R9.3 [필수] 표시와 처리.** 명단(`ParticipantRoster`)의 `+` 앞에 점선 테두리 칩으로 선다 — 아바타·이름·"추천" 배지. 호버·클릭 메뉴에 나비의 이유 한 줄이 보인다. `new`를 누르면 설정 → 참가자 편집기가 초안으로 채워져 열리고, 위에 "나비의 추천 · 이유" 배너와 버튼 셋 "저장하고 대화에 추가" · "저장만" · "버리기"가 있다. `existing`은 칩 메뉴에서 바로 "대화에 추가" · "무시"다(D16). 저장·추가는 기존 `participant.put`·`session.participants.add`를 그대로 쓰고 마지막에 `session.recommendations.accept`로 닫는다. 저장 전에는 추천의 지시가 어떤 턴에도 들어가지 않는다.
+
+**R9.4 [필수] 시점.** 세션의 사용자 턴이 끝난 뒤 백그라운드로 분석한다. 턴을 늦추지 않고, 실패는 로그로만 남는다(`kickReflectionSweep`과 같은 규약). 처음은 사용자 메시지 4개가 쌓였을 때, 이후는 사용자 메시지 **8개마다** 다시 본다(D17). 분석 커서(마지막으로 본 사용자 메시지 수)를 세션별로 둔다. 기존 세션은 **소급**한다 — 앱 부팅(`bootReconcile`) 때와 매 턴 끝의 스윕이 커서가 없는 세션을 최근 순으로 **한 번에 3개**, 사용자 메시지 4개 이상인 것만, **최근 30세션**까지 본다(D18). 스윕은 동시에 하나만 돈다.
+
+**R9.5 [필수] 상한과 중복.** 세션당 대기(`pending`) 추천 **2개**. 같은 세션에서 버린(`dismissed`) 추천과 같은 대상(`existing`은 `agentId`, `new`는 소문자 `name`)은 다시 만들지 않는다. 세션에 이미 있는 참가자, 이 세션에서 거절(`declined`)한 참가자, 등록 참가자와 이름이 같은 `new`는 만들지 않는다. 턴 중 제안(R3.9)으로 같은 참가자가 세션에 들어오면 그 추천은 `accepted`로 닫는다. 분석 입력에 등록 참가자 명단(이름·설명)을 넣어 모델이 `existing`을 먼저 고르게 한다.
+
+**R9.6 [필수] 호출.** 도구 없는 미니 호출 한 번, `ROUTE_TIER`(sonnet)와 같은 등급, 라우팅 호출과 같은 방식으로 사용자 프로바이더에 청구하고 `usage`에 `source:'participant-recommend'`로 남긴다. 입력은 최근 메시지 24개(사용자가 쓴 것과 나비·참가자 발언, 발언자 라벨, 미신뢰 구분자로 감쌈), 등록 참가자 명단, 세션 참가자 명단, 버린 추천 목록. 출력은 구조화 JSON `{ recommendations: [{kind, agentId?, draft?, specialty, reason, evidence: number[]}] }`이고 파서는 엄격하다 — 깨지면 빈 추천. 프로바이더가 없거나 설정 `participants.recommendations.enabled`가 꺼져 있으면 조용히 건너뛴다.
+
+**R9.7 [필수] 기록.** 활동 로그 `participant_recommendation {sessionId, kind, agentId?, name, specialty, decision: 'pending'|'accepted'|'dismissed'|'none', evidence}`. 분석이 "추천 없음"으로 끝나도 커서는 옮긴다.
+
+**데이터 모델(스키마 v15).**
+
+```sql
+CREATE TABLE participant_recommendations (
+  id            TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL,
+  kind          TEXT NOT NULL,            -- 'existing' | 'new'
+  agent_id      TEXT,                     -- existing
+  draft         TEXT,                     -- new: DraftFields JSON
+  specialty     TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  evidence      TEXT NOT NULL,            -- JSON number[]
+  status        TEXT NOT NULL,            -- 'pending' | 'accepted' | 'dismissed'
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX idx_prec_session ON participant_recommendations(session_id, status);
+CREATE TABLE participant_recommendation_cursor (
+  session_id          TEXT PRIMARY KEY,
+  user_message_count  INTEGER,             -- NULL = 아직 성공한 분석이 없다
+  analyzed_at         INTEGER,
+  failed_at           INTEGER              -- 마지막 실패 시각, 성공하면 NULL
+);
+```
+
+스토어 메서드: `listParticipantRecommendations(sessionId, status?)` · `putParticipantRecommendation(row)` · `setParticipantRecommendationStatus(id, status)` · `getRecommendationCursor(sessionId)` · `setRecommendationCursor(sessionId, count, at)`(`failed_at`을 지운다) · `markRecommendationFailed(sessionId, at)` · `listSessionsForRecommendation({limit, minUserMessages, every, window, skipFailedSince})`(커서 없거나 커서보다 8개 이상 쌓인 세션, 최근 순). 메모리 스토어도 같은 계약이다.
+
+**모듈.** 런타임 `RT/participant-recommend.ts` — `recommendPrompt(input)`, `parseRecommendations(text, ctx)`(R9.1 문턱과 R9.5 중복 규칙 적용, 이름 규칙은 `participants.ts` 재사용), `RECOMMEND_TIER = ROUTE_TIER`, 상수(첫 분석 4·주기 8·세션당 2·스윕 3·소급 30·메시지 24). 셸 `SA/server/lib/participantRecommend.ts` — `analyzeSession(store, sessionId, judge)`, `kickRecommendationSweep(store, {sessionId?, excludeSessionId?})`(동시 1개, 실패는 warn), `modelRecommendationJudge(store)`(라우팅 호출과 같은 `engine.run` 미니 턴). `naby.ts`는 턴 끝에서 `kickRecommendationSweep(store, {sessionId})`를 부르고, `bootReconcile`은 `kickRecommendationSweep(store, {})`를 한 번 부른다.
+
+**API.** `session.recommendations.list {sessionId}` → `{recommendations: [{id, kind, agentId?, agent?: 명단 항목, draft?, specialty, reason}]}`(pending만) · `session.recommendations.dismiss {id}` · `session.recommendations.accept {id, agentId?}`(`new`를 저장한 뒤 그 `agentId`를 넘겨 닫는다). `session.participants.list`의 응답에 `recommendations`를 함께 실어 명단이 한 번에 읽게 한다. 새 스트림 이벤트는 없다 — 클라이언트는 턴이 끝날 때와 `participants_changed` 이벤트에서 다시 읽는다.
+
+**UI.** `ParticipantRoster`에 추천 칩(점선 `border-dashed border-brand/60`, 배지 "추천", `data-roster-recommendation`). `new` 클릭 → `openSettings({section:'participants', focus:'recommendation:<id>'})`. `ParticipantSection`이 그 anchor를 받아 `participant.list`와 함께 추천을 읽고 `ParticipantEditor initial=formFromDraft(draft)`로 연다. 편집기는 `recommendation` prop이 있을 때 배너와 버튼 셋을 보이고, "저장하고 대화에 추가"는 `participant.put` → `session.participants.add` → `accept`, "저장만"은 `put` → `accept`, "버리기"는 `dismiss`다. 설정 "참가자" 절에 "나비의 참가자 추천" 토글(`participants.recommendations.enabled`).
+
+**결정.**
+
+| | 선택지 | 결정 |
+|---|---|---|
+| D16 `existing` 추천의 승인 자리 | (a) 칩 메뉴에서 바로 (b) 설정으로 이동 | **(a)** 이미 저장된 참가자라 편집할 것이 없다 |
+| D17 재분석 주기 | (a) 사용자 메시지 8개마다 (b) 매 턴 | **(a)** 비용 |
+| D18 소급 범위 | (a) 최근 30세션, 사용자 메시지 4개 이상 (b) 전체 | **(a)** 첫 실행 비용 상한 |
+| D19 저장 위치 | (a) 새 테이블 (b) `session_participants`에 `recommended` 상태 | **(a)** `new` 초안은 agent 행이 없어 (b)가 맞지 않는다 |
+| D20 추천 문턱 | (a) 대화에 맞는 참가자가 있으면 늘 추천 (b) 반복되는 전문 업무일 때만 | **(b)** 사용자 결정(2026-10-19). 추천은 드물어야 가치가 있다 |
+
+**검증.** 스파이크 `spike-participant-recommend`(목표 25+): 프롬프트에 미신뢰 구분자·명단·버린 목록 · 파서가 깨진 JSON·근거 부족·분야 없음·세션에 있는 참가자·거절 참가자·이름 충돌·버린 대상을 버림 · 세션당 2개 상한 · 커서 규칙(4·8) · 스토어 왕복(sqlite·memory). 셸 vitest: 스윕이 stub 판정기로 커서 없는 세션 3개만 최근 순으로 보고 30세션에서 멈춤 · 동시 1개 · 끈 설정·프로바이더 없음에서 호출 0 · 턴 끝 호출이 턴 이벤트에 영향 없음 · `usage` 행 · 액션 3개(존재하지 않는 id, 이미 닫힌 것) · 제안 승인 시 `accepted` 전환 · 명단 추천 칩과 메뉴 · `existing` 바로 추가·무시 · 편집기 프리필·배너·버튼 셋 · 설정 토글. 타입체크 기준선, prod 빌드, 스크린샷 라이트·다크(명단 추천 칩·편집기 배너). 실기(사용자): 번역 요청을 세 번 한 세션에서 추천 칩이 뜨는지, 잡담 세션에서 안 뜨는지.
+
+**범위 밖.** 프로젝트·사용자 범위의 세션 간 패턴 분석(1차는 세션 단위), 텔레그램 표시, 추천 자동 저장.
+
 ### 8.11 구현 상태
 
 | 마일스톤 | 상태 | 검증 |
@@ -529,6 +596,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 | MAC-M2 라운드 루프 | ✅ 2026-10-16 | 셸 229 파일 / 4370 통과(`participantRound.test.ts` 35 = §8.8의 spike-participant-round, `nabyParticipantRound.test.ts` 9는 실제 `createNabySpec`에 각본 모델, `participantProposal`·`toChatMessagesSpeakers`·`applyStreamEventSpeakers` 28) · `spike:participant-history` 45/45 · 회귀 participants 96 · agents · autonomy 34 · 02 5 · export 11 · import 11 · reflection 96 · compaction · skill · p15 · voice · org-harness-hooks 77 · 타입체크 기준선 유지. 실제 모델 호출은 임시 HOME에 로그인이 없어 생략(격리 유지) |
 | MAC-M3 UI | ✅ 2026-10-16 | 셸 234 파일 / 4448 통과(M3 몫 59, 4개 파일) · 타입체크 기준선 · prod 빌드 + 스크린샷 라이트·다크 각 9장(`m3-shots/`: 명단·참가자 말풍선·라우팅 칩 숨김/보임·명단 메뉴·팔레트·제안 카드·거절 뒤·설정 참가자 절·편집기) · Fable이 스크린샷으로 프로토타입과 대조 |
 | MAC-M5a 대화에서 참가자 만들기 | ✅ 2026-10-16 | 셸 **240 파일 / 4555** 통과(새 파일 3개 56건, §8.12 검증 목록 전부) · 타입체크 기준선(셸 12·루트 29) · `spike:autonomy` 34 · `02` 5 · `participants` 116 · prod 빌드 · 초안 카드 스크린샷 라이트·다크(create·update) · 릴리스 1.45.0 |
+| MAC-M6 참가자 추천 | ✅ 2026-10-19 (구현·검증·리뷰 반영, 릴리스 전) | 셸 **245 파일 / 4627** 통과(새 파일 5개 57건: `participantRecommend` 21 · `recommendationsApi` 7 · `nabyRecommendation` 3 · `recommendations` 12 · `participantRecommendation` 14) · `spike:participant-recommend` 59/59 · 회귀 `participants` 117 · `autonomy` 34 · `02` 5 · `participant-history` 48 · `reflection` 97 · `hygiene` 51 · 타입체크 기준선(셸 12·루트 29) · `build:app` exit 0 · 스크린샷 라이트·다크 7쌍(명단 칩·칩 메뉴·추천 목록·편집기 배너·설정 토글) + 900px 라이트 · 스키마 v15 · Opus 리뷰 12건 반영 |
 | MAC-M4 가져오기 | ✅ 2026-10-16 | `spike:participant-import` 64/64 · 회귀 export 11 · import 11 · participants 116 · participant-history 48 · autonomy 34 · 02 5 · 셸 **236 파일 / 4481** 통과 · 타입체크 셸 12 / 루트 29(기존 오류 1건을 고쳐 기준선보다 하나 적음) · 스크린샷 라이트·다크 3장씩(가져오기 미리보기·손실 보고·출처 배지 카드) · `build:app` exit 0(M3 상태 기준) |
 
 **MAC-M1 구현 결정(Opus, Fable 확인).**
@@ -578,6 +646,8 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 **MAC-M5a 구현 결정(Opus, Fable 확인).** (1) "항상 묻는다"는 세 겹이다 — 게이트의 첫 검사가 `naby_participant_draft`를 단계 계약·정책 엔진보다 먼저 다루어 서브에이전트 호출과 도구를 받지 않은 턴을 거부하고, `deny` 규칙·조직 훅 거부만 적용하며, allow-all 바탕·`allow`·`ask` 규칙은 보지 않는다(원장 기록 없음). 실행기가 카드를 직접 띄운다. `approval.resolve`는 이 도구 이름들(`participant.create`·`participant.update`·`naby_participant_draft`)에 `remember`를 저장하지 않는다. 엔진 테스트가 allow-all·allow·ask에서 카드가 정확히 하나, deny에서 없음을 고정한다. (2) `update`는 id 또는 `@핸들`을 받는다(나비는 id를 모른다). (3) 초안 상한: 표시 이름 80자·설명 1000자·지시 32 KB. (4) 텔레그램 전송은 제안과 같은 규칙(턴의 에스컬레이션 또는 나비 설정이 telegram/both). (5) 아바타·색 프리셋과 핸들 규칙은 feature-agent로 옮기고 `participantForm.ts`가 재수출한다(의존 방향). (6) R8.5 줄은 `HUB_ROUND_RULES` 바로 뒤 별도 블록이고 참가자가 0명일 때도 들어간다. (7) 카드는 `ParticipantDraftCard.tsx`. (8) `participant.put`·`session.participants.add`는 공용 `putParticipant`·`addParticipantToSession`을 쓰도록 정리했다. 활동 로그 종류 `participant_draft` 추가.
 
+**MAC-M6 구현 결정(Opus, Fable 확인).** (1) 사용자 메시지 수는 `isUserAuthored` 규칙을 SQL(`json_extract`로 `speaker`·`routing` 검사)로 옮겨 센다. 자율 이어가기 행은 reflection과 같이 사용자 메시지로 센다. (2) 근거 번호는 사용자 메시지만 1부터 센 위치다. 24줄 창 안에 보이는 서로 다른 번호 셋 이상이어야 하고, 나비·참가자 줄을 가리키면 세지 않는다. 전사에서 도구 행·전달 행·빈 어시스턴트 행은 뺀다. (3) 파서: 분야 80자·이유 300자 필수, 원시 항목 6개까지, `existing`은 id나 `@핸들`, `new`는 색·아바타가 틀리면 기본값, 길이 초과·지시 없음·핸들 불량이면 버림, 이름 충돌은 등록 참가자·다른 에이전트·허브 별칭 전부와 검사, 한 답 안의 중복과 이미 대기 중인 대상은 접는다. 셸은 `new` 초안을 저장 전에 `composeDraft`(대화 초안 검사)로 한 번 더 거른다. (4) 대기 2개가 차 있으면 커서만 옮기고 판정기를 부르지 않는다(`full`). 답이 깨지면 "없음"으로 커서를 옮기고 `malformed`와 버린 이유를 로그에 남긴다. 판정기가 던지면 커서는 그대로고, 판정기 자체가 없으면 스윕 전체를 멈춘다. (5) 스윕 대상은 현재 세션(때가 됐을 때) → 스토어의 due 목록(커서 없음 또는 8개 이상 쌓임, 최근 30세션 창, `noLearn` 임시 세션 제외) 순으로 최대 3개. 대상이 없으면 프로바이더 확인도 하지 않는다. (6) 판정 백엔드는 부팅 때 턴 엔진이 없어 `resolveJudgeBackend`로 사용자 프로바이더를 고른다. Claude 로그인은 `modelValueForTier(RECOMMEND_TIER)`, API 키 프로바이더는 그 프로필의 모델. 60초 제한. `usage`는 분석한 세션에 `source:'participant-recommend'`로 남긴다. (7) 동시 1개 플래그는 부팅 번들과 엔진 번들이 공유하도록 `globalThis`에 둔다. (8) 턴 끝 호출은 최종 `result` 뒤·텔레그램 보고 앞, 중단이면 건너뛰고 await 없이 try/catch로 감싼다. 테스트 이음새는 `NabyEngineDeps.recommendationSweep`이고 `resolveModel`·`devClaudeEngine`이 주입되면 기본 꺼짐. 환경 변수 `NABY_PARTICIPANT_RECOMMEND=0`이 모델 기반 스윕을 끈다(`vitest.setup.ts`·스크린샷 서버가 설정). 이 저장소에는 SDK가 깔려 있어 이 가드가 없으면 테스트 턴이 실제 모델에 닿을 수 있었다. (9) 정리: 분석 전에 오래된 `existing` 추천을 닫는다(참가자가 세션에 들어왔으면 accepted, 사라졌으면 dismissed). 목록 응답도 같은 것을 숨긴다. `removeAgent`가 그 참가자의 `existing` 행을 지우고, 세션·프로젝트 삭제가 추천과 커서를 지운다. (10) 제안 경로는 새 `RoundInput.onJoined` 훅으로 `closeRecommendationsOnJoin`을 부른다. `+` 메뉴로 직접 추가한 경우는 자동으로 닫지 않고 숨긴 뒤 다음 분석이 닫는다. (11) 액션: `list`는 `{id}`도 받는다(설정은 세션을 모른다). `accept`는 `agentId`가 참가자인지 확인한다. 모르는 id·이미 닫힌 것은 각각 분명한 오류 문구. (12) 설정 딥링크는 `'participants'` 절이 없어 `'agents'` 절 + `Topics.OpenSettings`로 가고, 편집기가 아직 없을 수 있어 `takeSettingsFocus(prefix)`와 `naby:settings-focus` 이벤트를 더했다. (13) 추천 모드 편집기는 배너와 버튼 셋이 위에 있고 일반 저장 버튼은 숨긴다. 저장은 됐는데 추가가 상한으로 실패하면 추천은 accepted로 두고 오류만 보인다. 저장이 실패하면 pending 유지. `formFromDraft`는 기억을 세션으로, 도구·MCP·스킬을 비우고, 세션의 모델을 쓴다. (14) 명단: `existing` 칩은 인라인 메뉴, `new` 칩은 바로 설정, 호버에 이유. 상한이면 추가 버튼 비활성. 헤더가 접히던 문제로 칩 이름을 줄임표 처리하고 나비·추천 칩은 줄바꿈하지 않게 했다. (15) 채팅은 턴이 끝날 때와 20초 뒤 한 번 더 참가자를 다시 읽는다(스윕이 턴 뒤에 돌고 이벤트가 없다). `announceParticipantsChanged`는 부모·최상위 창과 같은 출처 iframe 전부에 보낸다(설정은 최상위 창, 채팅은 iframe 안이라 전에는 닿지 않았다). (16) 설정 스위치는 참가자 절 머리의 체크박스이고 비용 메모가 붙는다. (17) 스토어에 `getParticipantRecommendation(id)`를 더했고 `listSessionsForRecommendation`은 `every`(8)·`window`(30) 옵션을 받아 `{sessionId, userMessageCount, cursor?, lastUsedAt}`을 `last_used_at DESC` 순으로 준다. `participants.ts`가 `participantHandleProblem`·`defuseUntrusted`를 내보낸다. `spike-participants`의 스키마 검사는 `>= 14`. (18) **리뷰 반영(12건).** 분석 중 세션이 지워지면 `no-session`으로 끝내고 usage 행·추천·커서를 쓰지 않는다(`appendUsage`가 세션 행을 되살리기 때문, 활동 로그만 `sessionDeleted:true`). 판정 실패는 커서 테이블의 `failed_at`에 기록하고 **6시간**(`RECOMMEND_FAILURE_COOLDOWN_MS`) 건너뛰며, 어떤 오류든 첫 실패에서 스윕을 멈춘다. 턴 끝 호출은 in-flight 플래그·환경 변수·설정 한 줄만 보고 본체는 `setImmediate`로 미루어 턴 경로에 DB 읽기가 없다. 설정은 세션마다 다시 읽고 꺼지면 멈춘다(`stopped:'disabled'`). 판정 뒤 명단·등록·대기 추천을 다시 읽고 `new`는 `composeDraft`로 재검증한다. `closureOf()`가 대기 추천의 정리 규칙을 한곳에 둔다(참가자 없음·거절 → dismissed, 합류 → accepted, 초안 이름 선점·불량 → dismissed), 라운드의 거절 분기는 `RoundInput.onDeclined` 훅으로 닫는다. 편집기는 `acceptError`를 토스트로 보인다. 구독 경로 판정기는 `activeClaudeAccountId(store)`로 턴과 같은 계정에 청구한다. 명단은 추천 칩을 하나만 보이고 나머지는 "+N 추천" 알약으로 접어 목록(추가·무시·설정에서 검토)을 연다, 엔진 줄은 `flex-wrap`. 울타리 정규식은 `<\s*(\/?)\s*(untrusted_[a-z_]*)`이고 `defuseMarkers()`가 전사의 모든 줄에서 `[#`를 바꾼다. 중단된 턴은 스윕을 걸지 않는 엔진 테스트, 전달 행이 섞인 SQL 집계 스파이크를 더했다. 스크린샷 서버 명령에 `NABY_PARTICIPANT_RECOMMEND=0`·`NABY_ORG_HARNESS_SYNC=0`을 넣었다. (19) **사고 기록.** 리뷰 반영 중 (18)의 계정 수정 첫 판이 테스트가 주입한 백엔드를 무시하고 실제 `ClaudeAgentSdkEngine`을 만들어, `participantRecommend.test.ts`의 한 테스트가 이 기계의 Claude 로그인으로 도구 없는 호출 한 번을 보냈을 수 있다(5초 타임아웃, 프롬프트는 한 글자). 막은 방법: 주입된 백엔드는 `claudeEngine`도 주입되지 않는 한 자기 엔진을 쓰고, `NABY_PARTICIPANT_RECOMMEND=0`이면 기본 판정기가 백엔드를 만들지 않고 던진다(테스트로 고정).
+
 **MAC-M4 구현 상태.** 상세는 [agent-import-adapters](agent-import-adapters.md) §8. M3가 넘긴 서버 4건은 전부 끝냈다 — `participantRound.ts`의 중복 알약 제거, 텔레그램 미러의 발언자 줄을 📁 줄 바로 뒤로(한 명이면 `이름:`, 여럿이면 `A · B`, 나비만의 턴은 그대로), 라우팅 이벤트에 `tokens`(사용자 지목은 0)·상한 이벤트에 `limit`(칩이 둘 다 보임), `participant.export`·`participant.exportBundle`·`tools.list` 액션. 편집기의 도구 칩은 `tools.list`를 쓴다.
 
 ## 출처
@@ -626,6 +696,9 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 
 ## 변경 이력
 
+- 0.4.2 (2026-10-19) — MAC-M6 Opus 리뷰 12건 반영(§8.13 커서 DDL `failed_at`, §8.11 결정 18·19).
+- 0.4.1 (2026-10-19) — §8.11 MAC-M6 구현·검증 상태와 구현 결정 17건.
+- 0.4.0 (2026-10-19) — §8.13 참가자 추천(MAC-M6, R9.1~R9.7, D16~D20). 사용자 결정: 반복되는 전문 업무일 때만 추천한다. §7·§8.4·§8.6·§8.10 갱신.
 - 0.3.1 (2026-10-16) — §8.11 MAC-M5a 완료와 구현 결정 8건.
 - 0.3.0 (2026-10-16) — §8.12 대화에서 참가자 만들기·고치기(MAC-M5a, R8.1~R8.5). 사용자 결정.
 - 0.2.7 (2026-10-16) — 1.44.0 실기 피드백: 명단 상시 표시, 나비 아바타·말풍선 카드. §8.11 M3 결정 2 개정, R6.1·R6.2 의미 보강.

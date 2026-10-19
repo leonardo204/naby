@@ -24,6 +24,8 @@ import { memoryMatchesSearch, sameMemoryValue } from './store.js';
 // the two drivers cannot cap rehearsal at different numbers.
 import { memoryStrength, STRENGTH_CAP } from '../memory-hygiene.js';
 import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
+import { isUserAuthored } from '../participants.js';
+import { RECOMMEND_BACKFILL_LIMIT, RECOMMEND_EVERY } from '../participant-recommend.js';
 import type {
   Agent,
   AgentInput,
@@ -52,6 +54,11 @@ import type {
   PolicyRule,
   PolicyRuleInput,
   Project,
+  ParticipantRecommendation,
+  ParticipantRecommendationInput,
+  ParticipantRecommendationStatus,
+  RecommendationCandidate,
+  RecommendationCursor,
   ReflectionCursor,
   ScopedMemoryQuery,
   SessionParticipant,
@@ -217,6 +224,11 @@ export class MemoryStore implements Store {
   /** Session participant rows (multi-agent-chat §8.1), keyed `sessionId\u0000agentId`
    *  — the composite primary key of the SQLite table. */
   private readonly sessionParticipants = new Map<string, SessionParticipant>();
+  /** Participant recommendations (multi-agent-chat §8.13), keyed by id. */
+  private readonly recommendations = new Map<string, ParticipantRecommendation>();
+  /** Recommendation analysis cursors, keyed by session id. */
+  private readonly recommendationCursors = new Map<string, RecommendationCursor>();
+  private recommendationCounter = 0;
   /** The eval-event ledger (P3-M5). A flat list: the meter always reads an
    *  agent's rows in time order, so an array beats a keyed map here. */
   private readonly evalEvents: EvalEvent[] = [];
@@ -286,6 +298,8 @@ export class MemoryStore implements Store {
     this.reflectionCursors.delete(sessionId);
     // The session's participant roster goes too; the participants survive.
     this.forgetSessionParticipants(sessionId);
+    // ...and its recommendations and their cursor (§8.13).
+    this.forgetSessionRecommendations(sessionId);
     // CASCADE EXEMPTION (phase-1_5-memory-contracts §2/§6): remove ONLY this
     // session's scope='session' memory. user/project/org rows have no session
     // owner and MUST survive a session delete.
@@ -1093,6 +1107,10 @@ export class MemoryStore implements Store {
     for (const [key, row] of this.sessionParticipants) {
       if (row.agentId === id) this.sessionParticipants.delete(key);
     }
+    // An 'existing' recommendation of a participant that is gone (§8.13).
+    for (const [rid, row] of this.recommendations) {
+      if (row.agentId === id) this.recommendations.delete(rid);
+    }
     this.agents.delete(id);
   }
 
@@ -1140,6 +1158,130 @@ export class MemoryStore implements Store {
     for (const [key, row] of this.sessionParticipants) {
       if (row.sessionId === sessionId) this.sessionParticipants.delete(key);
     }
+  }
+
+  // -- participant recommendations (multi-agent-chat §8.13, MAC-M6) ---------
+
+  private forgetSessionRecommendations(sessionId: string): void {
+    for (const [id, row] of this.recommendations) {
+      if (row.sessionId === sessionId) this.recommendations.delete(id);
+    }
+    this.recommendationCursors.delete(sessionId);
+  }
+
+  private static cloneRecommendation(r: ParticipantRecommendation): ParticipantRecommendation {
+    const out: ParticipantRecommendation = { ...r, evidence: [...r.evidence] };
+    if (r.draft) out.draft = { ...r.draft, avatar: { ...r.draft.avatar } };
+    return out;
+  }
+
+  listParticipantRecommendations(
+    sessionId: string,
+    status?: ParticipantRecommendationStatus,
+  ): ParticipantRecommendation[] {
+    return [...this.recommendations.values()]
+      .filter((r) => r.sessionId === sessionId && (status === undefined || r.status === status))
+      .sort((a, b) => (a.createdAt !== b.createdAt ? a.createdAt - b.createdAt : a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map(MemoryStore.cloneRecommendation);
+  }
+
+  getParticipantRecommendation(id: string): ParticipantRecommendation | undefined {
+    const r = this.recommendations.get(id);
+    return r ? MemoryStore.cloneRecommendation(r) : undefined;
+  }
+
+  putParticipantRecommendation(input: ParticipantRecommendationInput): ParticipantRecommendation {
+    this.recommendationCounter += 1;
+    const id =
+      input.id ??
+      `pr-${Date.now().toString(36)}-${this.recommendationCounter.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const now = Date.now();
+    const prior = this.recommendations.get(id);
+    const row: ParticipantRecommendation = {
+      id,
+      sessionId: input.sessionId,
+      kind: input.kind,
+      ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
+      ...(input.draft !== undefined ? { draft: input.draft } : {}),
+      specialty: input.specialty,
+      reason: input.reason,
+      evidence: [...(input.evidence ?? [])],
+      status: input.status ?? 'pending',
+      createdAt: prior?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.recommendations.set(id, MemoryStore.cloneRecommendation(row));
+    return MemoryStore.cloneRecommendation(row);
+  }
+
+  setParticipantRecommendationStatus(
+    id: string,
+    status: ParticipantRecommendationStatus,
+  ): ParticipantRecommendation | undefined {
+    const r = this.recommendations.get(id);
+    if (!r) return undefined;
+    const next = { ...r, status, updatedAt: Date.now() };
+    this.recommendations.set(id, next);
+    return MemoryStore.cloneRecommendation(next);
+  }
+
+  getRecommendationCursor(sessionId: string): RecommendationCursor | undefined {
+    const c = this.recommendationCursors.get(sessionId);
+    return c ? { ...c } : undefined;
+  }
+
+  setRecommendationCursor(sessionId: string, userMessageCount: number, analyzedAt: number): void {
+    // A successful analysis clears the failure, like the SQL driver.
+    this.recommendationCursors.set(sessionId, { sessionId, userMessageCount, analyzedAt });
+  }
+
+  markRecommendationFailed(sessionId: string, at: number): void {
+    const prior = this.recommendationCursors.get(sessionId);
+    this.recommendationCursors.set(sessionId, { ...(prior ?? { sessionId }), failedAt: at });
+  }
+
+  listSessionsForRecommendation(opts: {
+    limit: number;
+    minUserMessages: number;
+    every?: number;
+    window?: number;
+    skipFailedSince?: number;
+  }): RecommendationCandidate[] {
+    const every = opts.every ?? RECOMMEND_EVERY;
+    const window = opts.window ?? RECOMMEND_BACKFILL_LIMIT;
+    if (opts.limit <= 0 || window <= 0) return [];
+    // Same order as the SQL driver: last used first, then session id descending.
+    const recent = [...this.sessions.values()]
+      .sort((a, b) =>
+        b.ref.lastUsedAt !== a.ref.lastUsedAt
+          ? b.ref.lastUsedAt - a.ref.lastUsedAt
+          : a.ref.sessionId < b.ref.sessionId
+            ? 1
+            : a.ref.sessionId > b.ref.sessionId
+              ? -1
+              : 0,
+      )
+      .slice(0, window);
+    const out: RecommendationCandidate[] = [];
+    for (const s of recent) {
+      if (s.ref.noLearn) continue;
+      const count = s.messages.filter(isUserAuthored).length;
+      const row = this.recommendationCursors.get(s.ref.sessionId);
+      if (opts.skipFailedSince !== undefined && row?.failedAt !== undefined && row.failedAt >= opts.skipFailedSince) {
+        continue;
+      }
+      const cursor = row?.userMessageCount;
+      const due = cursor === undefined ? count >= opts.minUserMessages : count - cursor >= every;
+      if (!due) continue;
+      out.push({
+        sessionId: s.ref.sessionId,
+        userMessageCount: count,
+        ...(cursor !== undefined ? { cursor } : {}),
+        lastUsedAt: s.ref.lastUsedAt,
+      });
+      if (out.length >= opts.limit) break;
+    }
+    return out;
   }
 
   // -- eval-event ledger (P3-M5) --------------------------------------------
@@ -1301,6 +1443,7 @@ export class MemoryStore implements Store {
       this.reflectionCursors.delete(sessionId);
       this.forgetObservationsFromSession(sessionId);
       this.forgetSessionParticipants(sessionId);
+      this.forgetSessionRecommendations(sessionId);
     }
     const removedMemoryIds: string[] = [];
     for (const [id, item] of this.memoryItems) {
