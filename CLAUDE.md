@@ -1,8 +1,5 @@
 # Claude Code 개발 가이드
 
-> 공통 규칙(Agent Delegation, 커밋 정책, Context DB 등)은 글로벌 설정(`~/.claude/CLAUDE.md`)을 따릅니다.
-> 글로벌 미설치 시: `curl -fsSL https://raw.githubusercontent.com/leonardo204/dotclaude/main/install.sh | bash`
-
 ---
 
 ## Slim 정책
@@ -52,34 +49,17 @@
 
 스펙 트리가 **둘**이다. 의도된 분리이며 규칙은 이렇다.
 
-- `ref-docs/specs/` — **정본.** `sdd.md`의 `{DOC_ROOT}`가 `ref-docs/`이므로 형식상 기준이다. `design|impl|interface|test` 계층을 지킨다. 전략·계약·완료된 Phase가 여기 있다.
+- `ref-docs/specs/` — **정본.** `design|impl|interface|test` 계층을 지킨다. 전략·계약·완료된 Phase가 여기 있다.
 - `specs/` — **진행 중 착수 스펙.** 평면 구조를 허용하되 **frontmatter는 필수**다(id/type/version/status/scope/related/updated). 영향도 추적이 끊기면 트리를 나눈 이점이 사라진다. 안정되면 `ref-docs/specs/<type>/`으로 승격한다.
 - 현재 `specs/`: [페르소나 에이전트](specs/phase-3-persona-agent.md) · [나비 신뢰 지표](specs/phase-3-butterfly-trust-meter.md) · [체크인 원장 계약](specs/phase-3-checkin-contracts.md) · [에이전트 내보내기](specs/phase-3-agent-export.md) · [나비 레이어](specs/naby-voice-layer.md) · [Phase 2/2.5 계획](specs/phase-2-2.5-plan.md) · [패키징 경로 해석](specs/packaging-path-resolution.md) · [저장소 미러 규약](specs/source-repository-mirror.md) · [조직 하네스 동기화](specs/org-harness-sync.md) · [채팅 연결 상태](specs/chat-connection-status.md) · [원격 MCP 브라우저 로그인](specs/mcp-oauth-catalog.md) · [대화형 다중 에이전트](specs/multi-agent-chat.md) · [참가자 가져오기 어댑터](specs/agent-import-adapters.md) · [셸 룩앤필](specs/shell-look-and-feel.md)
-- 새 스펙을 쓰거나 받았으면 `/spec-guard`로 기존 문서와 대조한다. **스펙을 저장하는 행위 자체가 발동 조건이다.**
-
-### 문서 구조 (소유권 분리)
-
-- **하니스 문서** (`claude/` 하위) — 🔒 dotclaude 소유. `dotclaude-update`가 덮어쓰니 **수정 금지**.
-- **프로젝트 스펙** (`specs/` 하위) — 📝 자유롭게 작성. → [SDD 가이드라인](ref-docs/claude/sdd.md) · `/spec-guard`로 정합성 분석
-
-### 하니스 상세 문서 (claude/)
-
-- [Context DB](ref-docs/claude/context-db.md) — SQLite 기반 세션/태스크/결정 저장소
-- [Context Monitor](ref-docs/claude/context-monitor.md) — HUD + compaction 감지/복구
-- [Hooks](ref-docs/claude/hooks.md) — 5개 자동 실행 Hook 상세
-- [컨벤션](ref-docs/claude/conventions.md) — 커밋, 주석, 로깅 규칙
-- [셋업](ref-docs/claude/setup.md) — 새 환경 초기 설정
-- [Agent Delegation](ref-docs/claude/agent-delegation.md) — 에이전트 위임/파이프라인 상세
-- [SDD 가이드라인](ref-docs/claude/sdd.md) — 스펙 문서 작성/관리 규약
-
-> 프로젝트 스펙은 `specs/`에 작성하고, 하니스 문서(`claude/`)는 건드리지 마세요.
+- 새 스펙을 쓰거나 받았으면 `related`로 이어진 기존 문서와 대조한다(겹침·누락·버전). 바꾼 문서는 `version`·`updated`를 올리고, 피참조 문서에 역참조를 단다.
 
 ### 핵심 규칙
 
 - **코드 안은 영어로 쓴다.** 커밋 메시지, 주석, 로그 출력 모두 영어다. 한국어는 UI 문구 같은 인용 리터럴에만 쓴다.
 - **한국어 문서는 `/plain-korean-doc` 스킬을 거쳐 낸다.** 어미는 `~한다` 평서형으로 통일한다(`specs/`, `ref-docs/specs/` 전체 기준).
-- 하네스 문서(`ref-docs/claude/`)는 dotclaude 소유라 수정하지 않는다. 프로젝트 스펙은 `specs/`에 쓴다.
+- 커밋은 사용자가 요청할 때만 한다. 셸 먼저, naby 다음으로 각각 커밋하고 `origin`으로 push한다.
 
 ---
 
-*최종 업데이트: 2026-10-07*
+*최종 업데이트: 2026-10-19*

@@ -1,21 +1,9 @@
 
-# Claude Code runtime
-.claude/db/context.db
-.claude/.ctx_state
-.claude/.backup-*
-.claude/.ralph_state
-.claude/.hud_cache
-.claude/.cost_state
-.claude/.hook_feedback
-.claude/.project_root
-.claude/.messenger_enabled
 node_modules/
 dist/
 *.tsbuildinfo
 .env
 .env.local
-.claude/db/context.db-shm
-.claude/db/context.db-wal
 
 # electron-builder output
 release/
@@ -24,5 +12,3 @@ release/
 # Code-signing key material. Never commit — see the release docs.
 *.p12
 *.pfx
-.claude/.dotclaude-version
-.claude/.dotclaude-manifest.json
