@@ -2,10 +2,10 @@
 id: multi-agent-chat
 title: 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자 (요구사항 검토 리포트)
 type: design
-version: 0.4.2
+version: 0.5.3
 status: review
 scope: 한 대화 세션에 나비 외의 대화형 에이전트(참가자)를 여럿 두는 기능. 나비가 기본 참가자이자 관리자다. 사용자의 질의를 나비가 확인해 참가자에게 위임하고, 위임받은 참가자가 채팅에 직접 답한다. 에이전트 간 대화는 나비와 참가자 사이로 한정한다. 참가자 명세(지식·지시·가드레일·외부 자원·스킬), 사용자 추가와 외부 정의 가져오기·변환, 다중 참가자 대화의 UI/UX와 관리를 다룬다. §1~§6은 요구사항과 결정(2026-10-16 승인), §8은 설계다. 가져오기 어댑터는 agent-import-adapters, 룩앤필은 shell-look-and-feel이 맡는다. 나비의 학습·신뢰 지표는 persona-agent와 butterfly-trust-meter가, 단일 에이전트 내보내기·가져오기 형식은 agent-export가 그대로 맡는다.
-related: [agent-import-adapters, shell-look-and-feel, phase-3-persona-agent, phase-3-persona-hardening, phase-3-agent-export, phase-3-butterfly-trust-meter, phase-1_5-memory-contracts, subagent-delegation, session-context-management, skill-hub-builtin, mcp-oauth-catalog, telegram-chat, settings-ia-reorg, naby-activity-log, model-auto-routing]
+related: [agent-import-adapters, cross-session-messaging, shell-look-and-feel, phase-3-persona-agent, phase-3-persona-hardening, phase-3-agent-export, phase-3-butterfly-trust-meter, phase-1_5-memory-contracts, subagent-delegation, session-context-management, skill-hub-builtin, mcp-oauth-catalog, telegram-chat, settings-ia-reorg, naby-activity-log, model-auto-routing]
 updated: 2026-10-19
 ---
 
@@ -491,6 +491,7 @@ i18n: 새 문구는 `packages/shared/i18n`에 en·ko로 넣는다. 한국어는 
 | **MAC-M4** 가져오기 | [agent-import-adapters](agent-import-adapters.md) §5 어댑터 3종, `ParticipantImportDialog`, 사이드카 v2 | 그 문서 §6. 시나리오 5를 실제 앱에서 확인 | Opus |
 | **MAC-M5** 후속 | `end` 액션 다듬기, 반복 발언 탐지, 나머지 어댑터, 자율 루프 결합 | 각각 별도 스펙으로 | — |
 | **MAC-M6** 참가자 추천 | §8.13 전부: `RT/participant-recommend.ts`, 스키마 v15, `lib/participantRecommend.ts` 스윕, `session.recommendations.*` 액션, 명단 추천 칩, 편집기 프리필 | §8.13 검증. 독립 릴리스 | Opus |
+| **MAC-M7** 권한 묶음 | §8.14 전부: `toolTierOf`·`permission` 저장, 게이트 풀기와 `always`, 편집기 권한 카드 | §8.14 검증. 세션 간 요청([cross-session-messaging](cross-session-messaging.md))과 함께 릴리스 | Opus |
 
 
 ### 8.12 대화에서 참가자 만들기·고치기 (MAC-M5a, 2026-10-16 사용자 결정)
@@ -587,6 +588,37 @@ CREATE TABLE participant_recommendation_cursor (
 
 **범위 밖.** 프로젝트·사용자 범위의 세션 간 패턴 분석(1차는 세션 단위), 텔레그램 표시, 추천 자동 저장.
 
+### 8.14 참가자 권한 묶음 (MAC-M7, 2026-10-19 사용자 결정)
+
+**요구.** 참가자에게 도구를 하나씩 칩으로 넣는 방식은 처음 쓰는 사람에게 벽이다. 사용자 요구(2026-10-19): "읽기만 / 쓰기까지 / 중요 권한 / 모든 권한 / 매번 승인"처럼 묶어서 고르게 한다.
+
+**2026-10-19 사용자 결정: 묶음 안은 묻지 않고, 묶음 밖은 묻고, 묻기 스위치는 전부 묻는다.**
+
+**R10.1 수준.** 참가자 권한은 수준 하나와 승인 방식 하나로 정한다. 수준은 **묻지 않고 쓰는 범위**다. 수준 안의 도구는 묻지 않고 실행하고, 수준 밖의 도구는 막지 않고 실행 전에 사용자에게 묻는다. `none`이면 모든 호출을 묻는다.
+
+| 수준 | 화면 이름 | 허용 범위 |
+|---|---|---|
+| `none` | 도구 없음 | 묻지 않고 쓰는 도구가 없다. 모든 호출을 묻는다 |
+| `read` | 읽기만 | 결과가 남지 않는 도구. 파일 읽기·찾기, 웹 가져오기, 스킬 불러오기, 작업 상태 보기, `readOnlyHint: true`인 MCP 도구 |
+| `write` | 쓰기까지 | `read` + 프로젝트 파일 고치기·만들기 |
+| `elevated` | 중요 권한 | `write` + 명령 실행, 백그라운드 작업 시작, 메시지 보내기, 읽기 전용 표시가 없는 MCP 도구 |
+| `all` | 모든 권한 | 그 턴에 있는 모든 도구 |
+| `custom` | 직접 고르기 | 지금의 `toolRefs` 칩 목록(과 고른 MCP 서버의 도구) |
+
+**R10.2 승인 방식.** `auto`(기본, 수준 안은 묻지 않고 밖은 묻는다)와 `always`("도구를 쓸 때마다 나에게 묻기" — 수준 안팎 없이 모든 호출을 실행 전에 묻는다)다. `always`는 수준과 따로 고른다. 물어야 하는 호출(수준 밖, 또는 `always`)은 승인 창이 없는 경로에서 거절한다. 텔레그램 턴은 에스컬레이션이 텔레그램으로 갈 때만 묻고, 그 밖의 경로는 거절한다.
+
+**R10.3 판정은 한 곳.** 도구를 수준에 넣는 판정은 런타임 순수 함수 하나(`RT/participants.ts`의 `toolTierOf(name, annotations)`)가 한다. 결과가 남는지 판단은 이미 있는 `classifyToolConsequence`를 쓰고 사본을 만들지 않는다. 수준은 턴마다 그 턴의 도구 목록으로 풀어서 허용 목록을 만든다. 새 도구가 생기면 수준에 맞춰 자동으로 들어간다. 모르는 도구는 `elevated`로 본다(닫힌 쪽 기본값).
+
+**R10.4 저장과 호환.** 참가자에 `permission: { level, approval }`을 둔다. 이전 참가자는 `toolRefs`가 있으면 `custom`, 없으면 `none`으로 읽는다. 동작이 바뀌지 않는다. `custom`일 때만 `toolRefs`를 쓴다. 대화에서 만드는 초안(§8.12), 추천 초안(§8.13), 가져오기(agent-import-adapters)는 `permission`을 받을 수 있고, 없으면 지금처럼 `toolRefs`로 정한다.
+
+**R10.5 게이트.** 참가자 발언에는 나비 전용 도구를 뺀 그 턴의 도구를 모두 보인다(수준 밖 도구도 불러야 물을 수 있다). 호출마다 순서는 이렇다. 나비 전용 도구 → 거절, 계획 모드 바닥 → 거절, 조직 훅 거절 → 거절. 그다음 사용자 정책 규칙의 `deny`는 묻지 않고 거절한다. 수준 안이고 스위치가 꺼져 있으면 사용자 규칙만 본다 — 기본값(`allowChanges` 바닥)은 묻거나 막지 않고, `ask` 규칙은 한 번 묻는다. 수준 밖이거나 스위치가 켜져 있으면 승인 카드(발언자 표시, "항상" 버튼 없음)로 묻는다. 정책이나 조직 훅이 같은 호출을 이미 물었으면 그 한 번으로 끝낸다. `allow` 규칙은 수준 밖 질문을 건너뛰게 하지 않는다(수준은 편집기에서 넓힌다). 판정은 런타임 순수 함수 `participantCallPlan`이 한다.
+
+**R10.7 한 번 허용한 도구.** 2026-10-19 사용자 결정: 한 번 허용하면 같은 도구는 다시 묻지 않는다(묻기 스위치가 켜져 있으면 예외). 수준 밖 호출을 사용자가 허용하면 그 도구 이름을 참가자의 `permission.approvedTools`에 더하고, 다음부터 그 도구는 수준 안처럼 묻지 않고 쓴다. 거절은 기억하지 않는다(다음에 다시 묻는다). 묻기 스위치가 켜져 있으면 모든 호출을 묻고, 허용해도 기록하지 않는다. 정책 `deny`는 여전히 이기고 `ask` 규칙은 여전히 묻는다. 텔레그램 에스컬레이션으로 받은 허용도 같다. 편집기는 수준 카드 아래에 "허용해 둔 도구" 칩을 보이고 ×로 지우면 다시 묻는다. 편집이 목록을 말하지 않으면 서버는 저장된 목록을 유지한다. 승인 카드는 허용하면 이 참가자에게 기억한다고 알린다.
+
+**R10.6 UI.** 편집기의 "허용 도구" 칸을 바꾼다. 수준 다섯 개(도구 없음·읽기만·쓰기까지·중요 권한·모든 권한)를 설명 한 줄이 붙은 선택 카드로 두고, "도구를 쓸 때마다 나에게 묻기" 스위치를 그 아래 둔다. 카드마다 "포함된 도구 보기"로 이 기기에서 풀린 목록을 보여 준다. "직접 고르기"는 접힌 고급 항목으로 두고 펼치면 지금 칩 편집기가 나온다. `elevated`·`all`을 고르면 위험을 한 줄로 알린다. 명단 카드에 수준 배지를 단다.
+
+**검증.** 스파이크: `toolTierOf` 표(내장 도구 전부·MCP 힌트 있음/없음·모르는 이름), 이전 참가자 해석, 수준 풀기. 셸 vitest: 수준별 게이트 허용·거절, `always`가 읽기 호출도 묻기, 승인 창 없는 경로 거절, 편집기 카드·스위치·고급 칩·저장 왕복, 초안 도구의 `permission`. 타입체크 기준선, 스크린샷 라이트·다크(편집기 권한 칸).
+
 ### 8.11 구현 상태
 
 | 마일스톤 | 상태 | 검증 |
@@ -597,6 +629,7 @@ CREATE TABLE participant_recommendation_cursor (
 | MAC-M3 UI | ✅ 2026-10-16 | 셸 234 파일 / 4448 통과(M3 몫 59, 4개 파일) · 타입체크 기준선 · prod 빌드 + 스크린샷 라이트·다크 각 9장(`m3-shots/`: 명단·참가자 말풍선·라우팅 칩 숨김/보임·명단 메뉴·팔레트·제안 카드·거절 뒤·설정 참가자 절·편집기) · Fable이 스크린샷으로 프로토타입과 대조 |
 | MAC-M5a 대화에서 참가자 만들기 | ✅ 2026-10-16 | 셸 **240 파일 / 4555** 통과(새 파일 3개 56건, §8.12 검증 목록 전부) · 타입체크 기준선(셸 12·루트 29) · `spike:autonomy` 34 · `02` 5 · `participants` 116 · prod 빌드 · 초안 카드 스크린샷 라이트·다크(create·update) · 릴리스 1.45.0 |
 | MAC-M6 참가자 추천 | ✅ 2026-10-19 (구현·검증·리뷰 반영, 릴리스 전) | 셸 **245 파일 / 4627** 통과(새 파일 5개 57건: `participantRecommend` 21 · `recommendationsApi` 7 · `nabyRecommendation` 3 · `recommendations` 12 · `participantRecommendation` 14) · `spike:participant-recommend` 59/59 · 회귀 `participants` 117 · `autonomy` 34 · `02` 5 · `participant-history` 48 · `reflection` 97 · `hygiene` 51 · 타입체크 기준선(셸 12·루트 29) · `build:app` exit 0 · 스크린샷 라이트·다크 7쌍(명단 칩·칩 메뉴·추천 목록·편집기 배너·설정 토글) + 900px 라이트 · 스키마 v15 · Opus 리뷰 12건 반영 |
+| MAC-M7 참가자 권한 묶음 | ✅ 2026-10-19 (구현·검증, 리뷰·릴리스 전) | `spike:participant-permission` 72/72(`toolTierOf` 표·이전 참가자 해석·수준 풀기·프로필 검증·두 드라이버) · 셸 **251 파일 / 4704** 통과(새 파일 4개 53건: `nabyParticipantPermission` 10 · 서버 `participantPermission` 21 · 클라이언트 `participantPermission` 8 · 설정 `participantPermission` 14, `participantDraft` 스키마 검사 갱신) · 회귀 `autonomy` 34 · `02` 5 · `participants` 117 · `participant-recommend` 59 · `checkin` 13 · 타입체크 기준선(셸 12·루트 29) · `build:shell` exit 0 · 스크린샷 라이트·다크 3쌍(권한 칸·중요 권한 경고와 스위치·직접 고르기 펼침) · 스키마 변경 없음 |
 | MAC-M4 가져오기 | ✅ 2026-10-16 | `spike:participant-import` 64/64 · 회귀 export 11 · import 11 · participants 116 · participant-history 48 · autonomy 34 · 02 5 · 셸 **236 파일 / 4481** 통과 · 타입체크 셸 12 / 루트 29(기존 오류 1건을 고쳐 기준선보다 하나 적음) · 스크린샷 라이트·다크 3장씩(가져오기 미리보기·손실 보고·출처 배지 카드) · `build:app` exit 0(M3 상태 기준) |
 
 **MAC-M1 구현 결정(Opus, Fable 확인).**
@@ -648,6 +681,12 @@ CREATE TABLE participant_recommendation_cursor (
 
 **MAC-M6 구현 결정(Opus, Fable 확인).** (1) 사용자 메시지 수는 `isUserAuthored` 규칙을 SQL(`json_extract`로 `speaker`·`routing` 검사)로 옮겨 센다. 자율 이어가기 행은 reflection과 같이 사용자 메시지로 센다. (2) 근거 번호는 사용자 메시지만 1부터 센 위치다. 24줄 창 안에 보이는 서로 다른 번호 셋 이상이어야 하고, 나비·참가자 줄을 가리키면 세지 않는다. 전사에서 도구 행·전달 행·빈 어시스턴트 행은 뺀다. (3) 파서: 분야 80자·이유 300자 필수, 원시 항목 6개까지, `existing`은 id나 `@핸들`, `new`는 색·아바타가 틀리면 기본값, 길이 초과·지시 없음·핸들 불량이면 버림, 이름 충돌은 등록 참가자·다른 에이전트·허브 별칭 전부와 검사, 한 답 안의 중복과 이미 대기 중인 대상은 접는다. 셸은 `new` 초안을 저장 전에 `composeDraft`(대화 초안 검사)로 한 번 더 거른다. (4) 대기 2개가 차 있으면 커서만 옮기고 판정기를 부르지 않는다(`full`). 답이 깨지면 "없음"으로 커서를 옮기고 `malformed`와 버린 이유를 로그에 남긴다. 판정기가 던지면 커서는 그대로고, 판정기 자체가 없으면 스윕 전체를 멈춘다. (5) 스윕 대상은 현재 세션(때가 됐을 때) → 스토어의 due 목록(커서 없음 또는 8개 이상 쌓임, 최근 30세션 창, `noLearn` 임시 세션 제외) 순으로 최대 3개. 대상이 없으면 프로바이더 확인도 하지 않는다. (6) 판정 백엔드는 부팅 때 턴 엔진이 없어 `resolveJudgeBackend`로 사용자 프로바이더를 고른다. Claude 로그인은 `modelValueForTier(RECOMMEND_TIER)`, API 키 프로바이더는 그 프로필의 모델. 60초 제한. `usage`는 분석한 세션에 `source:'participant-recommend'`로 남긴다. (7) 동시 1개 플래그는 부팅 번들과 엔진 번들이 공유하도록 `globalThis`에 둔다. (8) 턴 끝 호출은 최종 `result` 뒤·텔레그램 보고 앞, 중단이면 건너뛰고 await 없이 try/catch로 감싼다. 테스트 이음새는 `NabyEngineDeps.recommendationSweep`이고 `resolveModel`·`devClaudeEngine`이 주입되면 기본 꺼짐. 환경 변수 `NABY_PARTICIPANT_RECOMMEND=0`이 모델 기반 스윕을 끈다(`vitest.setup.ts`·스크린샷 서버가 설정). 이 저장소에는 SDK가 깔려 있어 이 가드가 없으면 테스트 턴이 실제 모델에 닿을 수 있었다. (9) 정리: 분석 전에 오래된 `existing` 추천을 닫는다(참가자가 세션에 들어왔으면 accepted, 사라졌으면 dismissed). 목록 응답도 같은 것을 숨긴다. `removeAgent`가 그 참가자의 `existing` 행을 지우고, 세션·프로젝트 삭제가 추천과 커서를 지운다. (10) 제안 경로는 새 `RoundInput.onJoined` 훅으로 `closeRecommendationsOnJoin`을 부른다. `+` 메뉴로 직접 추가한 경우는 자동으로 닫지 않고 숨긴 뒤 다음 분석이 닫는다. (11) 액션: `list`는 `{id}`도 받는다(설정은 세션을 모른다). `accept`는 `agentId`가 참가자인지 확인한다. 모르는 id·이미 닫힌 것은 각각 분명한 오류 문구. (12) 설정 딥링크는 `'participants'` 절이 없어 `'agents'` 절 + `Topics.OpenSettings`로 가고, 편집기가 아직 없을 수 있어 `takeSettingsFocus(prefix)`와 `naby:settings-focus` 이벤트를 더했다. (13) 추천 모드 편집기는 배너와 버튼 셋이 위에 있고 일반 저장 버튼은 숨긴다. 저장은 됐는데 추가가 상한으로 실패하면 추천은 accepted로 두고 오류만 보인다. 저장이 실패하면 pending 유지. `formFromDraft`는 기억을 세션으로, 도구·MCP·스킬을 비우고, 세션의 모델을 쓴다. (14) 명단: `existing` 칩은 인라인 메뉴, `new` 칩은 바로 설정, 호버에 이유. 상한이면 추가 버튼 비활성. 헤더가 접히던 문제로 칩 이름을 줄임표 처리하고 나비·추천 칩은 줄바꿈하지 않게 했다. (15) 채팅은 턴이 끝날 때와 20초 뒤 한 번 더 참가자를 다시 읽는다(스윕이 턴 뒤에 돌고 이벤트가 없다). `announceParticipantsChanged`는 부모·최상위 창과 같은 출처 iframe 전부에 보낸다(설정은 최상위 창, 채팅은 iframe 안이라 전에는 닿지 않았다). (16) 설정 스위치는 참가자 절 머리의 체크박스이고 비용 메모가 붙는다. (17) 스토어에 `getParticipantRecommendation(id)`를 더했고 `listSessionsForRecommendation`은 `every`(8)·`window`(30) 옵션을 받아 `{sessionId, userMessageCount, cursor?, lastUsedAt}`을 `last_used_at DESC` 순으로 준다. `participants.ts`가 `participantHandleProblem`·`defuseUntrusted`를 내보낸다. `spike-participants`의 스키마 검사는 `>= 14`. (18) **리뷰 반영(12건).** 분석 중 세션이 지워지면 `no-session`으로 끝내고 usage 행·추천·커서를 쓰지 않는다(`appendUsage`가 세션 행을 되살리기 때문, 활동 로그만 `sessionDeleted:true`). 판정 실패는 커서 테이블의 `failed_at`에 기록하고 **6시간**(`RECOMMEND_FAILURE_COOLDOWN_MS`) 건너뛰며, 어떤 오류든 첫 실패에서 스윕을 멈춘다. 턴 끝 호출은 in-flight 플래그·환경 변수·설정 한 줄만 보고 본체는 `setImmediate`로 미루어 턴 경로에 DB 읽기가 없다. 설정은 세션마다 다시 읽고 꺼지면 멈춘다(`stopped:'disabled'`). 판정 뒤 명단·등록·대기 추천을 다시 읽고 `new`는 `composeDraft`로 재검증한다. `closureOf()`가 대기 추천의 정리 규칙을 한곳에 둔다(참가자 없음·거절 → dismissed, 합류 → accepted, 초안 이름 선점·불량 → dismissed), 라운드의 거절 분기는 `RoundInput.onDeclined` 훅으로 닫는다. 편집기는 `acceptError`를 토스트로 보인다. 구독 경로 판정기는 `activeClaudeAccountId(store)`로 턴과 같은 계정에 청구한다. 명단은 추천 칩을 하나만 보이고 나머지는 "+N 추천" 알약으로 접어 목록(추가·무시·설정에서 검토)을 연다, 엔진 줄은 `flex-wrap`. 울타리 정규식은 `<\s*(\/?)\s*(untrusted_[a-z_]*)`이고 `defuseMarkers()`가 전사의 모든 줄에서 `[#`를 바꾼다. 중단된 턴은 스윕을 걸지 않는 엔진 테스트, 전달 행이 섞인 SQL 집계 스파이크를 더했다. 스크린샷 서버 명령에 `NABY_PARTICIPANT_RECOMMEND=0`·`NABY_ORG_HARNESS_SYNC=0`을 넣었다. (19) **사고 기록.** 리뷰 반영 중 (18)의 계정 수정 첫 판이 테스트가 주입한 백엔드를 무시하고 실제 `ClaudeAgentSdkEngine`을 만들어, `participantRecommend.test.ts`의 한 테스트가 이 기계의 Claude 로그인으로 도구 없는 호출 한 번을 보냈을 수 있다(5초 타임아웃, 프롬프트는 한 글자). 막은 방법: 주입된 백엔드는 `claudeEngine`도 주입되지 않는 한 자기 엔진을 쓰고, `NABY_PARTICIPANT_RECOMMEND=0`이면 기본 판정기가 백엔드를 만들지 않고 던진다(테스트로 고정).
 
+**MAC-M7 규칙 개정(2026-10-19 사용자 결정, v0.5.2).** 묶음 안은 묻지 않고, 묶음 밖은 묻고, 묻기 스위치는 전부 묻는다. 아래 (4)·(5)·(6)을 이것으로 대신한다. 수준 밖 도구는 거절하지 않고 승인 카드(`source:'participant_outside'`)로 묻는다. 참가자 발언에는 나비 전용 도구만 빼고 모두 보인다(`participantMayBeOffered`). dev-claude 엔진의 SDK 내장 도구도 같은 규칙으로 보이고 같은 게이트를 지난다. 참가자 전용 정책 게이트는 사용자 규칙·훅 병합·쓰기 보호 경로는 그대로 두고 기본값만 `allow`로 바꿨다. 그래서 수준 안의 호출은 `allowChanges`가 꺼져 있어도 묻거나 막지 않는다. 판정은 `participantCallPlan({inLevel, approval, policyEffect, reachable})` → `policy`·`ask`·`refuse`다. 검증: `spike:participant-permission` 81/81, 셸 251 파일 / 4706 통과(`nabyParticipantPermission` 11건: 바닥이 막을 쓰기도 수준 안이면 카드 없이 실행, 수준 밖은 발언자를 단 카드, `none`은 매 호출 묻기, 승인 창 없는 경로 거절, 스위치는 수준 안 읽기도 묻기, 정책 `deny` 우선, 정책 `ask`는 한 번만, `allow` 규칙은 수준 밖 질문을 건너뛰지 않음), `nabyParticipantRound`의 "새 참가자 도구 0개" 검사를 "나비 전용 도구 없음"으로 바꿨다. 타입체크 기준선(셸 12·루트 29), `autonomy` 34, `02` 5.
+
+**MAC-M7 한 번 허용 기억(R10.7, v0.5.3).** 저장은 `profile.permission.approvedTools`(최대 200개, 프로필 검증이 다듬고 중복을 없앤다)다. 순수 함수 `withApprovedTool`(스위치가 켜져 있으면 기록하지 않음)·`isApprovedTool`을 런타임에 두고, 셸 `recordApprovedTool`이 허용 직후 행을 고쳐 쓴다. 같은 발언 안의 다음 호출도 바로 반영된다. 이전 참가자는 처음 허용할 때 유효 권한(`custom`)에 목록을 붙여 저장한다. `putParticipant`는 보낸 권한에 `approvedTools` 키가 없으면 저장 목록을 유지하고, 편집기는 늘 목록을 보낸다(빈 목록 = 모두 지움). 대화 초안이 수준을 바꿔도 목록은 남는다. **결정 하나 더**: 라운드 안의 참가자 질문은 나비 자신의 에스컬레이션 설정(`persona.autonomy.escalation`)을 따라 텔레그램으로도 간다(제안과 같은 D12 규칙). 전에는 `@참가자` 턴에 라우팅된 에이전트가 없어 텔레그램 턴의 참가자 질문이 늘 거절됐다. 검증: `spike:participant-permission` 90/90, 엔진 테스트 8건 추가(허용 뒤 같은 발언·다음 턴 카드 없음, 거절은 다시 묻기, 스위치는 매번 묻고 기록 안 함, 기억된 도구도 스위치면 묻기, 칩 지우기와 목록 유지, 텔레그램 허용 기록, 이전 참가자, 정책 `deny` 우선).
+
+**MAC-M7 구현 결정(Opus).** (1) **저장은 `profile.permission`이다.** 참가자 고유 필드는 JSON 컬럼 하나에 둔다는 §8.1 원칙대로 프로필에 넣었고 스키마는 v15 그대로다. `parseParticipantProfile`이 수준·승인 값을 검사한다. 이전 행은 `participantPermissionOf`가 읽을 때 해석한다 — `toolRefs`가 있으면 `custom`, 없으면 `none`. 단 `toolRefs`가 비어도 `mcpServers`가 있으면 `custom`으로 읽는다. 그 행은 전에도 그 서버의 도구를 썼으므로 `none`으로 읽으면 동작이 바뀐다. (2) **판정은 `toolTierOf` 하나다.** `classifyToolConsequence`가 관찰이라고 하면 `read`, 결과가 남지만 `isReversibleAction`이면(파일 쓰기) `write`, 나머지는 `elevated`다. 모르는 이름은 분류기의 닫힌 기본값을 그대로 물려받아 `elevated`가 된다. 정책 규칙은 신호로 넣지 않는다(규칙은 "지켜보라"는 뜻이지 "쓴다"는 뜻이 아니다). (3) **`elevated`와 `all`의 차이는 MCP 서버다.** 모르는 도구가 이미 `elevated`라서 등급만으로는 둘이 같아진다. 그래서 `none`~`elevated`는 편집기 "외부 자원"에서 고른 서버의 MCP 도구만 등급으로 거르고, `all`은 고르지 않은 서버까지 그 턴의 모든 도구를 쓴다. 수준은 "어떤 종류의 일"을, 서버 선택은 "어느 서비스"를 정한다. (4) **게이트.** `participantMayUseTool`이 수준을 호출마다 그 턴의 도구 목록과 MCP 주석으로 푼다. 제외 도구(`naby_remember` 등)는 어느 수준에서도 막는다. (5) **"매번 승인"은 정책 뒤에 묻는다.** R10.5대로 승인을 앞에 두면 정책이 거절할 호출을 먼저 묻고, 정책이나 조직 훅의 `ask`와 겹쳐 두 번 묻는다. 그래서 허용 목록 → 계획 모드 바닥 → 조직 훅 → 정책 순서를 그대로 두고, 정책이 사람에게 묻지 않고 허용한 호출만 `source:'participant_always'` 승인 카드로 보낸다. 카드는 발언자를 보이고 "항상 허용·차단" 버튼이 없다. 허용하면 정책의 결정(훅의 입력 재작성 포함)을 돌려준다. (6) **승인 창이 없는 경로.** 채팅 턴은 늘 묻는다. 텔레그램 턴은 턴의 에스컬레이션이 텔레그램으로 보낼 때만 묻는다. 그 밖(예약 실행 등)은 묻지 않고 `capability` 거절로 끝낸다(`participantApprovalReachable`). (7) **대화 초안(§8.12)은 `permission {level, approval}`을 받는다.** 수준은 `none`~`all`이고 `custom`은 받지 않는다(도구 목록은 초안에 없다). 도구 설명과 R8.5 줄에 "사용자가 말했을 때만"을 넣었다. 카드는 만들기에서 권한 줄(위험 수준은 경고색)을, 고치기에서 전후를 보인다. 고치기에서 권한을 말하지 않으면 저장 값을 건드리지 않는다. (8) **추천 초안(§8.13)은 모델이 낸 권한을 읽지 않는다.** R9.2의 안전 기본값을 지키기 위해서다. 대신 `formFromDraft`가 선택적 `permission`을 받는다. 가져오기는 권한을 들여오지 않고 `toolRefs` → `custom` 해석을 그대로 쓴다. (9) `putParticipant`는 권한이 없는 프로필이 오면 저장된 권한을 유지한다(다른 필드의 "생략하면 유지" 규칙과 같다). (10) **서버가 풀고 클라이언트는 읽기만 한다.** `participant.list` 행에 유효 권한 `permission`을, `tools.list`에 `tiers`(도구별 등급)와 `levels`(수준별 도구)를 싣는다. 편집기의 "포함된 도구 보기"는 `levels`를 그대로 보인다. MCP 도구는 연결이 있어야 이름을 알 수 있어 목록에 없고, 카드 아래 한 줄로 들어오는 규칙을 알린다. (11) UI는 `ParticipantPermissionField`다(카드 다섯·스위치·경고·접힌 "직접 고르기 (고급)"). 칩을 만지면 `custom`이 선택되고(`withToolRefs`), 다른 수준으로 바꿔도 칩 목록은 남는다. 명단 카드에 수준 배지를 단다(위험 수준은 경고색, 매번 승인 표기). 스크린샷 스크립트에 `--permission`을 더했다. (12) **실기에서 볼 것.** 실제 모델로 "읽기만" 참가자가 쓰기 도구를 부르지 못하는지, dev-claude 엔진에서 SDK 내장 도구(`Read`·`Write`·`Bash`)가 수준대로 걸리는지, 매번 승인 카드가 라운드 안에서 발언자와 함께 뜨는지, 텔레그램 에스컬레이션 턴의 승인 메시지 문구.
+
 **MAC-M4 구현 상태.** 상세는 [agent-import-adapters](agent-import-adapters.md) §8. M3가 넘긴 서버 4건은 전부 끝냈다 — `participantRound.ts`의 중복 알약 제거, 텔레그램 미러의 발언자 줄을 📁 줄 바로 뒤로(한 명이면 `이름:`, 여럿이면 `A · B`, 나비만의 턴은 그대로), 라우팅 이벤트에 `tokens`(사용자 지목은 0)·상한 이벤트에 `limit`(칩이 둘 다 보임), `participant.export`·`participant.exportBundle`·`tools.list` 액션. 편집기의 도구 칩은 `tools.list`를 쓴다.
 
 ## 출처
@@ -696,7 +735,11 @@ CREATE TABLE participant_recommendation_cursor (
 
 ## 변경 이력
 
+- 0.5.3 (2026-10-19) — 사용자 결정: 한 번 허용하면 같은 도구는 다시 묻지 않는다(묻기 스위치가 켜져 있으면 예외). R10.7 추가, §8.11에 구현 내용.
+- 0.5.2 (2026-10-19) — 사용자 결정: 묶음 안은 묻지 않고, 묶음 밖은 묻고, 묻기 스위치는 전부 묻는다. R10.1·R10.2·R10.5를 다시 쓰고 §8.11에 개정 내용을 더했다.
+- 0.5.1 (2026-10-19) — §8.11 MAC-M7 구현·검증 상태와 구현 결정 12건(저장 위치, `elevated`/`all` 구분, 매번 승인의 위치, 초안·추천·가져오기 규칙).
 - 0.4.2 (2026-10-19) — MAC-M6 Opus 리뷰 12건 반영(§8.13 커서 DDL `failed_at`, §8.11 결정 18·19).
+- 0.5.0 (2026-10-19) — §8.14 참가자 권한 묶음(MAC-M7) 추가, §8.10 마일스톤 행 추가.
 - 0.4.1 (2026-10-19) — §8.11 MAC-M6 구현·검증 상태와 구현 결정 17건.
 - 0.4.0 (2026-10-19) — §8.13 참가자 추천(MAC-M6, R9.1~R9.7, D16~D20). 사용자 결정: 반복되는 전문 업무일 때만 추천한다. §7·§8.4·§8.6·§8.10 갱신.
 - 0.3.1 (2026-10-16) — §8.11 MAC-M5a 완료와 구현 결정 8건.

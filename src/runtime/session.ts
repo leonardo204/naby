@@ -35,6 +35,7 @@ import {
 } from './skill-inject.js';
 import type { InjectedMemory, MemoryInjectionQuery, MemoryScope, Store } from './store/store.js';
 import { viewHistoryFor } from './participants.js';
+import type { CrossSessionMeta } from './cross-session.js';
 
 export type RunTurnOptions = {
   engine: Engine;
@@ -76,6 +77,11 @@ export type RunTurnOptions = {
    *  loop's RETURN marker (`{kind:'return', reason:'asked'}` when a participant
    *  addressed `@naby`). Called once per stored text block; undefined = none. */
   assistantRouting?: (text: string) => MessageRouting | undefined;
+  /** A turn ANOTHER SESSION started (specs/cross-session-messaging §3.3) — the
+   *  request this session received, or the reply / failure it got back. The user
+   *  row is stored with this on it, so no learner reads it as the user's words
+   *  and the transcript can label it. Absent = an ordinary turn. */
+  crossSession?: CrossSessionMeta;
 
   /** System prompt for this turn. Passed to the engine on its OWN field, never
    * appended to the history — `ai@7` rejects `role:'system'` inside `messages`
@@ -351,6 +357,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   if (opts.routing) {
     const { from, ...routing } = opts.routing;
     store.appendMessage(sessionId, { role: 'user', content: userText, speaker: from, routing });
+  } else if (opts.crossSession) {
+    store.appendMessage(sessionId, { role: 'user', content: userText, crossSession: opts.crossSession });
   } else {
     store.appendMessage(sessionId, { role: 'user', content: userText });
   }

@@ -2,11 +2,11 @@
 id: telegram-chat
 title: 텔레그램 양방향 챗 — 봇으로 세션과 대화한다
 type: design
-version: 0.3.1
+version: 0.3.2
 status: active
 scope: naby 봇과 열린 세션 간의 양방향 대화. 상시 폴링 루프로의 전환, "/" 제어 명령(세션 목록·연결·상태·해제), 연결 세션 개념과 유휴 타임아웃, 답장 기반 라우팅, 수신 턴의 헤드리스 실행과 응답 회신, 동시성·보안 경계를 다룬다. v0.2: 전송 모드(동기화 always / 수동 manual)와 데스크톱 턴 미러링, 답장 라우팅 맵의 영속화를 추가한다. v0.3: 모든 발신 메시지의 프로젝트 이름 표기 계약(§0)과, 텔레그램발 턴에 한정한 편집 기반 중간 진행 보고(§4.1)를 추가한다. 에스컬레이션·체크인의 기존 텔레그램 계약은 유지된다.
-related: [multi-agent-chat, phase-3-persona-agent, harness-standalone, session-context-management, settings-ia-reorg]
-updated: 2026-10-16
+related: [multi-agent-chat, cross-session-messaging, phase-3-persona-agent, harness-standalone, session-context-management, settings-ia-reorg]
+updated: 2026-10-19
 ---
 
 # 텔레그램 양방향 챗 — 봇으로 세션과 대화한다

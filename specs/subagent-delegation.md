@@ -1,11 +1,12 @@
 ---
 id: subagent-delegation
 type: design
-version: 0.1.4
+version: 0.1.5
 status: draft
 scope: 값싼 내장 서브에이전트(탐색 haiku·구현 sonnet)와 위임 정책으로 메인 대화 기록을 작게 유지하는 것, 서브에이전트가 실제로 쓴 모델을 보이게 하는 것, 엔진 동작을 바꾸는 환경변수를 드러내는 것
 related:
   - multi-agent-chat
+  - cross-session-messaging
   - model-auto-routing
   - harness-standalone
   - naby-activity-log
@@ -14,7 +15,7 @@ related:
   - claude-multi-account
   - phase-3-persona-agent
   - settings-ia-reorg
-updated: 2026-10-16
+updated: 2026-10-19
 ---
 
 # 서브에이전트 위임과 모델 관측

@@ -169,6 +169,13 @@ export type ActivityKind =
   | 'participant_mention_ignored'
   | 'participant_cap'
   | 'round_completed'
+  // -- sessions asking each other (cross-session-messaging R9) ---------------
+  //
+  // One record per edge of a request's life, told apart by `phase`: `sent`,
+  // `delivered` (B's turn started), `answered` (B's turn ended), `replied` (the
+  // answer reached A), `dropped` (the sender's tab was gone, or A stayed busy)
+  // and `failed` (with the reason).
+  | 'cross_session_message'
   // -- accounting -----------------------------------------------------------
   | 'usage';
 

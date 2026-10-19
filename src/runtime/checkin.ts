@@ -31,6 +31,7 @@
 import { DANGEROUS_BUILTINS, OBSERVATION_BUILTINS } from './gate.js';
 import { MUTATING_TOOLS, READONLY_TOOLS } from './fs-tools.js';
 import { JOB_EXECUTION_TOOLS, JOB_OBSERVATION_TOOLS } from './job-tools.js';
+import { LIST_SESSIONS_TOOL_NAME, SEND_TO_SESSION_TOOL_NAME } from './cross-session.js';
 
 // ---------------------------------------------------------------------------
 // Which actions are consequential enough to be scored
@@ -56,6 +57,9 @@ export const CONSEQUENTIAL_RUNTIME_TOOLS: readonly string[] = [
   // and it would be perverse for `run_command "npm run deploy"` to count while
   // the same deploy started in the background did not.
   ...JOB_EXECUTION_TOOLS,
+  // Sending a request to another session (`cross-session.ts`) starts a turn
+  // there that may do anything that session's gate allows — an act, not a look.
+  SEND_TO_SESSION_TOOL_NAME,
 ];
 
 /**
@@ -86,6 +90,8 @@ export const OBSERVATION_RUNTIME_TOOLS: readonly string[] = [
   // an unsupervised consequential act — so "did my deploy finish?" would count
   // against the very agent that was being diligent about reporting back.
   ...JOB_OBSERVATION_TOOLS,
+  // Listing the project's other sessions (`cross-session.ts`) only reads.
+  LIST_SESSIONS_TOOL_NAME,
   // The runtime's own non-mutating tools. `naby_add_mcp` only files a PROPOSED
   // registry entry (the user approves before anything loads), `naby_delegate`
   // spawns a subagent whose own calls are each gated and counted separately, and

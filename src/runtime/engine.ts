@@ -9,6 +9,7 @@
 // Contract source: ref-docs/specs/interface/phase-1-contracts.md §2, §3, §6.
 
 import type { RefusalKind } from './refusal.js';
+import type { CrossSessionMeta } from './cross-session.js';
 
 // ---------------------------------------------------------------------------
 // Tool + message shapes (contract §2, §6)
@@ -217,6 +218,11 @@ export type RuntimeMessage =
        *  `isUserAuthored` (participants.ts). `'end'` is never stored; the end of a
        *  round is a stream event only. */
       routing?: MessageRouting;
+      /** A turn another session started (specs/cross-session-messaging §3.3):
+       *  the request B received, or the reply / failure A received back. USER
+       *  rows only. Like `routing`, a row carrying it was NOT typed by the user
+       *  (`isUserAuthored` is false). Inert JSON in the payload — no migration. */
+      crossSession?: CrossSessionMeta;
     }
   | {
       role: 'tool';

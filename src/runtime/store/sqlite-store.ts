@@ -2985,7 +2985,8 @@ export class SqliteStore implements Store {
     // The window is the `window` most recently used sessions, temporary ones
     // included (they are still "recent"), and only then are temporary sessions
     // left out — so turning a session temporary never pulls an older one in.
-    // User-authored = `isUserAuthored`: a user row with no speaker and no routing.
+    // User-authored = `isUserAuthored`: a user row with no speaker, no routing
+    // and no cross-session marker.
     const rows = this.db
       .prepare(
         `WITH recent AS (
@@ -2996,7 +2997,8 @@ export class SqliteStore implements Store {
                 (SELECT COUNT(*) FROM messages m
                   WHERE m.session_id = r.session_id AND m.role = 'user'
                     AND json_extract(m.payload, '$.speaker') IS NULL
-                    AND json_extract(m.payload, '$.routing') IS NULL) AS user_count,
+                    AND json_extract(m.payload, '$.routing') IS NULL
+                    AND json_extract(m.payload, '$.crossSession') IS NULL) AS user_count,
                 c.user_message_count AS cursor,
                 c.failed_at AS failed_at
          FROM recent r

@@ -241,6 +241,33 @@ export {
   type JobToolOptions,
 } from './runtime/job-tools.js';
 
+// SESSIONS ASKING EACH OTHER (specs/cross-session-messaging.md). Pure: the two
+// tool schemas, the input parser and the request / reply / failure prompts. The
+// shell's `lib/crossSession.ts` owns the delivery.
+export {
+  buildCrossSessionFailurePrompt,
+  buildCrossSessionReplyPrompt,
+  buildCrossSessionRequestPrompt,
+  clipWithNote,
+  CROSS_SESSION_CONTEXT_MAX_CHARS,
+  CROSS_SESSION_FAILURE_OPENER,
+  CROSS_SESSION_REPLY_MAX_CHARS,
+  CROSS_SESSION_REPLY_OPENER,
+  CROSS_SESSION_REQUEST_MAX_CHARS,
+  CROSS_SESSION_REQUEST_OPENER,
+  CROSS_SESSION_TOOL_NAMES,
+  defuseFenced,
+  isCrossSessionMeta,
+  LIST_SESSIONS_TOOL_NAME,
+  LIST_SESSIONS_TOOL_SCHEMA,
+  parseSendToSessionInput,
+  SEND_TO_SESSION_TOOL_NAME,
+  SEND_TO_SESSION_TOOL_SCHEMA,
+  type CrossSessionFailureReason,
+  type CrossSessionMeta,
+  type SendToSessionInput,
+} from './runtime/cross-session.js';
+
 // BACKGROUND JOBS — the mechanism behind "돌려놓고 끝나면 알려줄게".
 //
 // The runtime owns the child process and hears it exit; it cannot dispatch a
@@ -486,6 +513,21 @@ export {
   ROUTE_BRIEF_MAX_CHARS,
   ROUTE_RECENT_LIMIT,
   ROUTE_TIER,
+  // Permission tiers (§8.14, MAC-M7): the one tool → tier judge, the legacy
+  // reading and the per-turn resolution of a level into an allowlist.
+  levelIncludesTier,
+  isApprovedTool,
+  participantCallPlan,
+  participantPermissionOf,
+  PARTICIPANT_MAX_APPROVED_TOOLS,
+  withApprovedTool,
+  PARTICIPANT_PERMISSION_LEVELS,
+  resolvePermissionTools,
+  toolTierOf,
+  type ParticipantApproval,
+  type ParticipantPermission,
+  type ParticipantPermissionLevel,
+  type ToolTier,
   type KnowledgeItem,
   type ParticipantProfile,
   // Aliased: `RouteDecision` already names the model router's decision above.

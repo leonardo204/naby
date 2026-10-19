@@ -19,6 +19,7 @@
 // profile cannot override.
 
 import type { MessageSpeaker, RuntimeMessage } from './engine.js';
+import { classifyToolConsequence, isReversibleAction } from './checkin.js';
 
 // ---------------------------------------------------------------------------
 // Types (§8.1 — exactly as specified)
@@ -40,6 +41,9 @@ export type ParticipantProfile = {
   mcpServers: string[];
   /** harness_items(kind='skill').name */
   skills: string[];
+  /** The permission tier (§8.14, MAC-M7). Absent on a participant saved before
+   *  tiers existed — read it through `participantPermissionOf`, never directly. */
+  permission?: ParticipantPermission;
   params?: { temperature?: number; maxOutputTokens?: number };
   origin?: { format: string; importedAt: number; sourceHash: string; sourceName?: string };
   /** The imported original and any field naby does not understand. */
@@ -119,6 +123,204 @@ function stringList(value: unknown, field: string): string[] {
     throw new Error(`participant profile: ${field} must be an array of strings`);
   }
   return [...(value as string[])];
+}
+
+// ---------------------------------------------------------------------------
+// Permission tiers (§8.14, MAC-M7)
+// ---------------------------------------------------------------------------
+//
+// A participant's tools are chosen as ONE level plus ONE approval mode instead of
+// tool by tool. The level is resolved against the turn's actual toolset every
+// turn, so a tool that appears later (a new MCP server, a new runtime tool) joins
+// the level it belongs to without anyone editing the participant.
+
+/** How much a participant may do. `custom` is the old per-tool chip list. */
+export type ParticipantPermissionLevel = 'none' | 'read' | 'write' | 'elevated' | 'all' | 'custom';
+/** `auto` leaves each call to the turn's gate and policy; `always` asks the user
+ *  before EVERY call this participant makes, reads included (R10.2). */
+export type ParticipantApproval = 'auto' | 'always';
+export type ParticipantPermission = {
+  level: ParticipantPermissionLevel;
+  approval: ParticipantApproval;
+  /** Bare tool names OUTSIDE the level the user has already allowed once for this
+   *  participant (R10.7) — they run without asking from then on. Absent = none. */
+  approvedTools?: string[];
+};
+
+/** At most this many remembered tools (a list, not a log). */
+export const PARTICIPANT_MAX_APPROVED_TOOLS = 200;
+
+export const PARTICIPANT_PERMISSION_LEVELS: readonly ParticipantPermissionLevel[] = [
+  'none',
+  'read',
+  'write',
+  'elevated',
+  'all',
+  'custom',
+];
+
+/** Which tier a single tool belongs to. `all` and `custom` are levels, not tiers. */
+export type ToolTier = 'read' | 'write' | 'elevated';
+
+/**
+ * The tier of one tool (R10.3) — THE single place a tool is put in a level.
+ *
+ * Whether a call leaves a trace is the ledger's own question, so this asks
+ * `classifyToolConsequence` instead of keeping a second list (CLAUDE.md: one
+ * judge per question):
+ *
+ *   * `observation`              → `read` (file reads and searches, `fetch_url`,
+ *                                  skill loads, job status, an MCP tool that
+ *                                  declared `readOnlyHint: true`)
+ *   * consequential + reversible → `write` (file edits — they go through the
+ *                                  per-call snapshot, `isReversibleAction`)
+ *   * anything else              → `elevated` (commands, background jobs,
+ *                                  messages, an MCP tool with no read-only
+ *                                  declaration, a name nobody has heard of)
+ *
+ * The fail-closed default is inherited, not re-decided: an unknown name is
+ * consequential to the classifier and not reversible, so it lands in `elevated`.
+ * The user's policy rules are NOT a signal here — a rule says "watch this", not
+ * "this writes", and the level is about what a tool can do.
+ */
+export function toolTierOf(name: string, annotations?: { readOnlyHint?: boolean }): ToolTier {
+  const consequence = classifyToolConsequence(
+    name,
+    annotations?.readOnlyHint !== undefined ? { readOnlyHint: annotations.readOnlyHint } : undefined,
+  );
+  if (consequence === 'observation') return 'read';
+  return isReversibleAction(name) ? 'write' : 'elevated';
+}
+
+const TIER_RANK: Record<ToolTier, number> = { read: 1, write: 2, elevated: 3 };
+const LEVEL_RANK: Record<Exclude<ParticipantPermissionLevel, 'custom'>, number> = {
+  none: 0,
+  read: 1,
+  write: 2,
+  elevated: 3,
+  all: 4,
+};
+
+/** Does `level` include a tool of `tier`? `custom` decides by name, so never. */
+export function levelIncludesTier(level: ParticipantPermissionLevel, tier: ToolTier): boolean {
+  if (level === 'custom') return false;
+  return LEVEL_RANK[level] >= TIER_RANK[tier];
+}
+
+/**
+ * What a participant's gate does with one call (§8.14, the 2026-10-19 user rule:
+ * "묶음 안은 묻지 않고, 묶음 밖은 묻고, 묻기 스위치는 전부 묻는다"):
+ *
+ *   * `policy` — only the user's own rules decide (a `deny` refuses, an `ask`
+ *     asks once); no baseline, no floor prompt. For a call INSIDE the level with
+ *     the switch off, and for any call a `deny` rule names (no point asking).
+ *   * `ask`    — the user is asked before it runs: the call is OUTSIDE the level,
+ *     or the switch is on. If the policy or an org hook already asks about the
+ *     same call, that one prompt counts.
+ *   * `refuse` — it must ask and nobody can answer on this turn.
+ *
+ * Pure; the shell's gate supplies the four facts.
+ */
+export function participantCallPlan(input: {
+  inLevel: boolean;
+  approval: ParticipantApproval;
+  policyEffect?: 'allow' | 'ask' | 'deny' | undefined;
+  reachable: boolean;
+}): 'policy' | 'ask' | 'refuse' {
+  if (input.policyEffect === 'deny') return 'policy';
+  if (input.inLevel && input.approval !== 'always') return 'policy';
+  return input.reachable ? 'ask' : 'refuse';
+}
+
+function parsePermission(v: unknown): ParticipantPermission {
+  if (!isPlainObject(v)) throw new Error('participant profile: permission must be an object');
+  const level = v.level;
+  if (typeof level !== 'string' || !(PARTICIPANT_PERMISSION_LEVELS as readonly string[]).includes(level)) {
+    throw new Error(
+      `participant profile: permission.level must be one of ${PARTICIPANT_PERMISSION_LEVELS.join(', ')}`,
+    );
+  }
+  const approval = v.approval === undefined || v.approval === null ? 'auto' : v.approval;
+  if (approval !== 'auto' && approval !== 'always') {
+    throw new Error("participant profile: permission.approval must be 'auto' or 'always'");
+  }
+  const out: ParticipantPermission = { level: level as ParticipantPermissionLevel, approval };
+  if (v.approvedTools !== undefined && v.approvedTools !== null) {
+    const names = [...new Set(stringList(v.approvedTools, 'permission.approvedTools').map((n) => n.trim()).filter(Boolean))];
+    if (names.length > PARTICIPANT_MAX_APPROVED_TOOLS) {
+      throw new Error(`participant profile: at most ${PARTICIPANT_MAX_APPROVED_TOOLS} permission.approvedTools`);
+    }
+    if (names.length > 0) out.approvedTools = names;
+  }
+  return out;
+}
+
+/**
+ * The permission with `toolName` remembered as allowed (R10.7, 2026-10-19 user
+ * decision: "한 번 허용하면 같은 도구는 다시 묻지 않는다"). Pure; the same object
+ * back when it is already there or when it cannot be remembered — with "ask me
+ * every time" on, nothing is recorded (the switch asks unconditionally).
+ */
+export function withApprovedTool(permission: ParticipantPermission, toolName: string): ParticipantPermission {
+  const name = toolName.trim();
+  if (!name || permission.approval === 'always') return permission;
+  const have = permission.approvedTools ?? [];
+  if (have.includes(name) || have.length >= PARTICIPANT_MAX_APPROVED_TOOLS) return permission;
+  return { ...permission, approvedTools: [...have, name] };
+}
+
+/** Has the user already allowed `toolName` for this participant (R10.7)? */
+export function isApprovedTool(permission: Pick<ParticipantPermission, 'approvedTools'>, toolName: string): boolean {
+  return (permission.approvedTools ?? []).includes(toolName);
+}
+
+/**
+ * A participant's permission, legacy rows included (R10.4). A stored
+ * `profile.permission` wins; a participant saved before tiers existed reads as
+ * `custom` when it has `toolRefs` and `none` when it does not — exactly what
+ * those rows did before, so reading them changes nothing. One addition the spec
+ * line does not spell out: a legacy row with no `toolRefs` but with MCP servers
+ * in its profile could already call those servers' tools, so it reads as
+ * `custom` too (`none` would silently take them away). Never throws: a
+ * malformed stored value falls back to the legacy reading.
+ */
+export function participantPermissionOf(agent: {
+  toolRefs?: readonly string[] | undefined;
+  profile?: { permission?: unknown; mcpServers?: readonly string[] | undefined } | undefined;
+}): ParticipantPermission {
+  const stored = agent.profile?.permission;
+  if (stored !== undefined && stored !== null) {
+    try {
+      return parsePermission(stored);
+    } catch {
+      /* fall through to the legacy reading */
+    }
+  }
+  const granted = (agent.toolRefs ?? []).length > 0 || (agent.profile?.mcpServers ?? []).length > 0;
+  return { level: granted ? 'custom' : 'none', approval: 'auto' };
+}
+
+/**
+ * The tool names a level allows out of `toolNames` (the participant's visible
+ * toolset for this turn), in their given order. `custom` returns the names that
+ * are in `toolRefs`. Pure set arithmetic — the caller still applies the tools a
+ * participant never gets.
+ */
+export function resolvePermissionTools(
+  permission: Pick<ParticipantPermission, 'level'>,
+  toolNames: readonly string[],
+  opts: {
+    annotations?: Readonly<Record<string, { readOnlyHint?: boolean } | undefined>>;
+    toolRefs?: readonly string[];
+  } = {},
+): string[] {
+  if (permission.level === 'none') return [];
+  if (permission.level === 'custom') {
+    const refs = new Set(opts.toolRefs ?? []);
+    return toolNames.filter((n) => refs.has(n));
+  }
+  if (permission.level === 'all') return [...toolNames];
+  return toolNames.filter((n) => levelIncludesTier(permission.level, toolTierOf(n, opts.annotations?.[n])));
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +475,11 @@ export function parseParticipantProfile(json: unknown): ParticipantProfile {
     mcpServers,
     skills,
   };
+
+  // -- permission (§8.14 R10.4)
+  if (json.permission !== undefined && json.permission !== null) {
+    profile.permission = parsePermission(json.permission);
+  }
 
   // -- params
   if (json.params !== undefined && json.params !== null) {
@@ -770,7 +977,9 @@ export function composeParticipantSystem(
  */
 export function isUserAuthored(m: RuntimeMessage): boolean {
   if (m.role !== 'user') return false;
-  return m.speaker === undefined && m.routing === undefined;
+  // A turn another session started (cross-session-messaging §3.3) is not the
+  // user's words either: it is naby's request from another tab, or its answer.
+  return m.speaker === undefined && m.routing === undefined && m.crossSession === undefined;
 }
 
 
