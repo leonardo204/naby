@@ -2,7 +2,7 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
 type: design
-version: 0.10.1
+version: 0.10.2
 status: active
 scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 0.10.0에서 로컬 CLI를 띄우는 무필드 stdio 프리셋 aside(Aside 브라우저)가 더해졌다. 기본은 연결 준비만 한다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync, mcp-oauth-catalog]
@@ -178,6 +178,7 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 - 이미 손으로 추가한 `aside` 엔트리는 이름이 같으므로 연결됨으로 보이고, 일반 목록에서는 다른 프리셋처럼 걸러진다.
 - 카드는 `SystemMcpCliForm.tsx`에 있고, 클라이언트 미러의 `cli: true`로 고른다. 설정 › 연결과 온보딩이 같은 카드를 쓴다.
 - 테스트: 레지스트리 단위, 액션 왕복(연결·끊기·CLI 없음 거절·다시 확인·수동 엔트리), 카드 세 상태 렌더(en/ko)를 넣었다. `vitest.setup.ts`는 `NABY_ASIDE_PATH`를 없는 경로로 고정해 테스트가 실제 `aside`를 찾지 않게 한다. 스크린샷 스크립트에는 `--system-mcp`를 더했다.
+- 설치 직후 감지(0.10.2, 2026-10-22 실기 보고): Windows에서 naby를 켠 채 Aside CLI를 설치하면 "다시 확인"이 계속 "CLI 없음"이라고 답했고, naby를 다시 시작해야 감지됐다. 설치 프로그램은 레지스트리의 사용자 PATH를 바꾸지만, 이미 떠 있는 프로세스의 `PATH`는 시작 시점 값 그대로이기 때문이다. 그래서 Windows에서 시작 시점 `PATH`로 못 찾으면 `reg query`로 사용자·시스템 PATH를 새로 읽어(`%VAR%` 펼침) 한 번 더 찾는다. 이 탐색은 `commandPath.resolveCommandPath`에 있으므로 uvx(atlassian) 등 다른 stdio 프리셋도 같은 덕을 본다. 테스트는 레지스트리 읽기를 주입해 실제 `reg`를 부르지 않는다.
 - 남은 확인(사용자 실기): CLI가 깔린 Mac에서 연결 → 채팅에서 Aside 도구 호출 한 번, Windows에서 `aside.exe` 경로 해석과 `.cmd` 심 감싸기(단위 테스트로만 확인했다).
 
 ## 3. 검증 계획
