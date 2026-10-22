@@ -1,15 +1,15 @@
 ---
 id: skill-hub-builtin
-title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
+title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
 type: design
-version: 0.9.1
+version: 0.10.1
 status: active
-scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
+scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 0.10.0에서 로컬 CLI를 띄우는 무필드 stdio 프리셋 aside(Aside 브라우저)가 더해졌다. 기본은 연결 준비만 한다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync, mcp-oauth-catalog]
-updated: 2026-10-13
+updated: 2026-10-22
 ---
 
-# System MCP — 내장 프리셋(skill-hub · Atlassian · cic)
+# System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
 
 > 상태: 설계 확정(2026-08-12, 0.6.0에서 §2.7을 가산 — cic 프리셋과 내장 하네스 번들. 자격값 저장이 곧 번들의 스위치이고, 사용자가 손으로 끈 것은 이기지 않는다. 0.6.1에서 내장 스킬을 트리거 게이팅으로 바꿈 — 1722토큰짜리 문서가 항상-켜짐이면 매 턴 예산의 86%를 먹는다. 0.7.0에서 두 번째 번들 `confluence-upload`를 atlassian 프리셋에 붙이고, 번들 단위로 규칙을 일반화했다. 0.9.0에서 atlassian을 공식 원격 MCP + 브라우저 OAuth 프리셋으로 바꾸고 `confluence-upload`를 거뒀다 — org-harness-sync §3.8, §4.4). 한 줄 요약: 사내 표준 MCP는 사용자가 URL·transport·헤더를 알 필요가 없는 **내장 프리셋**이다. 필요한 자격값 한두 개만 넣으면 연결/테스트까지 바로 된다.
 
@@ -149,6 +149,36 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 7. frontmatter `allowed-tools: Bash, Read, AskUserQuestion` → naby의 이름으로 바꾸고(`run_command`), 생성기가 파싱하는 `tools:` 키를 함께 두어 위의 도구 게이팅을 켰다.
 
 압축으로 **덜어낸 것**(내용 손실을 명시한다): mcp-atlassian 비교표 7행(라우팅 규칙은 frontmatter `description`에 남아 있고, `description`은 주입 블록에 실리지 않아 예산을 쓰지 않는다), 모드 표 6행 → 산문 한 문단, 선택 플래그 10개 → 자주 쓰는 6개 + `--help` 안내, 예제 3개 → 실행 예 1개, JSON Lines 예시 3줄 → 필드 목록 한 줄, Troubleshooting 표 10행 → 5행(구버전 바이너리가 원인인 3행을 한 행으로 합쳤다), Security notes 4줄 → 자격값 절의 2문장, Anti-patterns 4줄 → 실패 절의 2행. **줄이지 않은 것**: mermaid 안정 문법 규칙과 자동 교정의 한계, 표 셀 `|` 이스케이프, 참조 링크·평문 URL 변환 — `--help`로 대체되지 않고 문서를 **쓸 때** 필요한 지식이라 이 스킬의 실제 값어치다.
+
+### 2.8 Aside 프리셋 — 로컬 CLI를 띄우는 stdio 프리셋 (0.10.0에서 추가)
+
+**요구(2026-10-22 사용자).** Claude Code에서 `claude mcp add aside -- aside mcp`로 쓰는 Aside 브라우저 MCP를 naby에 내장한다. Aside는 사용자가 로그인해 둔 브라우저로 화면을 열고, 클릭하고, 스크린샷을 남긴다. 사용자의 SSO 세션을 그대로 쓰므로 테스트용 인증 설정이 필요 없다. **기본은 연결 준비만 한다.** 사용자가 "연결"을 눌러야 엔트리가 생기고 켜진다.
+
+**프리셋.** 이름은 `aside`, 필드는 없다. 서버 레지스트리가 stdio 엔트리 `{ command: 'aside', args: ['mcp'] }`를 조립한다. 원격 URL·토큰·OAuth가 없는 첫 stdio 무필드 프리셋이다. 번들은 켜지 않는다.
+
+**연결 준비 상태.** 설정 System MCP 카드와 온보딩에 Aside 카드가 늘 보인다. 엔트리는 만들지 않는다. 카드는 세 상태를 보인다.
+
+| 상태 | 판정 | 카드 |
+|---|---|---|
+| CLI 없음 | `commandPath`로 `aside`를 찾지 못함(Windows `aside.exe`/`.cmd` 포함) | "Aside CLI가 없습니다" + 설치 안내(Aside 앱 설정 › Developers에서 설치, Windows는 공식 PowerShell 설치 스크립트) + 다시 확인 버튼. 연결 버튼은 비활성 |
+| 준비됨 | CLI 있음, 엔트리 없음 | "연결" 버튼 |
+| 연결됨 | 엔트리 있고 켜짐 | "연결 끊기" 버튼. 끊으면 엔트리를 지운다 |
+
+다른 PC나 원격 환경에서 쓰려면 `aside login --email …` 후 Aside 앱에서 기기 코드를 승인해야 한다. 이건 카드에 한 줄 안내만 두고 naby가 대신 실행하지 않는다.
+
+**도구와 게이트.** 도구 이름은 `mcp__aside__*`다. 브라우저를 움직이는 도구라 기존 MCP 게이트 규칙을 그대로 받는다. `readOnlyHint`가 없는 도구는 결과가 남는 호출로 분류된다(참가자 권한 묶음에서는 `elevated`). 새 예외를 만들지 않는다.
+
+**검증.** 서버 레지스트리 단위 테스트(엔트리 조립, 무필드 연결·끊기 왕복, CLI 없음에서 연결 거절), 클라이언트 미러 테스트(`systemMcpPresets.test.ts`가 새 프리셋을 같이 본다), 카드 세 상태 렌더 테스트, Windows 확장자 해석은 `commandPath` 테스트로 본다. 실제 `aside` 실행·실제 브라우저 조작은 테스트에서 하지 않는다. 실기(사용자): CLI가 깔린 Mac에서 연결 → 채팅에서 "Aside로 ‹페이지› 열고 스크린샷" 한 번.
+
+**구현 상태(0.10.1, 2026-10-22).** 셸에 구현을 마쳤다. 정한 것은 다음과 같다.
+
+- 레지스트리: `aside` 프리셋은 `launcher: 'aside'`이고 필드가 없다. 연결은 필드 없이 보내는 `systemMcp.set`이고, 끊기는 `systemMcp.remove`다. 새 연결 액션은 만들지 않았다. 엔트리의 `command`에는 `aside`가 아니라 연결 순간 `commandPath`로 찾은 **절대경로**를 넣는다(§2.1의 uvx와 같은 이유다. Finder에서 띄운 앱의 PATH에는 사용자 bin이 없다). CLI를 찾지 못하면 서버가 `systemMcp.cli.missing`으로 거절한다.
+- Windows: 런타임 MCP 로더는 `shell: false`로 띄우므로 Node가 `.cmd`·`.bat` 실행을 거부한다(EINVAL). 그래서 찾은 경로가 `.exe`면 그대로 넣고, `.cmd`·`.bat` 심(shim)이면 `command: <ComSpec 또는 cmd.exe>`, `args: ['/d', '/c', <경로>, 'mcp']`로 감싼다(`commandPath.ts`의 `launchSpec`). `/s`와 미리 따옴표를 친 경로는 쓰지 않는다. Node가 인자 안의 따옴표를 `\"`로 바꾸는데 cmd는 이를 해석하지 못하기 때문이다. 경로에 cmd 특수문자(`&()%!^|<>@"`)가 있으면 실행 줄이 깨지므로 `systemMcp.cli.shimPath`로 거절한다.
+- 상태: `SystemMcpStatus.cli = { found }`를 더했다. GET은 로그인 셸 탐색을 하지 않으므로 `cli`가 없다. `cli`는 `systemMcp.check`(다시 확인, 쓰기 없음)와 Aside의 set·remove 응답에만 실린다. 카드는 열릴 때 `check`를 한 번 부른다.
+- 이미 손으로 추가한 `aside` 엔트리는 이름이 같으므로 연결됨으로 보이고, 일반 목록에서는 다른 프리셋처럼 걸러진다.
+- 카드는 `SystemMcpCliForm.tsx`에 있고, 클라이언트 미러의 `cli: true`로 고른다. 설정 › 연결과 온보딩이 같은 카드를 쓴다.
+- 테스트: 레지스트리 단위, 액션 왕복(연결·끊기·CLI 없음 거절·다시 확인·수동 엔트리), 카드 세 상태 렌더(en/ko)를 넣었다. `vitest.setup.ts`는 `NABY_ASIDE_PATH`를 없는 경로로 고정해 테스트가 실제 `aside`를 찾지 않게 한다. 스크린샷 스크립트에는 `--system-mcp`를 더했다.
+- 남은 확인(사용자 실기): CLI가 깔린 Mac에서 연결 → 채팅에서 Aside 도구 호출 한 번, Windows에서 `aside.exe` 경로 해석과 `.cmd` 심 감싸기(단위 테스트로만 확인했다).
 
 ## 3. 검증 계획
 

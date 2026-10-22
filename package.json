@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.46.3",
+  "version": "1.47.0",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -120,6 +120,7 @@
     "@ai-sdk/openai": "4.0.16",
     "@anthropic-ai/claude-agent-sdk": "0.3.283",
     "ai": "7.0.31",
+    "webreel": "^0.1.4",
     "zod": "^4.0.0"
   },
   "devDependencies": {
