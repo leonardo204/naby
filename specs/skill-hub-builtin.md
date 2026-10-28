@@ -2,11 +2,11 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
 type: design
-version: 0.10.2
+version: 0.10.3
 status: active
 scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 0.10.0에서 로컬 CLI를 띄우는 무필드 stdio 프리셋 aside(Aside 브라우저)가 더해졌다. 기본은 연결 준비만 한다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync, mcp-oauth-catalog]
-updated: 2026-10-22
+updated: 2026-10-29
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
@@ -78,7 +78,7 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 
 ### 2.7 cic 프리셋과 내장 하네스 번들 (0.6.0에서 추가)
 
-**cic**는 사내 Confluence 색인 MCP다. 전송 형태는 skill-hub와 같다 — HTTP + Bearer 토큰 하나. 필드 `token`(secret), 기본 URL `https://skills.altimedia.com/cic/mcp`, 설정 키 `cic.url`. 조립 결과는 `{transport:'http', url, headers:{Authorization:'Bearer <token>'}}`이고, 토큰은 skill-hub와 같은 `normalizeBearerToken`을 지난다. 새 전송 경로도, 새 쓰기 경로도 없다 — 레지스트리 항목 하나가 늘 뿐이다(§2.1의 설계 목적).
+**cic**는 사내 Confluence 색인 MCP다. 전송 형태는 skill-hub와 같다 — HTTP + Bearer 토큰 하나. 필드 `token`(secret), 기본 URL `https://cic.altimedia.com/mcp`(2026-10-28 k8s 이전. 옛 VM 경로(`skills.altimedia.com` 호스트의 `/cic` 아래)에 저장된 항목과 `cic.url`은 시작할 때 새 주소로 바꾼다 — `src/runtime/cic-url-migration.ts`), 설정 키 `cic.url`. 조립 결과는 `{transport:'http', url, headers:{Authorization:'Bearer <token>'}}`이고, 토큰은 skill-hub와 같은 `normalizeBearerToken`을 지난다. 새 전송 경로도, 새 쓰기 경로도 없다 — 레지스트리 항목 하나가 늘 뿐이다(§2.1의 설계 목적).
 
 **서버 이름은 반드시 `cic`여야 한다.** 아래 내장 서브에이전트가 `tools: mcp__cic__*`로 도구를 지정하고, naby는 MCP 도구를 `<server>__<tool>`로 이름 짓는다(`qualifiedToolName`). 이름을 바꾸면 서브에이전트는 **도구 없이** 돌면서 "Confluence 조사를 못 했다"만 답한다 — 어떤 에러도 남지 않는 실패다. 프리셋 선언과 클라이언트 미러 양쪽에 이 결합을 주석으로 남긴다.
 

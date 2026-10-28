@@ -54,7 +54,7 @@ triggers: cic, confluence, 컨플루언스, 위키, wiki, adr, 런북, runbook, 
 - 부재할 때만 아래 1~5단계를 수행한다. 범위 변경은 `confluence.yml` 직접 편집 또는 명시적 재실행 요청으로만 한다.
 
 ### 2.1 1단계 — CIC 연동 검증
-naby에서 `cic` 서버는 **설정 → System MCP의 내장 프리셋**이다. `.mcp.json` 도 `.env.local` 도 쓰지 않고, 주소(`https://skills.altimedia.com/cic/mcp`)와 `Authorization: Bearer` 헤더는 제품이 안다 — 사용자가 넣는 값은 토큰 하나다. 그래서 검증도 **두 가지**로 줄어든다. **①만 보고 성공 처리하지 않는다** — 연결은 되었으나 색인이 없어 결과가 비는 상태가 가장 흔한 실패다.
+naby에서 `cic` 서버는 **설정 → System MCP의 내장 프리셋**이다. `.mcp.json` 도 `.env.local` 도 쓰지 않고, 주소(`https://cic.altimedia.com/mcp`)와 `Authorization: Bearer` 헤더는 제품이 안다 — 사용자가 넣는 값은 토큰 하나다. 그래서 검증도 **두 가지**로 줄어든다. **①만 보고 성공 처리하지 않는다** — 연결은 되었으나 색인이 없어 결과가 비는 상태가 가장 흔한 실패다.
 
 | 검증 | 방법 | 실패 시 안내 |
 |---|---|---|

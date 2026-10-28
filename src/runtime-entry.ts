@@ -832,6 +832,7 @@ export {
   type AtlassianRowShape,
   type ConfluenceUploadWithdrawal,
 } from './runtime/atlassian-migration.js';
+export { CIC_MCP_URL, migratedCicUrl, migrateCicUrl, type CicUrlMigration } from './runtime/cic-url-migration.js';
 // Fixture-only writer + the strict reader, exported so the shell's vitest can
 // build a package zip without a binary fixture in the tree.
 export { buildZip, extractZip, ZipError, type ZipWriteEntry } from './runtime/zip.js';
