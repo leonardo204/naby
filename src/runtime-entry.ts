@@ -542,6 +542,40 @@ export {
   type RoutePromptInput as ParticipantRoutePromptInput,
 } from './runtime/participants.js';
 
+// THE ROUND LEDGER AND LOOP DETECTION (specs/multi-agent-chat.md §8.15, MAC-M8).
+// Pure: the fingerprints, the judge and the progress summary that replaced the
+// fixed speech / round-trip limits.
+export {
+  RoundLedger,
+  normalizeRoundText,
+  roundWords,
+  roundHash,
+  jaccard as roundJaccard,
+  newWordRatio,
+  findTrailingCycle,
+  stepKey as roundStepKey,
+  roundStepLogFields,
+  roundStopNote,
+  roundProgressBlock,
+  ROUND_BACKSTOP_SPEECHES,
+  ROUND_SIMILARITY,
+  ROUND_REPEAT_MIN_CHARS,
+  ROUND_NO_PROGRESS_RUN,
+  ROUND_NEW_WORD_RATIO,
+  ROUND_CYCLE_MIN,
+  ROUND_CYCLE_MAX,
+  ROUND_SUMMARY_STEPS,
+  ROUND_SUMMARY_GIST_CHARS,
+  ROUND_LOG_WORDS_MAX,
+  ROUND_SHORT_SPEECH_WORDS,
+  type RoundParty,
+  type RoundStep,
+  type RoundHandoff,
+  type RoundLoopKind,
+  type RoundLoopVerdict,
+  type RecordSpeechInput,
+} from './runtime/round-loop.js';
+
 // PARTICIPANT RECOMMENDATIONS (specs/multi-agent-chat.md §8.13, MAC-M6). Pure:
 // the cursor rule, the transcript the recommender reads, its prompt and the
 // strict parser that applies the threshold (R9.1) and the dedupe rules (R9.5).

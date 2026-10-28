@@ -168,6 +168,11 @@ export type ActivityKind =
   | 'participant_recommendation'
   | 'participant_mention_ignored'
   | 'participant_cap'
+  // One row per speech in a round (§8.15 R11.2, MAC-M8): the round ledger —
+  // who spoke, whom it handed to, the fingerprint of what it said (hashes and
+  // word set, never the body) and the tools it called. `round_completed` keeps
+  // the round's totals and, when the round stopped itself, the loop evidence.
+  | 'participant_round_step'
   | 'round_completed'
   // -- sessions asking each other (cross-session-messaging R9) ---------------
   //

@@ -200,14 +200,32 @@ export type MessageRouting = {
   blocked?: MessageRoutingBlocked;
 };
 
-/** Why a line-start hand-off did not happen (multi-agent-chat R3.10). */
-export type MessageRoutingBlocked = {
-  by: 'hub-mention';
-  cap: 'speeches' | 'roundTrips';
-  limit: number;
-  agentId: string;
-  name: string;
-};
+/** Why a round stopped short (multi-agent-chat R3.10, R11.4). `hub-mention` is
+ *  the 0.6.2 shape (a speech or round-trip limit stopped naby's line-start
+ *  hand-off) — those limits are gone (0.7.0), but rows written then still read.
+ *  `loop`: the round stopped itself because it was going in circles (§8.15
+ *  R11.3). `backstop`: it reached the emergency speech limit (R3.5 d). */
+export type MessageRoutingBlocked =
+  | {
+      by: 'hub-mention';
+      cap: 'speeches' | 'roundTrips';
+      limit: number;
+      agentId: string;
+      name: string;
+    }
+  | {
+      by: 'loop';
+      loop: 'repeated-speech' | 'repeated-brief' | 'no-progress' | 'cycle';
+      /** The participant the reason is about, when there is one. */
+      agentId?: string;
+      name?: string;
+    }
+  | {
+      by: 'backstop';
+      limit: number;
+      agentId?: string;
+      name?: string;
+    };
 
 export type RuntimeMessage =
   | {

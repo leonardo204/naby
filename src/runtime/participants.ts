@@ -780,11 +780,10 @@ export type RoutePromptInput = {
   inSession: { name: string; description: string }[];
   /** Registered participants NOT in the session. Shown only when proposals are on. */
   registeredOutside: { name: string; description: string }[];
-  /** `roundTripsLeft` is the MOST any in-session participant has left — the
-   *  round is "at its limit" for hand-offs only when it is 0. `roundTripsLeftFor`
-   *  (by participant name) is what each one has left, so one exhausted
-   *  participant does not read as a limit on the others. */
-  caps: { speechesLeft: number; roundTripsLeft: number; roundTripsLeftFor?: Record<string, number> };
+  /** The round's progress so far (§8.15 R11.2): one line per speech, oldest
+   *  first — `RoundLedger.summaryLines()`. Shown so naby does not hand out work
+   *  already done. Replaces the 0.6 speech / round-trip counters (R3.5). */
+  progress?: string[];
   proposalsEnabled: boolean;
   /** Names the user declined in this session — never offered again (R3.9). */
   declined?: string[];
@@ -875,30 +874,14 @@ export function routePrompt(input: RoutePromptInput): string {
         : 'It did not address you. Choose "end" unless the user clearly still needs something more; do not add a speech just to summarise.',
     );
   }
-  lines.push(
-    '',
-    '## Limits',
-    `Speeches left this round: ${Math.max(0, input.caps.speechesLeft)}. Hand-offs left to any one participant: ${Math.max(0, input.caps.roundTripsLeft)}.`,
-  );
-  const perTarget = input.caps.roundTripsLeftFor;
-  if (perTarget) {
-    const known = input.inSession.filter((p) => perTarget[p.name] !== undefined);
-    if (known.length > 0) {
-      lines.push(
-        `Hand-offs left per participant: ${known.map((p) => `@${p.name} ${Math.max(0, perTarget[p.name]!)}`).join(', ')}.`,
-      );
-      const spent = known.filter((p) => perTarget[p.name]! <= 0);
-      if (spent.length > 0) {
-        lines.push(`Do not delegate to ${spent.map((p) => `@${p.name}`).join(', ')}: no hand-offs left this round.`);
-      }
-    }
-  }
-  if (input.caps.speechesLeft <= 1 || input.caps.roundTripsLeft <= 0) {
+  if (input.progress && input.progress.length > 0) {
     lines.push(
-      input.followup?.asked
-        ? 'The round is at its limit: choose "answer".'
-        : 'The round is at its limit: choose "answer" or "end".',
+      '',
+      '## This round so far (oldest first; do not hand out a step that is already done)',
+      `<${UNTRUSTED_TRANSCRIPT}>`,
     );
+    for (const l of input.progress) lines.push(untrusted(l, 300));
+    lines.push(`</${UNTRUSTED_TRANSCRIPT}>`);
   }
   lines.push(
     '',
