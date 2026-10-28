@@ -32,6 +32,8 @@ import {
   matchKnowledgeKeywords,
   mentionsHub,
   parseMentions,
+  parseLeadingMentions,
+  LEADING_MENTION_BRIEF_MAX,
   parseParticipantProfile,
   parseRouteDecision,
   routePrompt,
@@ -422,6 +424,42 @@ function exerciseMentions(): void {
     parseMentions('@persona and @critic', ['persona', 'Critic'], { hubNames: ['persona'] }).join(',') === 'Critic',
   );
   check('mentionsHub still sees @Naby / @나비', mentionsHub('@Naby hi') && mentionsHub('네 @나비 확인') && !mentionsHub('@critic'));
+
+  console.log('\n[pure] parseLeadingMentions (R3.10)');
+  const names = ['aside', 'Critic', 'naby'];
+  const lead = (t: string, opts?: { hubNames?: readonly string[] }) => parseLeadingMentions(t, names, opts);
+  const one = lead('Done.\n\n@aside, please open the DNS ticket.\nUse the form.\n\nThanks.');
+  check(
+    'line-start @name → that paragraph is the brief',
+    one.length === 1 && one[0]!.name === 'aside' && one[0]!.brief === '@aside, please open the DNS ticket.\nUse the form.',
+    JSON.stringify(one),
+  );
+  check('mid-sentence mention does not count', lead('I asked @aside about it.\nWe told @critic too.').length === 0);
+  check('a handle with a particle glued on is talk ABOUT, not TO', lead('@aside가 확인한 결과 문제가 없다.').length === 0);
+  check('unknown names are ignored', lead('@ghost do this\n@aside DNS 신청은 이렇게 한다').map((m) => m.name).join(',') === 'aside');
+  check('the hub is never addressed', lead('@naby note to self\n@나비 x').length === 0 && lead('@persona x', { hubNames: ['persona'] }).length === 0);
+  check(
+    'fenced code is ignored',
+    lead('```\n@aside run this\n```\n~~~\n@critic\n~~~').length === 0,
+  );
+  check('inline code is not a line-start handle', lead('`@aside` is the handle').length === 0);
+  const two = lead('@Critic review §2.\n\n@aside open the ticket.\n\n@critic again');
+  check(
+    'two addressed → both, in order, de-duplicated (first brief wins)',
+    two.map((m) => m.name).join(',') === 'Critic,aside' && two[0]!.brief === '@Critic review §2.',
+  );
+  check(
+    'indentation, list markers, quote and bold are allowed',
+    lead('  - **@aside** check A').map((m) => m.name).join(',') === 'aside' &&
+      lead('1. @critic check B').length === 1 &&
+      lead('> @aside quoted').length === 1 &&
+      lead('* __@critic__: go').length === 1,
+  );
+  check('several handles in a row share the paragraph', lead('@aside, @critic 둘 다 확인해 주세요').map((m) => m.name).join(',') === 'aside,Critic');
+  check('case-insensitive, registry spelling', lead('@CRITIC look').map((m) => m.name).join(',') === 'Critic');
+  check('the brief stops at a fence', lead('@aside run:\n```\nls\n```')[0]!.brief === '@aside run:');
+  check('the brief is clipped', lead('@aside ' + 'x'.repeat(5000))[0]!.brief.length <= LEADING_MENTION_BRIEF_MAX + 1);
+  check('no names → none', parseLeadingMentions('@aside hi', []).length === 0);
 }
 
 function exerciseRoute(): void {
@@ -484,6 +522,16 @@ function exerciseRoute(): void {
     spaced.split('\n').find((l) => l.includes('[@translator]')),
   );
   check('the user text is NOT fenced as untrusted', on.indexOf('Please translate this contract.') > on.indexOf('</untrusted_transcript>'));
+  // R3.4 (0.6.0): a participant that asked naby must be answered — `end` is not offered.
+  const askedPrompt = routePrompt({ ...baseInput, followup: { speaker: 'translator', asked: true } });
+  const notAsked = routePrompt({ ...baseInput, followup: { speaker: 'translator', asked: false } });
+  check('asked follow-up forbids "end"', askedPrompt.includes('Do not choose "end"') && !notAsked.includes('Do not choose "end"'));
+  check('not-asked follow-up still defaults to "end"', notAsked.includes('Choose "end" unless'));
+  const askedAtLimit = routePrompt({ ...baseInput, caps: { speechesLeft: 1, roundTripsLeft: 0 }, followup: { speaker: 'translator', asked: true } });
+  check(
+    'asked follow-up at the limit offers only "answer"',
+    askedAtLimit.includes('The round is at its limit: choose "answer".') && !askedAtLimit.includes('choose "answer" or "end"'),
+  );
 
   const known = { inSession: ['translator'], outside: ['lawyer'] };
   const d = parseRouteDecision('{"action":"delegate","target":"@Translator","brief":"Translate §2.","reason":"translation"}', known);

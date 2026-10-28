@@ -193,6 +193,20 @@ export type MessageRouting = {
   targetName?: string;
   reason?: string;
   brief?: string;
+  /** A hand-off naby made in its own words (`@name` at a line start, R3.10)
+   *  that a round limit stopped: the participant was NOT given the turn. Stored
+   *  on naby's note to itself (`kind:'end'`, target = naby) so a reloaded
+   *  transcript still says why nobody answered. */
+  blocked?: MessageRoutingBlocked;
+};
+
+/** Why a line-start hand-off did not happen (multi-agent-chat R3.10). */
+export type MessageRoutingBlocked = {
+  by: 'hub-mention';
+  cap: 'speeches' | 'roundTrips';
+  limit: number;
+  agentId: string;
+  name: string;
 };
 
 export type RuntimeMessage =
@@ -215,8 +229,9 @@ export type RuntimeMessage =
       speaker?: MessageSpeaker;
       /** How the round moved at this row (multi-agent-chat §8.1). A user row that
        *  carries `routing` (or `speaker`) was NOT typed by the user — see
-       *  `isUserAuthored` (participants.ts). `'end'` is never stored; the end of a
-       *  round is a stream event only. */
+       *  `isUserAuthored` (participants.ts). `'end'` is stored only for a
+       *  blocked line-start hand-off (`blocked`, R3.10); the end of a round
+       *  otherwise is a stream event only. */
       routing?: MessageRouting;
       /** A turn another session started (specs/cross-session-messaging §3.3):
        *  the request B received, or the reply / failure A received back. USER

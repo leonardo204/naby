@@ -659,6 +659,103 @@ function scanMentions(text: string, registeredNames: readonly string[]): string[
   return out;
 }
 
+/** The longest brief a line-start address hands over (the rest is in the
+ *  history the participant reads anyway). */
+export const LEADING_MENTION_BRIEF_MAX = 1200;
+
+/** A participant naby addressed at the start of a line (R3.10). */
+export type LeadingMention = {
+  /** The registered name, in the registry's own spelling. */
+  name: string;
+  /** The paragraph that begins with the address — that line up to the next
+   *  blank line (or code fence), trimmed and clipped. */
+  brief: string;
+};
+
+/** What may sit before a line-start `@name`: indentation, a blockquote, a list
+ *  marker (`-`, `*`, `+`, `1.`, `1)`) and bold/italic markers. */
+const LEADING_PREFIX = /^\s*(?:>\s*)*(?:(?:[-*+]|\d{1,3}[.)])\s+)?(?:\*\*|__|\*|_)?/u;
+const FENCE = /^\s*(```|~~~)/u;
+
+/** A handle with trailing sentence punctuation and closing emphasis set aside
+ *  (`aside**,` → `aside`). */
+function bareHandle(token: string): string {
+  let t = token;
+  for (let prev = ''; prev !== t; ) {
+    prev = t;
+    t = t.replace(MENTION_TRAIL, '').replace(/[*_]+$/u, '');
+  }
+  return t;
+}
+
+/**
+ * The participants a text ADDRESSES — `@name` at the very start of a line
+ * (multi-agent-chat R3.10). A mention inside a sentence ("@aside가 확인한 결과…")
+ * is talking ABOUT someone, not TO them, and does not count.
+ *
+ * Rules: the line may open with indentation, `>`, a list marker and `**`/`__`/
+ * `*`/`_`; then `@name` must follow, matching a name in `names` exactly (case-
+ * insensitive) once trailing punctuation and closing emphasis are set aside.
+ * Several handles in a row at the line start ("@a, @b 확인해 주세요") all count.
+ * Lines inside fenced code blocks (``` / ~~~) are skipped, and a handle inside
+ * inline code cannot be at the line start. The hub's handles
+ * (`HUB_MENTION_ALIASES` + `opts.hubNames`) are never returned. Ordered by first
+ * address, de-duplicated; a participant addressed twice keeps its first brief.
+ */
+export function parseLeadingMentions(
+  text: string,
+  names: readonly string[],
+  opts?: { hubNames?: readonly string[] },
+): LeadingMention[] {
+  if (typeof text !== 'string' || !text.includes('@')) return [];
+  const reserved = new Set(
+    [...HUB_MENTION_ALIASES, ...(opts?.hubNames ?? [])]
+      .filter((n): n is string => typeof n === 'string' && n.length > 0)
+      .map((n) => n.toLowerCase()),
+  );
+  const byLower = new Map<string, string>();
+  for (const n of names) {
+    if (typeof n === 'string' && n && !reserved.has(n.toLowerCase())) byLower.set(n.toLowerCase(), n);
+  }
+  if (byLower.size === 0) return [];
+  const lines = text.split(/\r?\n/u);
+  const out: LeadingMention[] = [];
+  let fenced = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (FENCE.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    let rest = line.replace(LEADING_PREFIX, '');
+    const hits: string[] = [];
+    for (;;) {
+      const m = /^@([^\s@`]+)/u.exec(rest);
+      if (!m) break;
+      const token = m[1]!;
+      const hit = byLower.get(token.toLowerCase()) ?? byLower.get(bareHandle(token).toLowerCase());
+      if (!hit) break;
+      hits.push(hit);
+      rest = rest.slice(m[0].length).replace(/^(?:\*\*|__|\*|_)?[\s,，、]*(?:(?:and|&|및|와|과)\s+)?/u, '');
+    }
+    if (hits.length === 0) continue;
+    const para: string[] = [];
+    for (let j = i; j < lines.length; j += 1) {
+      const l = lines[j]!;
+      if (j > i && (l.trim() === '' || FENCE.test(l))) break;
+      para.push(l);
+    }
+    const whole = para.join('\n').trim();
+    const brief =
+      whole.length > LEADING_MENTION_BRIEF_MAX ? `${whole.slice(0, LEADING_MENTION_BRIEF_MAX - 1)}…` : whole;
+    for (const name of hits) {
+      if (!out.some((o) => o.name === name)) out.push({ name, brief });
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // ROUTE — naby's structured decision (§8.2)
 // ---------------------------------------------------------------------------
@@ -774,7 +871,7 @@ export function routePrompt(input: RoutePromptInput): string {
       '## Where the round stands',
       `@${input.followup.speaker} has just answered (its words are the last recent message above).`,
       input.followup.asked
-        ? `It addressed you (@naby) directly, so it is waiting on you: choose "answer" to reply yourself, or "delegate" if another participant should take it.`
+        ? `It addressed you (@naby) directly, so it is waiting on you: choose "answer" to reply yourself, or "delegate" if another participant should take it. Do not choose "end": it asked you, so you must respond.`
         : 'It did not address you. Choose "end" unless the user clearly still needs something more; do not add a speech just to summarise.',
     );
   }
@@ -797,7 +894,11 @@ export function routePrompt(input: RoutePromptInput): string {
     }
   }
   if (input.caps.speechesLeft <= 1 || input.caps.roundTripsLeft <= 0) {
-    lines.push('The round is at its limit: choose "answer" or "end".');
+    lines.push(
+      input.followup?.asked
+        ? 'The round is at its limit: choose "answer".'
+        : 'The round is at its limit: choose "answer" or "end".',
+    );
   }
   lines.push(
     '',

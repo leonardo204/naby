@@ -36,6 +36,7 @@ export type {
   // Who spoke a row and how the round moved there (multi-agent-chat §8.1).
   MessageSpeaker,
   MessageRouting,
+  MessageRoutingBlocked,
   SubagentSpec,
   ToolCall,
   ToolOutput,
@@ -497,6 +498,8 @@ export {
   viewHistoryFor,
   matchKnowledgeKeywords,
   parseMentions,
+  parseLeadingMentions,
+  LEADING_MENTION_BRIEF_MAX,
   parseParticipantProfile,
   parseRouteDecision,
   routePrompt,
@@ -535,6 +538,7 @@ export {
   // Aliased: `RouteDecision` already names the model router's decision above.
   type RouteAction as ParticipantRouteAction,
   type RouteDecision as ParticipantRouteDecision,
+  type LeadingMention,
   type RoutePromptInput as ParticipantRoutePromptInput,
 } from './runtime/participants.js';
 
