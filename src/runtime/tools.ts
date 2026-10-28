@@ -827,6 +827,32 @@ export const sendMessageSchema: ToolSchema = {
   },
 };
 
+/**
+ * The two executors above are SPIKE fixtures, not product tools. `send_message`
+ * records into an in-memory outbox nobody reads and answers "sent to <to>" — in
+ * a real turn that is a fake success: the model "sent" work to a participant,
+ * was told it was delivered, and nothing happened. Real turns strip these with
+ * `withoutTestTools`; spikes keep them because the gate contract is asserted
+ * against exactly this outbound call. Suites that drive the real engine
+ * adapter (shell vitest, spike-02, spike-autonomy) opt back in with
+ * NABY_TEST_TOOLS=1.
+ */
+export const TEST_ONLY_TOOL_NAMES: readonly string[] = ['echo_note', 'send_message'];
+
+/** Remove the spike-only fixtures from a toolset before a real turn sees it. */
+export function withoutTestTools<T extends { toolSchemas: ToolSchema[]; executors: Record<string, Executor> }>(
+  toolset: T,
+): T {
+  if (process.env.NABY_TEST_TOOLS === '1') return toolset;
+  const executors = { ...toolset.executors };
+  for (const name of TEST_ONLY_TOOL_NAMES) delete executors[name];
+  return {
+    ...toolset,
+    toolSchemas: toolset.toolSchemas.filter((s) => !TEST_ONLY_TOOL_NAMES.includes(s.name)),
+    executors,
+  };
+}
+
 /** Assemble the full runtime tool set for a session: the schemas the engine
  * surfaces, and the executor map keyed by bare tool name. Both are
  * provider-independent — the SAME objects are handed to every engine.

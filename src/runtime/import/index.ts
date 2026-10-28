@@ -11,7 +11,7 @@ import { characterCardV2Adapter, characterCardV3Adapter } from './characterCard.
 import { claudeAgentMdAdapter } from './claudeAgentMd.js';
 import { nabySidecarAdapter } from './nabySidecar.js';
 import type { ImportEnv, ImportFormat, ImportInput, ImportResult, ParticipantAdapter } from './types.js';
-import { buildToolset, Outbox } from '../tools.js';
+import { buildToolset, Outbox, withoutTestTools } from '../tools.js';
 import { buildWorkspaceTools } from '../fs-tools.js';
 import { SKILL_LOAD_TOOL_NAME } from '../org-harness-turn.js';
 
@@ -79,7 +79,7 @@ export function importParticipant(
  * mode still removes them in plan mode).
  */
 export function runtimeToolNames(): string[] {
-  const builtin = buildToolset(new Outbox(), undefined, undefined, undefined, undefined, { cwd: '/' });
+  const builtin = withoutTestTools(buildToolset(new Outbox(), undefined, undefined, undefined, undefined, { cwd: '/' }));
   const workspace = buildWorkspaceTools({ cwd: '/', allowMutations: true });
   const names = [...builtin.toolSchemas, ...workspace.toolSchemas].map((t) => t.name);
   names.push(SKILL_LOAD_TOOL_NAME);

@@ -148,6 +148,8 @@ export {
 
 export {
   buildToolset,
+  withoutTestTools,
+  TEST_ONLY_TOOL_NAMES,
   echoNote,
   echoNoteSchema,
   makeSendMessage,

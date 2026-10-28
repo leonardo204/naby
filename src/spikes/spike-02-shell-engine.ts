@@ -42,6 +42,8 @@ import { join } from 'node:path';
 // override, not a test-only branch inside the adapter.
 const TMP_DIR = mkdtempSync(join(tmpdir(), 'naby-spike02-'));
 process.env.NABY_DB_PATH = join(TMP_DIR, 'app.db');
+// send_message is a spike fixture the real engine strips unless opted in.
+process.env.NABY_TEST_TOOLS = '1';
 
 import type {
   LanguageModelV4GenerateResult,
