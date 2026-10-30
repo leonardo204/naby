@@ -177,8 +177,9 @@ function resolveInside(
   if (!inside) {
     return {
       error:
-        `Refusing to touch "${value}" — it resolves outside the project directory. ` +
-        `Paths must stay within ${cwd}.`,
+        `"${value}" is outside the open project folder (${cwd}); naby can only read and edit files inside it. ` +
+        'Work inside the project, or tell the user to open the folder that contains this path as the project ' +
+        '("Open Project" / "프로젝트 열기" in the project sidebar).',
     };
   }
   return { path: abs };
@@ -776,7 +777,8 @@ export function makeRunCommand(cwd: string, opts: { envFor?: CommandEnvFor } = {
         done({
           content:
             `Command timed out after ${timeoutMs}ms and was killed:\n$ ${command}\n\n` +
-            `${out}${truncated ? '\n… output truncated.' : ''}`,
+            `${out}${truncated ? '\n… output truncated.' : ''}\n\n` +
+            'For long work, start it with naby_start_job instead of raising the timeout.',
           isError: true,
           data: { command, timedOut: true },
         });

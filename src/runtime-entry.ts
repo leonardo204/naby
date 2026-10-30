@@ -117,6 +117,11 @@ export {
 export {
   makeGate,
   phase1HarnessFloor,
+  readOnlyCause,
+  readOnlyDenyReason,
+  readOnlyTurnNotice,
+  type ReadOnlyCause,
+  type ReadOnlyDetail,
   scriptedPolicy,
   OBSERVATION_BUILTINS,
   DANGEROUS_BUILTINS,
@@ -933,6 +938,10 @@ export {
   type ModelResolver,
 } from './engines/ai-sdk-engine.js';
 
+// The stable `code` on an engine's error event, which the chat maps to
+// localized copy (engines/error-codes.ts).
+export { claudeSdkFailureCode, httpStatusOf, providerErrorCode } from './engines/error-codes.js';
+
 // The DEV engine (design §3.3). Exporting the class is safe even though the
 // Agent SDK is excluded from packaged builds: this module imports the SDK
 // LAZILY, by a runtime-resolved specifier, so nothing about it is bundled here
@@ -1098,6 +1107,7 @@ export {
   ENGINE_ENV_VAR,
   isChatgptOauthAvailable,
   noEngineMessage,
+  NO_ENGINE_DEV_HINT,
   preflightEngine,
   selectEngine,
   type CostBasis,

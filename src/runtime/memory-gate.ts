@@ -53,7 +53,11 @@ export function decideMemoryWrite(
   if (source === 'external' && (req.scope === 'user' || req.scope === 'org')) {
     return {
       behavior: 'deny',
-      reason: `external-origin content cannot write to '${req.scope}' scope (scope escalation blocked)`,
+      // Worded for the model that tried the write (it comes back as the tool
+      // error): what it cannot do, and the two ways forward.
+      reason:
+        'text that came from a web page or tool output cannot be saved as a lasting memory about the user. ' +
+        'Save it to the project scope, or ask the user to state it themselves.',
     };
   }
 
@@ -67,7 +71,9 @@ export function decideMemoryWrite(
   ) {
     return {
       behavior: 'deny',
-      reason: `a '${source}'-tier write may not overwrite a confirmed '${existing.provenance.source}'-tier row without user confirmation`,
+      reason:
+        `the user already confirmed a memory under "${req.key}", and naby cannot overwrite it. ` +
+        'Use a different key, or tell the user they can edit or delete it in Settings → Memory (설정 → 기억).',
     };
   }
 

@@ -332,7 +332,7 @@ async function engineTurn(engine: Engine, command: string, answer: 'allow' | 'de
   const aiRan = events
     .filter((e) => e.type === 'user')
     .map((e) => JSON.stringify(e))
-    .flatMap((s) => (s.match(/m710-[a-z-]+/g) ?? []).filter(() => !s.includes('Denied')));
+    .flatMap((s) => (s.match(/m710-[a-z-]+/g) ?? []).filter(() => !s.includes('Not run:')));
   return {
     prompts,
     ran: engine === 'claude' ? claudeRan.map((c) => c.replace(/^echo /, '')) : [...new Set(aiRan)],

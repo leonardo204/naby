@@ -57,6 +57,7 @@ import {
   truncationNoticeMessage,
 } from '../runtime/compaction.js';
 import { contextWindowFor, FALLBACK_CONTEXT_WINDOW } from '../runtime/context-window.js';
+import { providerErrorCode } from './error-codes.js';
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -597,7 +598,9 @@ export class AiSdkEngine implements Engine {
         yield {
           kind: 'error',
           message: msg,
-          code: 'ENGINE_THREW',
+          // 401/403 → the key was rejected, 429 → rate limited, else ENGINE_THREW
+          // (error-codes.ts); the chat keys its copy on this.
+          code: providerErrorCode(e),
         };
         yield { kind: 'result', ok: false, usage, ...gaugeFields() };
         return;
@@ -626,6 +629,9 @@ export class AiSdkEngine implements Engine {
       diagnostics.sdkToolResultCounts.push(sdkToolResults);
       diagnostics.sdkToolMessageCounts.push(sdkToolMessages);
       if (sdkToolResults > 0 || sdkToolMessages > 0) {
+        console.error(
+          `[ai-sdk-engine] REFUSED: the SDK produced ${sdkToolResults} tool result(s) and ${sdkToolMessages} tool message(s) on its own`,
+        );
         yield {
           kind: 'error',
           message:
@@ -689,7 +695,7 @@ export class AiSdkEngine implements Engine {
             toolName: rawCall.toolName,
             output: {
               type: 'error-text',
-              value: `Denied by policy gate: ${decision.reason}`,
+              value: `Not run: ${decision.reason}`,
             },
           });
           continue;
@@ -706,8 +712,12 @@ export class AiSdkEngine implements Engine {
             type: 'tool-result',
             toolCallId: call.toolCallId,
             toolName: rawCall.toolName,
-            output: { type: 'error-text', value: `no executor for ${name}` },
+            output: {
+              type: 'error-text',
+              value: `${name} did not run because of an internal error in naby. Do not retry it; tell the user an internal error stopped this tool and they can send the request again.`,
+            },
           });
+          console.error(`[ai-sdk-engine] no executor for ${name}`);
           yield {
             kind: 'error',
             message: `no executor for ${name}`,

@@ -168,7 +168,9 @@ export function makeFetchUrl(fetchImpl: typeof globalThis.fetch = globalThis.fet
     }
     if (isBlockedFetchHost(url.hostname)) {
       return {
-        content: `Refusing to fetch "${url.hostname}" — localhost and private-network addresses are not allowed.`,
+        content:
+          `Refusing to fetch "${url.hostname}" — localhost and private-network addresses are not allowed. ` +
+          'If this turn can run commands, use run_command (for example curl) to read it; otherwise ask the user to paste the content.',
         isError: true,
       };
     }
@@ -516,9 +518,14 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
         data: { id: saved.id, key: saved.key, scope: saved.scope, status: saved.status },
       };
     } catch (e) {
-      // A gate deny (e.g. a lower tier trying to overwrite a confirmed row).
+      // A gate deny (e.g. a lower tier trying to overwrite a confirmed row). The
+      // store's `memory write denied:` prefix is for logs; the model gets the
+      // gate's own sentence, which already says what to do instead.
+      const why = (e instanceof Error ? e.message : String(e))
+        .replace(/^memory write denied: /, '')
+        .replace(/\.$/, '');
       return {
-        content: `Nothing was remembered: ${e instanceof Error ? e.message : String(e)}.`,
+        content: `Nothing was remembered: ${why}.`,
         isError: true,
       };
     }

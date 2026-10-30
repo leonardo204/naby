@@ -621,7 +621,7 @@ async function main(): Promise<void> {
   record(
     checks,
     '(h5) a consequential tool is REFUSED at the egg stage, with a reason the model can act on',
-    toolResults.some((r) => r.includes('Blocked by the stage contract')) &&
+    toolResults.some((r) => r.includes("Not allowed at this agent's growth stage")) &&
       toolResults.some((r) => r.includes('send_message')),
     `tool results: ${JSON.stringify(toolResults.map((r) => r.slice(0, 70)))}`,
   );

@@ -68,7 +68,7 @@ async function main(tmpDir: string): Promise<boolean> {
   record(
     checks,
     '(a) every path argument is contained inside the project',
-    escapes.every((r) => r.isError === true && /outside the project/.test(r.content)),
+    escapes.every((r) => r.isError === true && /outside the open project folder/.test(r.content)),
     escapes.map((r) => `${r.isError ? 'refused' : 'ALLOWED'}: ${r.content.slice(0, 60)}`).join(' | '),
   );
 

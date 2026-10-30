@@ -103,6 +103,7 @@ import {
 // ids, and one question with two answers is how the UI ends up believing the
 // wrong one. Pure regex, so it drags nothing else in.
 import { TIER_SUFFIX } from '../runtime/context-window.js';
+import { claudeSdkFailureCode } from './error-codes.js';
 
 // What may be echoed out of a harness message. Both are the "rule 1" guard in
 // regex form: a LABEL is a short type name we are willing to render, an ID is an
@@ -1955,6 +1956,7 @@ export class ClaudeAgentSdkEngine implements Engine {
           const approved = dequeue(ts.name);
           if (!approved) {
             // Invariant 3: no auto-execution path may bypass the gate.
+            console.error(`[engine:claude-agent-sdk] REFUSED: ${ts.name} reached the executor without a gate decision`);
             channel.push({
               kind: 'error',
               message: `REFUSED: ${ts.name} reached the executor without a gate decision`,
@@ -1964,7 +1966,8 @@ export class ClaudeAgentSdkEngine implements Engine {
               content: [
                 {
                   type: 'text' as const,
-                  text: `REFUSED: ${ts.name} was not gated`,
+                  // The model gets what to do; the mechanism is in the log above.
+                  text: `${ts.name} did not run because of an internal error in naby. Do not retry it; tell the user an internal error stopped this tool and they can send the request again.`,
                 },
               ],
               isError: true,
@@ -1972,9 +1975,10 @@ export class ClaudeAgentSdkEngine implements Engine {
           }
           const executor = input.executors[ts.name];
           if (!executor) {
+            console.error(`[engine:claude-agent-sdk] no executor for ${ts.name}`);
             return {
               content: [
-                { type: 'text' as const, text: `no executor for ${ts.name}` },
+                { type: 'text' as const, text: `${ts.name} did not run because of an internal error in naby. Do not retry it; tell the user an internal error stopped this tool and they can send the request again.` },
               ],
               isError: true,
             };
@@ -2469,7 +2473,9 @@ export class ClaudeAgentSdkEngine implements Engine {
         channel.push({
           kind: 'error',
           message,
-          code: 'ENGINE_THREW',
+          // Sign-in / usage-limit failures get the SDK's own codes so the chat
+          // can say what to do (error-codes.ts); anything else is ENGINE_THREW.
+          code: claudeSdkFailureCode(`${message}\n${tail}`),
         });
       } finally {
         closeInput();

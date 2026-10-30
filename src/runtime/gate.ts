@@ -147,6 +147,73 @@ export const DANGEROUS_BUILTINS: readonly string[] = [
 ];
 
 /**
+ * WHY A TURN IS READ-ONLY — the switch the user flipped. The floor below is the
+ * same policy either way; what differs is what the user has to do to lift it,
+ * and a refusal that does not say so leaves naby guessing (2026-10-30 VOC: the
+ * old reason talked about "Phase 1 observation mode" and "the Phase 2 approval
+ * policy", so naby told the user it did not know which setting blocked it).
+ *
+ *   plan-mode          the chat tab's "Plan mode" checkbox (wins: it is the
+ *                      more recent, more specific choice)
+ *   allow-changes-off  the app-wide "Allow changes" switch is off
+ *   participant-plan   a participant's own "Permission mode" is "Plan
+ *                      (read-only)" in its editor — the chat itself is not
+ *                      read-only. Never returned by `readOnlyCause` (that
+ *                      answers for naby's own turn); the participant gate passes
+ *                      it, with the participant's name, to `phase1HarnessFloor`.
+ */
+export type ReadOnlyCause = 'plan-mode' | 'allow-changes-off' | 'participant-plan';
+
+/** Extra detail a remedy may need. `participant` is the handle (no `@`). */
+export interface ReadOnlyDetail {
+  participant?: string;
+}
+
+export function readOnlyCause(input: { planMode: boolean; allowChanges: boolean }): ReadOnlyCause | undefined {
+  if (input.planMode) return 'plan-mode';
+  if (!input.allowChanges) return 'allow-changes-off';
+  return undefined;
+}
+
+/** How to lift the read-only mode, in the UI's own words (en + ko labels). */
+function readOnlyRemedy(cause: ReadOnlyCause | undefined, detail: ReadOnlyDetail = {}): string {
+  switch (cause) {
+    case 'participant-plan': {
+      const who = detail.participant ? `@${detail.participant}` : 'This participant';
+      return (
+        `${who} is set to read-only: its "Permission mode" is "Plan (read-only)" (권한 모드: "계획 (읽기 전용)"). ` +
+        `To let it edit files and run commands, the user changes that to "Default" in Settings → Naby → Participants → ${who} (설정 → 나비 → 참가자). ` +
+        'Or the user can ask naby itself, without the @ mention, to make the change.'
+      );
+    }
+    case 'plan-mode':
+      return 'Plan mode is on for this chat tab (read-only: plan first, no edits). To let naby edit files and run commands, the user unchecks "Plan mode" (플랜 모드) in the chat header and sends the request again.';
+    case 'allow-changes-off':
+      return 'The "Allow changes" switch (변경 허용) is off, so the app is read-only. To let naby edit files and run commands, the user turns "Allow changes" back on in the chat header and sends the request again.';
+    default:
+      return 'This turn is read-only.';
+  }
+}
+
+/** The floor's refusal of a mutating / executing tool. */
+export function readOnlyDenyReason(toolName: string, cause?: ReadOnlyCause, detail: ReadOnlyDetail = {}): string {
+  return `${toolName} is blocked: this turn cannot edit files or run commands. ${readOnlyRemedy(cause, detail)}`;
+}
+
+/**
+ * The system-prompt line for a read-only turn, so naby knows BEFORE it tries
+ * a write — and, when the user asks for a change, says which switch to flip
+ * instead of attempting it and reporting a refusal it cannot explain.
+ */
+export function readOnlyTurnNotice(cause: ReadOnlyCause): string {
+  return [
+    '## This turn is read-only',
+    readOnlyRemedy(cause),
+    'You can still read, search and plan. If the request needs a file change or a command, say so plainly and tell the user exactly which switch to change — do not attempt the change and do not look for a way around the block.',
+  ].join('\n');
+}
+
+/**
  * The Phase-1 floor. Allows exactly: our own runtime tools (whose bare names the
  * caller supplies, since only the composition root knows them) plus the
  * read-only / delegation / skill built-ins above. Everything else — the
@@ -156,7 +223,10 @@ export const DANGEROUS_BUILTINS: readonly string[] = [
  *   (from the toolset the runtime builds). Always allowed: they are our own
  *   executors, gated for real in Phase 2.
  */
-export function phase1HarnessFloor(runtimeToolNames: readonly string[] = []): DecisionPolicy {
+export function phase1HarnessFloor(
+  runtimeToolNames: readonly string[] = [],
+  opts: { cause?: ReadOnlyCause } & ReadOnlyDetail = {},
+): DecisionPolicy {
   // OUR OWN TOOLS ARE NOT AUTOMATICALLY SAFE.
   //
   // The allowance for `runtimeToolNames` reads as "they are our executors, we
@@ -184,14 +254,16 @@ export function phase1HarnessFloor(runtimeToolNames: readonly string[] = []): De
     if (dangerous.has(call.toolName)) {
       return {
         behavior: 'deny',
-        reason: `${call.toolName} is not permitted in Phase 1 observation mode (mutation/exec blocked until the Phase 2 approval policy exists)`,
+        reason: readOnlyDenyReason(call.toolName, opts.cause, opts),
       };
     }
     if (allow.has(call.toolName)) return { behavior: 'allow' };
     // Deny-by-default: an unrecognised tool is refused rather than run ungated.
     return {
       behavior: 'deny',
-      reason: `${call.toolName} is not on the Phase 1 allowlist`,
+      reason: opts.cause
+        ? `${call.toolName} is not available while this turn is read-only. ${readOnlyRemedy(opts.cause, opts)}`
+        : `${call.toolName} is not available on this turn. Use the tools you were given.`,
     };
   };
 }

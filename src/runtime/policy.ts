@@ -221,7 +221,12 @@ export function realPolicy(deps: {
     if (effect === 'allow') return { behavior: 'allow' };
     if (effect === 'deny') {
       // Safety (unclassified ⇒ safety): the user said this tool must not run.
-      return { behavior: 'deny', reason: `blocked by your policy rule for '${name}'` };
+      return {
+        behavior: 'deny',
+        reason:
+          `${name} is blocked by a rule the user set in Settings → Permissions (설정 → 권한). ` +
+          'Do not retry it or use another tool to do the same thing. Tell the user, and say they can remove or change that rule.',
+      };
     }
     if (effect === 'ask' && deps.requestApproval) {
       return deps.requestApproval(call);

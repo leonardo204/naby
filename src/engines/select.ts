@@ -148,14 +148,20 @@ export type SelectEngineOptions = ResolveOptions & {
  * Code sign-in. It then said "stays closed until the developer-mode key is
  * entered", which stopped being true when the key door was removed
  * (2026-09-03) — so the one condition left is the sign-in itself.
+ *
+ * NO ENV VAR IN IT. It used to end with "Set NABY_ENGINE=dev-claude to force
+ * it", which the user reads in the chat and cannot act on. The developer's
+ * override is `NO_ENGINE_DEV_HINT`, for logs only.
  */
+export const NO_ENGINE_DEV_HINT = `Set ${ENGINE_ENV_VAR}=dev-claude to force the Claude subscription engine.`;
+
 export function noEngineMessage(): string {
   return (
     'Naby has no way to answer yet. ' +
     'Open Settings (gear icon, bottom left) → "AI provider", pick your provider, paste its API key and press Save. ' +
     "The key is stored in this computer's secure credential store and is only ever sent to the provider you chose. " +
     '(The Claude subscription option answers with the Claude Code sign-in on this computer instead of a key, ' +
-    `so it needs Claude Code installed and signed in. Set ${ENGINE_ENV_VAR}=dev-claude to force it.)`
+    'so it needs Claude Code installed and signed in.)'
   );
 }
 

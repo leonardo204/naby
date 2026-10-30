@@ -1367,7 +1367,7 @@ function checkParticipantToolRowsSkipped(): void {
     { role: 'user', content: '@translator please run the build' },
     { role: 'user', content: 'Run the build.', speaker: { agentId: 'naby', name: 'naby' }, routing: { kind: 'delegate', targetAgentId: 'p-translator' } },
     { role: 'assistant', content: '', speaker: translator, toolCalls: [{ toolCallId: 'p-1', toolName: 'Bash', input: { command: 'npm run build' } }] },
-    { role: 'tool', toolCallId: 'p-1', toolName: 'Bash', output: { content: 'Denied by policy gate: participant @translator is limited to its allowed tools', isError: true } },
+    { role: 'tool', toolCallId: 'p-1', toolName: 'Bash', output: { content: 'Not run: @translator cannot use Bash: its tools were fixed when it was imported (Read).', isError: true } },
     { role: 'assistant', content: 'I am not allowed to run that.', speaker: translator },
     { role: 'user', content: 'translator, that is wrong — you should have asked first' },
     { role: 'assistant', content: '', toolCalls: [{ toolCallId: 'n-1', toolName: 'Bash', input: { command: 'npm run build' } }] },

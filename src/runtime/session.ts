@@ -926,7 +926,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
         });
         if (ev.decision === 'deny') {
           closeCall(ev.toolCallId, {
-            content: `Denied by policy gate: ${ev.reason ?? 'no reason given'}`,
+            content: `Not run: ${ev.reason ?? 'no reason given'}`,
             isError: true,
           });
         }

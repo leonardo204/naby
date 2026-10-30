@@ -325,7 +325,7 @@ async function main(): Promise<void> {
   const afterDeny = r3.prompts[1] ? toolResultsOf(r3.prompts[1]) : '';
   record(
     '(d) a tool OUTSIDE toolRefs is denied at the gate with the agent\'s reason',
-    afterDeny.includes('agent @scout is limited to its allowed tools'),
+    afterDeny.includes('@scout cannot use') && afterDeny.includes('fixed when it was imported'),
     `tool result after send_message: ${JSON.stringify(afterDeny.slice(0, 160))}`,
   );
   record(

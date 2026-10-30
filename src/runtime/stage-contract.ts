@@ -89,6 +89,15 @@ export function stageContract(stage: GrowthStage): StageContract {
   }
 }
 
+/** The stage names the user sees in the Korean UI (ko.json `growth.stage.*`),
+ *  so the model can quote the one the user knows. */
+const STAGE_NAME_KO: Record<GrowthStage, string> = {
+  egg: '알',
+  larva: '애벌레',
+  pupa: '번데기',
+  butterfly: '나비',
+};
+
 /**
  * Why this call is not allowed at this stage, in the words the MODEL reads, or
  * undefined when the contract permits it.
@@ -111,21 +120,24 @@ export function stageRefusalReason(input: {
   signals?: ToolConsequenceSignals;
 }): string | undefined {
   if (!isConsequentialTool(input.toolName, input.signals)) return undefined;
+  const stage = `${input.stage} (${STAGE_NAME_KO[input.stage]})`;
   if (!input.contract.allowConsequential) {
     return (
-      `Blocked by the stage contract: \`${input.toolName}\` changes something outside this ` +
-      `conversation, and at the ${input.stage} stage this agent may only read, ask and propose. ` +
+      `Not allowed at this agent's growth stage: \`${input.toolName}\` changes something outside this ` +
+      `conversation, and at the ${stage} stage this agent may only read, ask and propose. ` +
       `Do not retry it and do not look for another tool that does the same thing. Say plainly ` +
       `what you cannot do, do the part you CAN do (a draft, a plan, the exact commands for the ` +
-      `user to run), and say what is still needed to reach the next stage.`
+      `user to run), and say what is still needed to reach the next stage — or tell the user that ` +
+      `naby itself (without @agent) can do it now.`
     );
   }
   if (!input.contract.allowIrreversible && !isReversibleAction(input.toolName)) {
     return (
-      `Blocked by the stage contract: \`${input.toolName}\` cannot be undone, and at the ` +
-      `${input.stage} stage this agent may only take actions that can be rolled back. Do not ` +
+      `Not allowed at this agent's growth stage: \`${input.toolName}\` cannot be undone, and at the ` +
+      `${stage} stage this agent may only take actions that can be rolled back. Do not ` +
       `retry it. Say what you cannot do, offer the reversible way of doing it (or the exact ` +
-      `command for the user to run themselves), and say what is still needed to reach the next stage.`
+      `command for the user to run themselves), and say what is still needed to reach the next stage — ` +
+      `or tell the user that naby itself (without @agent) can do it now.`
     );
   }
   return undefined;

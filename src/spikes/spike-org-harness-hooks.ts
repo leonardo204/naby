@@ -717,7 +717,7 @@ async function endToEndChecks(): Promise<void> {
     JSON.stringify(approvals),
   );
   const ran = t1.events.some(
-    (e) => e.type === 'user' && JSON.stringify(e).includes('hi') && !JSON.stringify(e).includes('Denied by policy gate'),
+    (e) => e.type === 'user' && JSON.stringify(e).includes('hi') && !JSON.stringify(e).includes('Not run:'),
   );
   record('e2e ask: once allowed, the command runs', ran && existsSync(join(PROJECT, 'a.txt')));
   const systemPrompts = model1.doGenerateCalls.map((c) => JSON.stringify(c.prompt));
