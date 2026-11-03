@@ -1,11 +1,11 @@
 ---
 id: cross-session-messaging
 type: design
-version: 0.2.0
+version: 0.3.1
 status: implemented
 scope: 한 프로젝트에 열린 세션 탭 사이에 나비가 요청을 보내고 답을 받는 기능. 보내는 도구와 목록 도구, 받는 세션의 턴 실행과 대기, 답을 보낸 세션에 새 턴으로 돌려주는 경로, 두 탭의 표시, 반복 방지, 활동 로그를 다룬다. 참가자 위임(multi-agent-chat)과 서브에이전트 위임(subagent-delegation)은 다루지 않는다.
-related: [multi-agent-chat, subagent-delegation, session-context-management, telegram-chat, naby-activity-log]
-updated: 2026-10-19
+related: [cross-project-context, multi-agent-chat, subagent-delegation, session-context-management, telegram-chat, naby-activity-log]
+updated: 2026-11-03
 ---
 
 # 세션 간 요청 주고받기
@@ -29,7 +29,7 @@ updated: 2026-10-19
 - **R3 받는 쪽 턴.** 대상 세션에 새 턴이 시작되고 그 탭에서 과정이 보인다. 대상이 실행 중이면 끝날 때까지 기다렸다 시작한다.
 - **R4 답 돌려주기.** 받는 쪽 턴이 끝나면 그 답이 보낸 세션에 새 턴으로 들어간다. 보낸 쪽 나비는 답을 보고 원래 작업을 잇는다. 사용자가 답을 요구하지 않은 보내기(`expectReply: false`)는 돌려주지 않는다.
 - **R5 표시.** 받는 탭에는 "세션 ‹제목›에서 온 요청" 표시가, 보낸 탭에는 "세션 ‹제목›의 답" 표시가 붙는다. 둘 다 펼치면 원문을 본다.
-- **R6 범위.** 대상은 같은 프로젝트(cwd)의 세션뿐이다. 다른 프로젝트 세션 id를 주면 거절한다.
+- **R6 범위.** 대상은 같은 프로젝트(cwd)의 세션뿐이다. 다른 프로젝트 세션 id를 주면 거절한다. → 0.3.0부터 [cross-project-context](cross-project-context.md) §2·§3이 이 규칙을 넓힌다(다른 프로젝트 탭은 사용자 승인 후. 0.2.0부터 같은 그룹도 승인). 그 기능이 꺼져 있으면 이 규칙대로 동작한다.
 - **R7 반복 방지.** 다른 세션의 요청으로 시작된 턴과 답을 돌려받아 시작된 턴에는 보내기 도구를 주지 않는다. A→B→A로 도는 길이 없다.
 - **R8 실패.** 대상이 30초 안에 비지 않으면 제한 재시도를 이어가고, 시작조차 못 하면 보낸 세션에 "전달 실패"를 넣는다. 받는 쪽 턴이 오류로 끝나거나 30분 안에 끝나지 않으면 "응답 실패/시간 초과"를 넣는다. 대상 탭이 닫히면 "대상 세션이 닫힘"을, 보낸 탭이 닫혔으면 답을 버린다.
 - **R9 기록.** 보내기·받기·돌려주기·실패를 활동 로그(`cross_session_message`)에 남긴다.
@@ -111,6 +111,9 @@ updated: 2026-10-19
 - 앱을 재시작하면 진행 중이던 요청은 알림 없이 사라진다(§3.2의 1차 제약).
 
 ## 변경 이력
+
+- 0.3.1 (2026-11-03) — R6 역참조를 cross-project-context 0.2.0(같은 그룹도 승인)에 맞췄다.
+- 0.3.0 (2026-11-03) — R6을 cross-project-context로 넓힌다는 역참조를 달았다.
 
 - 0.1.0 (2026-10-19) — 첫 설계.
 - 0.2.0 (2026-10-19) — 1차 구현. §5 구현 상태를 채웠다.

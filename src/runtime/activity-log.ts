@@ -181,6 +181,12 @@ export type ActivityKind =
   // answer reached A), `dropped` (the sender's tab was gone, or A stayed busy)
   // and `failed` (with the reason).
   | 'cross_session_message'
+  // -- looking into another project (cross-project-context R25) --------------
+  //
+  // One record per access decision: target cwd, feature (`read` / `send` /
+  // `list`), op, the verdict, and — when the user was asked — what they
+  // answered. Never the content that was read.
+  | 'cross_project_access'
   // -- accounting -----------------------------------------------------------
   | 'usage';
 

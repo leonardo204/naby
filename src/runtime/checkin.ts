@@ -32,6 +32,7 @@ import { DANGEROUS_BUILTINS, OBSERVATION_BUILTINS } from './gate.js';
 import { MUTATING_TOOLS, READONLY_TOOLS } from './fs-tools.js';
 import { JOB_EXECUTION_TOOLS, JOB_OBSERVATION_TOOLS } from './job-tools.js';
 import { LIST_SESSIONS_TOOL_NAME, SEND_TO_SESSION_TOOL_NAME } from './cross-session.js';
+import { CROSS_PROJECT_TOOL_NAMES } from './cross-project.js';
 
 // ---------------------------------------------------------------------------
 // Which actions are consequential enough to be scored
@@ -92,6 +93,9 @@ export const OBSERVATION_RUNTIME_TOOLS: readonly string[] = [
   ...JOB_OBSERVATION_TOOLS,
   // Listing the project's other sessions (`cross-session.ts`) only reads.
   LIST_SESSIONS_TOOL_NAME,
+  // Listing and reading other projects (`cross-project.ts`) — no op of
+  // `naby_read_project` writes or runs anything (cross-project-context R12, R15).
+  ...CROSS_PROJECT_TOOL_NAMES,
   // The runtime's own non-mutating tools. `naby_add_mcp` only files a PROPOSED
   // registry entry (the user approves before anything loads), `naby_delegate`
   // spawns a subagent whose own calls are each gated and counted separately, and
