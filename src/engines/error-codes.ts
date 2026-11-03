@@ -56,9 +56,50 @@ export function providerErrorCode(e: unknown): 'PROVIDER_AUTH_FAILED' | 'PROVIDE
  */
 export function claudeSdkFailureCode(message: string): 'authentication_failed' | 'rate_limit' | 'ENGINE_THREW' {
   const status = httpStatusOf(message);
-  if (status === 401 || status === 403 || /\b(?:authentication_failed|not logged in|please run \/login|invalid api key|oauth token has expired)\b/i.test(message)) {
+  if (status === 401 || status === 403 || isClaudeSignInFailureText(message)) {
     return 'authentication_failed';
   }
   if (status === 429 || /\b(?:rate_limit|usage limit)\b/i.test(message)) return 'rate_limit';
   return 'ENGINE_THREW';
+}
+
+/**
+ * Whether a Claude CLI message says the SIGN-IN is the problem.
+ *
+ * The CLI's wording has more than one form. A refresh that failed reads
+ * "Failed to authenticate: OAuth session expired and could not be refreshed"
+ * (reported 2026-11-03), and matched none of the original phrases — so the
+ * chat showed the English text as "error while the AI was answering" instead of
+ * telling the user to sign in again (specs/claude-relogin-guide.md R1).
+ * "could not be refreshed" counts only beside oauth/token: on its own it could
+ * describe anything.
+ */
+export function isClaudeSignInFailureText(message: string): boolean {
+  if (
+    /\b(?:authentication_failed|not logged in|please run \/login|invalid api key|failed to authenticate|oauth session expired|oauth token (?:has )?expired|token expired)\b/i.test(
+      message,
+    )
+  ) {
+    return true;
+  }
+  return /\b(?:oauth|token)\b[\s\S]*\bcould not be refreshed\b|\bcould not be refreshed\b[\s\S]*\b(?:oauth|token)\b/i.test(message);
+}
+
+/** The model id the Claude CLI puts on an assistant message it wrote itself
+ *  rather than one a model produced — how its errors arrive in the stream. */
+export const CLAUDE_SYNTHETIC_MODEL = '<synthetic>';
+
+/**
+ * Whether an Agent SDK assistant message is the CLI reporting a sign-in failure
+ * in the voice of the assistant.
+ *
+ * The CLI sends its error twice: as a thrown result, and as an assistant message
+ * (model `<synthetic>`) whose text is the same English sentence. Rendered as a
+ * reply, that sentence sat in the bubble as if the assistant had said it. The
+ * engine turns such a message into one `authentication_failed` error event
+ * instead (specs/claude-relogin-guide.md R2). Only the synthetic model counts:
+ * a real answer that happens to discuss OAuth must never be swallowed.
+ */
+export function isSyntheticClaudeSignInFailure(model: unknown, text: string): boolean {
+  return model === CLAUDE_SYNTHETIC_MODEL && text.trim().length > 0 && isClaudeSignInFailureText(text);
 }

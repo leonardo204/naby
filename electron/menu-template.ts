@@ -27,7 +27,15 @@
 //      but F5 was never a menu item, so the key listener in reload-guard.ts is
 //      the other half.
 //
-// Everything else stays on Electron's own roles: the macOS app menu (whose
+//   3. SETTINGS IS Cmd+, ON macOS AND Ctrl+, ELSEWHERE. A menu accelerator
+//      fires wherever focus is — the sidebar, a parent-window modal, or inside a
+//      project iframe, whose keydowns never reach the parent window — so the
+//      key is bound here rather than in the renderer. macOS puts it in the app
+//      menu, which is why that menu is spelled out instead of `role: 'appMenu'`;
+//      Windows/Linux put it under File. The click hands off to `onOpenSettings`
+//      (menu.ts sends it to the renderer), keeping this file Electron-free.
+//
+// Everything else stays on Electron's own roles: the macOS app menu items (whose
 // Cmd+Q is confirmed in main.ts's before-quit, not here), edit, window, and the
 // devtools/zoom/fullscreen items of the View menu — devtools explicitly
 // included, because "no reload" must never turn into "no console".
@@ -43,15 +51,42 @@ export type MenuTemplateOptions = {
    * template stays pure and both branches are testable on any platform.
    */
   allowReload: boolean;
+  /** Settings → open the app Settings modal. See decision 3 in the header. */
+  onOpenSettings?: () => void;
 };
 
 export function buildAppMenuTemplate(opts: MenuTemplateOptions): MenuItemConstructorOptions[] {
-  const { isMac, allowReload } = opts;
+  const { isMac, allowReload, onOpenSettings } = opts;
+  const settingsItem: MenuItemConstructorOptions = {
+    label: isMac ? 'Settings…' : 'Settings',
+    accelerator: 'CmdOrCtrl+,',
+    click: () => onOpenSettings?.(),
+  };
 
   return [
-    // macOS app menu: About / Services / Hide / Quit (Cmd+Q). The quit item
-    // triggers app.quit(), which main.ts intercepts for confirmation.
-    ...(isMac ? [{ role: 'appMenu' as const }] : []),
+    // macOS app menu: what `role: 'appMenu'` gives, plus Settings… (Cmd+,)
+    // in its standard place under About. The quit item triggers app.quit(),
+    // which main.ts intercepts for confirmation.
+    ...(isMac
+      ? [
+          {
+            role: 'appMenu' as const,
+            submenu: [
+              { role: 'about' as const },
+              { type: 'separator' as const },
+              settingsItem,
+              { type: 'separator' as const },
+              { role: 'services' as const },
+              { type: 'separator' as const },
+              { role: 'hide' as const },
+              { role: 'hideOthers' as const },
+              { role: 'unhide' as const },
+              { type: 'separator' as const },
+              { role: 'quit' as const },
+            ],
+          },
+        ]
+      : []),
     {
       label: 'File',
       submenu: [
@@ -61,9 +96,17 @@ export function buildAppMenuTemplate(opts: MenuTemplateOptions): MenuItemConstru
           label: isMac ? 'Close Window' : 'Close',
           click: (_item, win) => win?.close(),
         },
-        // Windows/Linux keep quit under File (their menu bar is hidden but the
-        // items stay reachable via Alt). macOS quits from the app menu above.
-        ...(isMac ? [] : [{ type: 'separator' as const }, { role: 'quit' as const }]),
+        // Windows/Linux keep Settings and quit under File (their menu bar is
+        // hidden but the items stay reachable via Alt, and Ctrl+, still fires).
+        // macOS has both in the app menu above.
+        ...(isMac
+          ? []
+          : [
+              { type: 'separator' as const },
+              settingsItem,
+              { type: 'separator' as const },
+              { role: 'quit' as const },
+            ]),
       ],
     },
     { role: 'editMenu' },

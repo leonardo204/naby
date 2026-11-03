@@ -231,6 +231,26 @@ function main(): void {
     );
   }
 
+  // -- (g2) Settings is Cmd+, (macOS app menu) / Ctrl+, (File menu) ---------
+  for (const isMac of [true, false]) {
+    let opened = 0;
+    const template = buildAppMenuTemplate({ isMac, allowReload: false, onOpenSettings: () => { opened += 1; } });
+    const host = isMac ? template[0] : template.find((i) => i.label === 'File');
+    const items = Array.isArray(host?.submenu) ? host.submenu : [];
+    const settings = items.find((i) => i.accelerator === 'CmdOrCtrl+,');
+    (settings?.click as (() => void) | undefined)?.();
+    record(
+      `(g2) ${isMac ? 'macOS app menu' : 'Windows/Linux File menu'} has Settings on CmdOrCtrl+, and it opens Settings`,
+      !!settings && opened === 1,
+      `label=${String(settings?.label)} opened=${opened}`,
+    );
+  }
+  record(
+    '(g2) the macOS app menu keeps About / Hide / Quit',
+    ['about', 'hide', 'quit'].every((r) => rolesIn(buildAppMenuTemplate({ isMac: true, allowReload: false }).slice(0, 1)).includes(r)),
+    'about/hide/quit present',
+  );
+
   // -- (h) the listener actually prevents the default ----------------------
   {
     type Listener = (event: { preventDefault(): void }, input: ReloadKeyInput) => void;

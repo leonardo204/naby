@@ -406,6 +406,23 @@ const notifications = {
     }),
 };
 
+/**
+ * Application-menu commands the renderer carries out. Today only Settings
+ * (Cmd/Ctrl+,, bound in menu-template.ts so it fires wherever focus is).
+ */
+const appMenu = {
+  /** Subscribe to the Settings menu item. Returns an unsubscriber. */
+  onOpenSettings: (fn: () => void): (() => void) => {
+    const wrapped = (): void => {
+      fn();
+    };
+    ipcRenderer.on('app-menu:open-settings', wrapped);
+    return () => {
+      ipcRenderer.off('app-menu:open-settings', wrapped);
+    };
+  },
+};
+
 contextBridge.exposeInMainWorld('naby', {
   /** Per-launch session token (design §5.4). Required on every request. */
   sessionToken,
@@ -436,6 +453,8 @@ contextBridge.exposeInMainWorld('naby', {
   /** OS notifications, from a fixed catalogue. The renderer picks the message
    *  and supplies one bounded label; it cannot compose the text. */
   notifications,
+  /** Application-menu commands (Settings, Cmd/Ctrl+,). */
+  appMenu,
   /** Resolve a File dropped from the OS (Finder/Explorer) to its absolute path.
    *  `File.path` was removed in Electron 32, so this is the only supported way to
    *  recover the on-disk path of a dragged file — used to insert an absolute path

@@ -103,7 +103,7 @@ import {
 // ids, and one question with two answers is how the UI ends up believing the
 // wrong one. Pure regex, so it drags nothing else in.
 import { TIER_SUFFIX } from '../runtime/context-window.js';
-import { claudeSdkFailureCode } from './error-codes.js';
+import { claudeSdkFailureCode, isSyntheticClaudeSignInFailure } from './error-codes.js';
 
 // What may be echoed out of a harness message. Both are the "rule 1" guard in
 // regex form: a LABEL is a short type name we are willing to render, an ID is an
@@ -2328,7 +2328,15 @@ export class ClaudeAgentSdkEngine implements Engine {
             if (thought && agentToolCallId === undefined) {
               channel.push({ kind: 'thinking', text: thought });
             }
-            if (text) {
+            // THE CLI'S OWN SIGN-IN ERROR, DRESSED AS A REPLY. An expired sign-in
+            // arrives as an assistant message from model `<synthetic>` whose text
+            // is the English error — which used to land in the bubble as if the
+            // assistant had answered with it. It becomes the one error event the
+            // chat turns into the re-login card; a throw that follows in the same
+            // turn replaces it (the last error wins), so the user still sees one
+            // notice (specs/claude-relogin-guide.md R2).
+            const signInFailure = isSyntheticClaudeSignInFailure(msg.message.model, text);
+            if (text && !signInFailure) {
               channel.push({
                 kind: 'text',
                 role: 'assistant',
@@ -2336,7 +2344,9 @@ export class ClaudeAgentSdkEngine implements Engine {
                 ...(agentToolCallId ? { agentToolCallId } : {}),
               });
             }
-            if (msg.error) {
+            if (signInFailure) {
+              channel.push({ kind: 'error', message: text.trim(), code: 'authentication_failed' });
+            } else if (msg.error) {
               channel.push({
                 kind: 'error',
                 message: `assistant error: ${msg.error}`,

@@ -12,7 +12,7 @@
 // devtools, zoom and fullscreen alive — dropping the application menu entirely
 // would take those with it.
 
-import { app, Menu } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import { buildAppMenuTemplate } from './menu-template.js';
 
 export type InstallMenuOptions = {
@@ -29,6 +29,13 @@ export function installApplicationMenu(opts: InstallMenuOptions = {}): void {
   const template = buildAppMenuTemplate({
     isMac: process.platform === 'darwin',
     allowReload: !packaged,
+    // Cmd/Ctrl+, — the renderer owns the Settings modal, so the menu only asks
+    // for it (preload's `appMenu.onOpenSettings`). Single-window app: the
+    // focused window, else the only one.
+    onOpenSettings: () => {
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+      win?.webContents.send('app-menu:open-settings');
+    },
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }

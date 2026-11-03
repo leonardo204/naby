@@ -940,7 +940,13 @@ export {
 
 // The stable `code` on an engine's error event, which the chat maps to
 // localized copy (engines/error-codes.ts).
-export { claudeSdkFailureCode, httpStatusOf, providerErrorCode } from './engines/error-codes.js';
+export {
+  claudeSdkFailureCode,
+  httpStatusOf,
+  isClaudeSignInFailureText,
+  isSyntheticClaudeSignInFailure,
+  providerErrorCode,
+} from './engines/error-codes.js';
 
 // The DEV engine (design §3.3). Exporting the class is safe even though the
 // Agent SDK is excluded from packaged builds: this module imports the SDK
