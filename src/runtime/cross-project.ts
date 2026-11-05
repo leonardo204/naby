@@ -174,28 +174,55 @@ const oneLine = (s: string | undefined): string => (s ?? '').replace(/\s+/g, ' '
 /**
  * R26: the system-prompt paragraph naming the projects that share this
  * project's sidebar group — names and cwds only, never content. Undefined when
- * this project is in no group or alone in it. Sorted by display name (then cwd)
- * so the text is identical turn to turn and the prompt cache holds.
+ * this project is in no group or alone in it.
+ *
+ * With `numberOf` (cross-project-context §3a, 0.4.0) the list is in the
+ * sidebar's display order with each project's number, this project included
+ * and marked, so "3번" means to naby what it means on the screen. The numbers
+ * come from the shell's one `projectNumbers` (project-groups R33) — they are
+ * never counted here. The text changes only when the user reorders the
+ * sidebar, so the prompt cache holds turn to turn. Without `numberOf` the
+ * members are sorted by display name (then cwd), as before 0.4.0.
  */
 export function groupAwarenessParagraph(input: {
   groups: ReadonlyArray<CrossProjectGroup>;
   cwd: string;
   /** The display name of a member cwd (a rename wins, project-groups §8). */
   nameOf: (cwd: string) => string | undefined;
+  /** The sidebar number of a member cwd (project-groups §9). */
+  numberOf?: (cwd: string) => number | undefined;
 }): string | undefined {
   const mine = groupOfProject(input.groups, input.cwd);
   if (!mine) return undefined;
   // A cwd duplicated into a later group belongs to the first only (R5's rule).
-  const members = mine.cwds
-    .filter((c, i, all) => c !== input.cwd && all.indexOf(c) === i && groupOfProject(input.groups, c) === mine)
-    .map((c) => ({ cwd: c, name: oneLine(input.nameOf(c)) || c }))
-    .sort((a, b) => cmp(a.name, b.name) || cmp(a.cwd, b.cwd));
-  if (members.length === 0) return undefined;
+  const inGroup = mine.cwds.filter((c, i, all) => all.indexOf(c) === i && groupOfProject(input.groups, c) === mine);
+  const named = (c: string) => ({ cwd: c, name: oneLine(input.nameOf(c)) || c });
+  const others = inGroup.filter((c) => c !== input.cwd);
+  if (others.length === 0) return undefined;
+  const groupName = oneLine(mine.name) || 'unnamed';
+  const tail =
+    'the user is asked to approve unless they already allowed it permanently. Do not guess their contents.';
+  const numberOf = input.numberOf;
+  if (numberOf) {
+    const rows = inGroup
+      .map((c) => ({ ...named(c), n: numberOf(c) }))
+      .sort((a, b) => (a.n ?? Infinity) - (b.n ?? Infinity) || cmp(a.name, b.name) || cmp(a.cwd, b.cwd));
+    const list = rows
+      .map((r) => `${r.n !== undefined ? `${r.n} ` : ''}‹${r.name}› ${r.cwd === input.cwd ? '(this project)' : `(${r.cwd})`}`)
+      .join(', ');
+    return (
+      `This project is in the sidebar group ‹${groupName}›, numbered as in the sidebar: ${list}. ` +
+      `"N번" (number N) means that number in this group; a project of another group is named with its group, like "Web 2". ` +
+      `You may read them with ${READ_PROJECT_TOOL_NAME} or ask their tabs with naby_send_to_session (pass the number, name or cwd as \`project\`) when answering needs it; ` +
+      tail
+    );
+  }
+  const members = others.map(named).sort((a, b) => cmp(a.name, b.name) || cmp(a.cwd, b.cwd));
   const list = members.map((m) => `‹${m.name}› (${m.cwd})`).join(', ');
   return (
-    `This project is in the sidebar group ‹${oneLine(mine.name) || 'unnamed'}› with: ${list}. ` +
+    `This project is in the sidebar group ‹${groupName}› with: ${list}. ` +
     `You may read them with ${READ_PROJECT_TOOL_NAME} or ask their tabs with naby_send_to_session when answering needs it; ` +
-    'the user is asked to approve unless they already allowed it permanently. Do not guess their contents.'
+    tail
   );
 }
 
@@ -203,18 +230,54 @@ export function groupAwarenessParagraph(input: {
  *  host's locale (the prompt cache, R26). */
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
+/** A project as `resolveProjectRef` sees it. `number` and `section` are the
+ *  sidebar's (project-groups §9, computed by the shell's `projectNumbers`);
+ *  `section` is the group's name, or null for the ungrouped area. */
+export type ProjectRefCandidate = {
+  cwd: string;
+  name: string;
+  number?: number;
+  section?: string | null;
+};
+
+/** What the ungrouped area may be called in a `group number` reference. */
+const UNGROUPED_WORDS = ['ungrouped', 'no group', '그룹 없음', '그룹없음'];
+
+/** `3`, `3번`, `#3`, `no. 3` → 3. */
+const parseNumberWord = (s: string): number | undefined => {
+  const m = /^(?:#|no\.?\s*)?(\d{1,4})\s*(?:번)?$/i.exec(s.trim());
+  return m ? Number(m[1]) : undefined;
+};
+
+/** After a section's name: ` 3`, ` 3번`, ` 그룹 3번`, ` group #3` → 3. */
+const parseAfterSection = (rest: string): number | undefined => {
+  const m = /^\s*(?:그룹|group)?\s*#?(\d{1,4})\s*(?:번)?$/i.exec(rest);
+  return m ? Number(m[1]) : undefined;
+};
+
+const describeSection = (section: string | null | undefined): string =>
+  section ? `group "${section}"` : 'the ungrouped area';
+
 /**
- * Resolve the model's `project` argument — a cwd or a display name — to one
- * project of the list. A cwd matches exactly; a name matches case-insensitively
- * and must be unambiguous (two projects the user named alike are told apart by
- * cwd, and the error says so).
+ * Resolve the model's `project` argument to one project of the list: a cwd, a
+ * display name, or a sidebar number (cross-project-context R7a, R7b).
+ *
+ * - A cwd matches exactly (a trailing slash is forgiven).
+ * - A name matches case-insensitively and must be unambiguous (two projects the
+ *   user named alike are told apart by cwd, and the error says so).
+ * - A bare number (`3`, `3번`) is that number in THIS project's section — its
+ *   group, or the ungrouped area (`opts.selfCwd` says which). `RMS 3` is number
+ *   3 of group RMS. Out of range, or pointing at this project itself, answers
+ *   so instead of guessing. The numbers are the caller's (the shell's one
+ *   `projectNumbers`); nothing is counted here.
  */
 export function resolveProjectRef(
-  projects: ReadonlyArray<{ cwd: string; name: string }>,
+  projects: ReadonlyArray<ProjectRefCandidate>,
   ref: string,
+  opts: { selfCwd?: string } = {},
 ): { ok: true; cwd: string; name: string } | { ok: false; error: string } {
   const want = ref.trim();
-  if (!want) return { ok: false, error: '`project` is required (a cwd or a project name from naby_list_projects)' };
+  if (!want) return { ok: false, error: '`project` is required (a cwd, a project name or a sidebar number from naby_list_projects)' };
   const byCwd = projects.find((p) => p.cwd === want || p.cwd === want.replace(/\/+$/, ''));
   if (byCwd) return { ok: true, cwd: byCwd.cwd, name: byCwd.name };
   const lower = want.toLowerCase();
@@ -226,15 +289,62 @@ export function resolveProjectRef(
       error: `more than one project is called "${want}" (${byName.map((p) => p.cwd).join(', ')}) — pass the cwd instead`,
     };
   }
+
+  // Numbers (R7a). Only meaningful when the caller supplied them.
+  const numbered = projects.filter((p) => typeof p.number === 'number');
+  if (numbered.length > 0) {
+    const pick = (section: string | null, n: number): { ok: true; cwd: string; name: string } | { ok: false; error: string } => {
+      const inSection = numbered.filter((p) => (p.section ?? null) === section);
+      const hit = inSection.find((p) => p.number === n);
+      if (!hit) {
+        return {
+          ok: false,
+          error:
+            inSection.length === 0
+              ? `${describeSection(section)} has no projects`
+              : `there is no number ${n} in ${describeSection(section)} — it has 1–${inSection.length}. Call ${LIST_PROJECTS_TOOL_NAME} for the numbers`,
+        };
+      }
+      if (opts.selfCwd && hit.cwd === opts.selfCwd) {
+        return { ok: false, error: `number ${n} in ${describeSection(section)} is this project itself ("${hit.name}")` };
+      }
+      return { ok: true, cwd: hit.cwd, name: hit.name };
+    };
+    const bare = parseNumberWord(want);
+    if (bare !== undefined) {
+      const self = opts.selfCwd ? projects.find((p) => p.cwd === opts.selfCwd) : undefined;
+      return pick(self?.section ?? null, bare);
+    }
+    // `RMS 3`: a known section's name, then a number. Matched against the
+    // names that exist (longest first), so a group called "My group" or
+    // "Pino" is never cut at a guessed word boundary.
+    const sections = [...new Set(numbered.map((p) => p.section).filter((x): x is string => !!x))];
+    const candidates: { section: string | null; label: string }[] = [
+      ...sections.map((x) => ({ section: x, label: x })),
+      ...UNGROUPED_WORDS.map((w) => ({ section: null, label: w })),
+    ].sort((x, y) => y.label.length - x.label.length);
+    for (const c of candidates) {
+      if (!lower.startsWith(c.label.toLowerCase())) continue;
+      const n = parseAfterSection(want.slice(c.label.length));
+      if (n !== undefined) return pick(c.section, n);
+    }
+  }
   return {
     ok: false,
-    error: `no project "${want}" is in the sidebar list — call ${LIST_PROJECTS_TOOL_NAME} for the names and cwds`,
+    error: `no project "${want}" is in the sidebar list — call ${LIST_PROJECTS_TOOL_NAME} for the names, numbers and cwds`,
   };
 }
 
 // ---------------------------------------------------------------------------
 // Tool schemas (§4, §7)
 // ---------------------------------------------------------------------------
+
+/** How a `project` argument may name a project (R7b) — shared with
+ *  `naby_send_to_session`'s `project`. */
+export const PROJECT_REF_DESCRIPTION =
+  `The project: its cwd, its display name, or its sidebar number — "3" is number 3 in THIS project's group ` +
+  `(or in the ungrouped area when this project has no group), "RMS 3" is number 3 of group RMS. ` +
+  `The server resolves the number; take names and numbers from ${LIST_PROJECTS_TOOL_NAME}.`;
 
 /** The ops `naby_read_project` knows. None of them writes or runs anything (R12). */
 export const CROSS_PROJECT_READ_OPS = [
@@ -260,7 +370,8 @@ const WHEN_TO_LOOK = [
 export const LIST_PROJECTS_TOOL_SCHEMA: ToolSchema = {
   name: LIST_PROJECTS_TOOL_NAME,
   description: [
-    'List the user’s OTHER projects: display name, cwd, sidebar group, relation (same-group / other-group) and access:',
+    'List the user’s OTHER projects: sidebar number (it restarts at 1 in each group; the ungrouped area counts on its own), display name, cwd, sidebar group,',
+    'relation (same-group / other-group) and access:',
     'approved — the user allowed it permanently, read it without asking; needs-approval — the user is asked on each read',
     '(same group included) until they allow it permanently; denied — the user declined it in this conversation, do not try again.',
     'Listing needs no approval.',
@@ -280,7 +391,7 @@ export const READ_PROJECT_TOOL_SCHEMA: ToolSchema = {
   parameters: {
     type: 'object',
     properties: {
-      project: { type: 'string', description: `The project's cwd or display name, from ${LIST_PROJECTS_TOOL_NAME}.` },
+      project: { type: 'string', description: PROJECT_REF_DESCRIPTION },
       op: { type: 'string', enum: [...CROSS_PROJECT_READ_OPS], description: 'What to read.' },
       path: {
         type: 'string',

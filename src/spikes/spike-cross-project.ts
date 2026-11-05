@@ -10,7 +10,10 @@
 //   * the group awareness paragraph: sorted by name, omitted with no group or
 //     alone in one, names and cwds only (R26);
 //   * the tool descriptions: same-group is not called free (§7);
-//   * resolveProjectRef: cwd, name, ambiguous name, unknown;
+//   * the numbered paragraph (§3a): sidebar-number order, this project marked;
+//   * resolveProjectRef: cwd, name, ambiguous name, unknown; sidebar numbers in
+//     this project's section, `<group> N`, out of range, this project (R7a);
+//   * naby_send_to_session's `project` input and the R7d session title (R7b);
 //   * parseReadProjectInput: each op's required field, unknown op refused, and
 //     no op that writes or runs exists (R12);
 //   * buildGitArgs: fixed argv, a `-`-leading ref refused, the path after `--`,
@@ -39,6 +42,7 @@ import {
   checkRealPathInside,
   classifyToolConsequence,
   clipGitOutput,
+  crossSessionTitleFromRequest,
   CROSS_PROJECT_FENCE,
   CROSS_PROJECT_GIT_OUTPUT_MAX_BYTES,
   CROSS_PROJECT_READ_OPS,
@@ -61,6 +65,7 @@ import {
   makeRemember,
   parseListSessionsInput,
   parseReadProjectInput,
+  parseSendToSessionInput,
   READ_PROJECT_TOOL_NAME,
   READ_PROJECT_TOOL_SCHEMA,
   resolveCrossProjectRelation,
@@ -160,6 +165,23 @@ function exerciseGroupAwareness(): void {
   check('a cwd duplicated into a later group is not listed there', dup === undefined, dup);
   check('falls back to the cwd for a missing name',
     (groupAwarenessParagraph({ groups, cwd: '/p/proposal', nameOf: () => undefined }) ?? '').includes('‹/p/client› (/p/client)'));
+
+  // §3a: with the sidebar numbers, in their order, this project included.
+  const nums: Record<string, number> = { '/p/server': 1, '/p/client': 2, '/p/dt': 3, '/p/proposal': 4 };
+  const numbered = groupAwarenessParagraph({ groups, cwd: '/p/proposal', nameOf, numberOf: (c) => nums[c] }) ?? '';
+  check('numbered: in sidebar-number order with numbers, this project marked',
+    numbered.includes('‹RMS›, numbered as in the sidebar: 1 ‹server› (/p/server), 2 ‹client› (/p/client), 3 ‹DT_RMS› (/p/dt), 4 ‹proposal› (this project).'),
+    numbered);
+  check('numbered: says what "N번" means', numbered.includes('"N번" (number N) means that number in this group'));
+  check('numbered: same text whatever the stored member order (prompt cache)',
+    groupAwarenessParagraph({
+      groups: [{ name: 'RMS', cwds: ['/p/dt', '/p/proposal', '/p/client', '/p/server'] }, ...groups.slice(1)],
+      cwd: '/p/proposal',
+      nameOf,
+      numberOf: (c) => nums[c],
+    }) === numbered);
+  check('numbered: still ends with the approval line',
+    numbered.endsWith('the user is asked to approve unless they already allowed it permanently. Do not guess their contents.'));
 }
 
 function exerciseDescriptions(): void {
@@ -193,6 +215,47 @@ function exerciseRef(): void {
   check('an ambiguous name asks for the cwd', !amb.ok && /pass the cwd/.test(amb.error));
   const none = resolveProjectRef(list, 'nope');
   check('an unknown name points at the list tool', !none.ok && none.error.includes(LIST_PROJECTS_TOOL_NAME));
+
+  // R7a: sidebar numbers. RMS 1 server · 2 client · 3 proposal (self) · 4 dt; Web 1 site; ungrouped 1 loose.
+  const numbered = [
+    { cwd: '/p/server', name: 'server', number: 1, section: 'RMS' },
+    { cwd: '/p/client', name: 'client', number: 2, section: 'RMS' },
+    { cwd: '/p/proposal', name: 'proposal', number: 3, section: 'RMS' },
+    { cwd: '/p/dt', name: 'DT_RMS', number: 4, section: 'RMS' },
+    { cwd: '/p/site', name: 'site', number: 1, section: 'My group' },
+    { cwd: '/p/loose', name: 'loose', number: 1, section: null },
+  ];
+  const self = { selfCwd: '/p/proposal' };
+  const at = (ref: string, o: { selfCwd?: string } = self) => {
+    const r = resolveProjectRef(numbered, ref, o);
+    return r.ok ? r.cwd : `ERR ${r.error}`;
+  };
+  check('"2" is 2 in this project’s group', at('2') === '/p/client');
+  check('"4번" too', at('4번') === '/p/dt');
+  check('"RMS 1" names the group', at('RMS 1') === '/p/server');
+  check('"rms 그룹 1번" case-insensitive, with 그룹/번', at('rms 그룹 1번') === '/p/server');
+  check('a group name with a space is matched whole', at('My group 1') === '/p/site');
+  check('"ungrouped 1" / "그룹 없음 1"', at('ungrouped 1') === '/p/loose' && at('그룹 없음 1') === '/p/loose');
+  check('from an ungrouped project, "1" is the ungrouped 1', at('1', { selfCwd: '/p/loose' }).startsWith('ERR') && at('1', { selfCwd: '/p/loose' }).includes('this project itself'));
+  check('out of range says the range', at('5').includes('no number 5 in group "RMS"') && at('5').includes('1–4'));
+  check('this project itself is said so', at('3').includes('is this project itself ("proposal")'));
+  check('an unknown group falls through to "no project"', at('Nope 1').includes('no project "Nope 1"'));
+  check('a name still wins over a number-looking ref', resolveProjectRef([...numbered, { cwd: '/p/x', name: '2' }], '2', self).ok &&
+    (resolveProjectRef([...numbered, { cwd: '/p/x', name: '2' }], '2', self) as { cwd: string }).cwd === '/p/x');
+  check('without numbers a bare number is unknown', !resolveProjectRef(list, '1').ok);
+
+  // R7b: send by project.
+  const byProject = parseSendToSessionInput({ project: ' RMS 3 ', request: 'x' }, { allowProject: true });
+  check('send: project alone is accepted on the cross-project schema', byProject.ok && byProject.input.project === 'RMS 3' && byProject.input.sessionId === '');
+  check('send: project alone is refused on the project-only schema', !parseSendToSessionInput({ project: '3', request: 'x' }).ok);
+  check('send: neither is refused', !parseSendToSessionInput({ request: 'x' }, { allowProject: true }).ok);
+  check('send schema (cross-project): sessionId optional, project offered',
+    JSON.stringify(SEND_TO_SESSION_CROSS_PROJECT_TOOL_SCHEMA.parameters).includes('"project"') &&
+      !(SEND_TO_SESSION_CROSS_PROJECT_TOOL_SCHEMA.parameters as { required?: string[] }).required?.includes('sessionId'));
+  check('send schema (project only): sessionId still required',
+    (SEND_TO_SESSION_TOOL_SCHEMA.parameters as { required?: string[] }).required?.includes('sessionId') === true);
+  check('R7d title: the first non-empty line', crossSessionTitleFromRequest('\n  Check the schema \n then diff') === 'Check the schema');
+  check('R7d title: cut with an ellipsis', crossSessionTitleFromRequest('x'.repeat(100)).length === 60 && crossSessionTitleFromRequest('x'.repeat(100)).endsWith('…'));
 }
 
 function exerciseParser(): void {

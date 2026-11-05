@@ -151,15 +151,40 @@ export const LIST_SESSIONS_CROSS_PROJECT_TOOL_SCHEMA: ToolSchema = {
 };
 
 export const SEND_TO_SESSION_CROSS_PROJECT_TOOL_SCHEMA: ToolSchema = {
-  ...SEND_TO_SESSION_TOOL_SCHEMA,
+  name: SEND_TO_SESSION_TOOL_NAME,
   description: [
     'Send a request to another session (tab) — of this project, or of ANOTHER project: that tab’s naby knows best what was done in its own project, and it works only there.',
     'That session runs it as a new turn, visibly in its own tab;',
     'when it finishes, its answer arrives in THIS session as a new message and you continue from there.',
     WHEN_TO_USE_CROSS_PROJECT,
+    'Name the target with `sessionId`, or — for another project — with `project` alone (a cwd, a name, or a sidebar number like "3" or "RMS 3"):',
+    'with one open tab there the request goes to it; with several, nothing is sent and the tabs are listed so you can ask the user which one;',
+    'with none, a new conversation is opened in that project for the request (it appears in the sidebar; no tab is opened on screen).',
     'Returns at once with a requestId — do not wait or poll; end your turn telling the user the request was sent.',
     'Put everything the other session needs in `request` and `context`: it cannot see this conversation.',
   ].join(' '),
+  parameters: {
+    type: 'object',
+    properties: {
+      sessionId: {
+        type: 'string',
+        description: `The target session id, from ${LIST_SESSIONS_TOOL_NAME}. Omit it to name another project with \`project\` instead.`,
+      },
+      project: {
+        type: 'string',
+        description:
+          'Another project, when no sessionId is given: its cwd, display name, or sidebar number — "3" is number 3 in THIS project\'s group ' +
+          '(or the ungrouped area), "RMS 3" is number 3 of group RMS. The server resolves the number; never count it yourself.',
+      },
+      request: { type: 'string', description: 'What the other session should do, self-contained.' },
+      context: { type: 'string', description: 'Optional background to hand over (findings so far, constraints, names).' },
+      expectReply: {
+        type: 'boolean',
+        description: 'Default true. False when the user does not want the answer back here.',
+      },
+    },
+    required: ['request'],
+  },
 };
 
 /** Parse a `naby_list_sessions` call. Absent or unknown `scope` is `'project'`
@@ -171,21 +196,31 @@ export function parseListSessionsInput(raw: unknown): { scope: ListSessionsScope
 }
 
 export type SendToSessionInput = {
+  /** The target tab. With `allowProject`, absent when `project` names it. */
   sessionId: string;
+  /** cross-project-context R7b, R7c: another project named instead of a tab —
+   *  a cwd, a display name or a sidebar number, resolved by the shell. */
+  project?: string;
   request: string;
   context?: string;
   expectReply: boolean;
 };
 
 /** Parse a `naby_send_to_session` call. Strict on the required fields, lenient on
- *  the optional ones (an empty `context` is no context). */
+ *  the optional ones (an empty `context` is no context). With `allowProject`
+ *  (the cross-project schema) a `project` may stand in for the `sessionId`;
+ *  `sessionId` is then '' when absent. */
 export function parseSendToSessionInput(
   raw: unknown,
+  opts: { allowProject?: boolean } = {},
 ): { ok: true; input: SendToSessionInput } | { ok: false; error: string } {
   if (!raw || typeof raw !== 'object') return { ok: false, error: 'input must be an object' };
   const o = raw as Record<string, unknown>;
   const sessionId = typeof o.sessionId === 'string' ? o.sessionId.trim() : '';
-  if (!sessionId) return { ok: false, error: 'sessionId is required' };
+  const project = opts.allowProject && typeof o.project === 'string' ? o.project.trim() : '';
+  if (!sessionId && !project) {
+    return { ok: false, error: opts.allowProject ? 'sessionId or project is required' : 'sessionId is required' };
+  }
   const request = typeof o.request === 'string' ? o.request.trim() : '';
   if (!request) return { ok: false, error: 'request is required' };
   if (request.length > CROSS_SESSION_REQUEST_MAX_CHARS) {
@@ -202,11 +237,20 @@ export function parseSendToSessionInput(
     ok: true,
     input: {
       sessionId,
+      ...(project ? { project } : {}),
       request,
       ...(context ? { context } : {}),
       expectReply: o.expectReply !== false,
     },
   };
+}
+
+/** R7d: the title of a session opened for a request — the request's first
+ *  non-empty line, one line, cut to `max` characters. */
+export function crossSessionTitleFromRequest(request: string, max = 60): string {
+  const first = request.split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).find((l) => l.length > 0) ?? '';
+  if (first.length <= max) return first || 'Request';
+  return `${first.slice(0, max - 1).trimEnd()}…`;
 }
 
 // ---------------------------------------------------------------------------

@@ -264,6 +264,7 @@ export {
   CROSS_SESSION_REQUEST_MAX_CHARS,
   CROSS_SESSION_REQUEST_OPENER,
   CROSS_SESSION_TOOL_NAMES,
+  crossSessionTitleFromRequest,
   defuseFenced,
   inlineTitle,
   isCrossSessionMeta,
@@ -314,6 +315,7 @@ export {
   LIST_PROJECTS_TOOL_NAME,
   LIST_PROJECTS_TOOL_SCHEMA,
   parseReadProjectInput,
+  PROJECT_REF_DESCRIPTION,
   READ_PROJECT_TOOL_NAME,
   READ_PROJECT_TOOL_SCHEMA,
   resolveCrossProjectRelation,
@@ -323,6 +325,7 @@ export {
   type CrossProjectAccess,
   type CrossProjectApprovalPair,
   type CrossProjectRelation,
+  type ProjectRefCandidate,
   type ReadProjectInput,
 } from './runtime/cross-project.js';
 
