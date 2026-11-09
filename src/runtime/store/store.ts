@@ -297,7 +297,42 @@ export type MemoryProvenance = {
    * something else.
    */
   supersedes?: string;
+  /**
+   * THE USER'S OWN WORDS this memory was read out of (memory-auto-apply R1/R30),
+   * stored only when the quote was FOUND verbatim in a message the user typed in
+   * this session (R2). A quote that failed the check is not evidence, and showing
+   * it beside the memory as if it were would be the fabrication the check exists
+   * to catch. Absent on every row written before v16.
+   */
+  evidenceQuote?: string;
+  /** Whether the user STATED this or naby INFERRED it (R1/R7). Used for ranking
+   *  and the "just said" rule (R17a) only — never for eligibility. Absent reads as
+   *  "unknown", which is every row written before v16. */
+  basisKind?: MemoryBasisKind;
 };
+
+/** How a memory came to be known (memory-auto-apply R1). */
+export type MemoryBasisKind = 'stated' | 'inferred';
+
+/**
+ * The model-review state of a row (memory-auto-apply R36).
+ *
+ * `pending` is the ONLY value: a row that cleared the evidence rule (§2) and now
+ * waits for the one review call after its turn. It is `proposed` meanwhile, so it
+ * is not injected. Absent = not waiting (reviewed, held for a person, or written
+ * before v16).
+ */
+export type MemoryReviewState = 'pending';
+
+/** Who retired a superseded row (memory-auto-apply R19). Free text in the table;
+ *  these are the values this codebase writes. Absent = the P3-M13a reservation
+ *  path or a row superseded before v16. */
+export type MemorySupersededReason =
+  | 'tidy-equivalent'
+  | 'tidy-refines'
+  | 'tidy-contradicts'
+  | 'review-contradicts'
+  | 'question';
 
 /** One scoped memory row (contract §3). `(scope, scopeKey, key)` is the upsert
  * identity; `id` is the provenance/rollback handle. */
@@ -353,6 +388,14 @@ export type MemoryItem = {
   /** How durable this fact is expected to be (P3-M13a §3.1). Absent = `stable`;
    *  see `MemoryVolatility` for why that is the safe reading. */
   volatility?: MemoryVolatility;
+  /** memory-auto-apply R36: `pending` while the row waits for its model review. */
+  reviewState?: MemoryReviewState;
+  /** memory-auto-apply R14/R15: WHEN a model last compared this row against the
+   *  rest of its scope. Absent = never — the backlog the tidy pass works through
+   *  (every row written before v16, and every row a person edited since). */
+  reviewedAt?: number;
+  /** memory-auto-apply R19: who superseded this row, when it is superseded. */
+  supersededReason?: MemorySupersededReason;
   /**
    * MEMORY STRENGTH (P3-M13b §3.2) — how many times this row has been USED,
    * floored at 1 and capped at `STRENGTH_CAP`.
@@ -381,7 +424,15 @@ export type MemoryItem = {
  * either could retire a memory, or make one immortal, by asserting it. */
 export type MemoryWriteRequest = Omit<
   MemoryItem,
-  'id' | 'createdAt' | 'updatedAt' | 'status' | 'supersededAt' | 'supersededBy' | 'strength'
+  | 'id'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'status'
+  | 'supersededAt'
+  | 'supersededBy'
+  | 'strength'
+  | 'reviewedAt'
+  | 'supersededReason'
 > & {
   requestedStatus: MemoryStatus;
 };
@@ -588,6 +639,80 @@ export type MemoryObservation = {
   /** The `provenance.createdFrom` of that write — the message coordinate, when
    *  the writer supplied one (reflection does: "<sessionId>:<seq>"). */
   createdFrom?: string;
+};
+
+// ---------------------------------------------------------------------------
+// Memory review: pair verdicts and questions (specs/memory-auto-apply.md §4/§5)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a model (or the user) said about one PAIR of memories (R16). `both-valid`
+ * is the user's "keep both" answer (R26) — never something a model says.
+ */
+export type MemoryPairRelation =
+  | 'equivalent'
+  | 'refines'
+  | 'contradicts'
+  | 'unrelated'
+  | 'both-valid';
+
+/**
+ * One judged pair (R16). Stored with `a_id < b_id` so a pair has one row whatever
+ * order it was judged in; the two `updatedAt`s are the values each row had WHEN
+ * it was judged, so a later edit to either side makes the verdict stale and the
+ * pair is asked again.
+ */
+export type MemoryPairVerdict = {
+  aId: string;
+  bId: string;
+  aUpdatedAt: number;
+  bUpdatedAt: number;
+  relation: MemoryPairRelation;
+  judgedAt: number;
+};
+
+/** `conflict` = two memories disagree; `overwrite` = one memory and a refused
+ *  candidate value for its key (R24/R25). */
+export type MemoryQuestionKind = 'conflict' | 'overwrite';
+export type MemoryQuestionStatus = 'open' | 'answered' | 'closed';
+/** `a` / `b` = keep that side, `both` = keep both (R26). */
+export type MemoryQuestionAnswer = 'a' | 'b' | 'both';
+
+/** The value a refused write wanted to land (`overwrite` questions). */
+export type MemoryQuestionCandidate = {
+  scope: MemoryScope;
+  scopeKey: string;
+  key: string;
+  value: string;
+  type: MemoryType;
+  sessionId?: string;
+};
+
+/** One question naby is waiting to ask the user (R25). */
+export type MemoryQuestion = {
+  id: string;
+  kind: MemoryQuestionKind;
+  aId: string;
+  /** The other memory of a `conflict`; absent on an `overwrite`. */
+  bId?: string;
+  /** The candidate of an `overwrite`; absent on a `conflict`. */
+  candidate?: MemoryQuestionCandidate;
+  createdAt: number;
+  status: MemoryQuestionStatus;
+  answer?: MemoryQuestionAnswer;
+  answeredAt?: number;
+  /** Consecutive times the popup folded away unanswered (R27). */
+  shownCount: number;
+  /** epoch ms before which the popup must not raise it on its own (R27). */
+  snoozedUntil?: number;
+};
+
+export type MemoryQuestionInput = {
+  kind: MemoryQuestionKind;
+  aId: string;
+  bId?: string;
+  candidate?: MemoryQuestionCandidate;
+  createdAt?: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -1473,7 +1598,14 @@ export interface Store {
    * Returns whether the stamp landed, so a caller can count real supersessions
    * rather than attempts. NEVER deletes: see `MemoryItem.supersededAt`.
    */
-  supersedeMemory(oldId: string, newId: string, at?: number): boolean;
+  supersedeMemory(
+    oldId: string,
+    newId: string,
+    at?: number,
+    /** memory-auto-apply R19: who did it. Cleared again by `revertSupersession`.
+     *  A supersession also CLOSES every open question naming the old row (R25). */
+    reason?: MemorySupersededReason,
+  ): boolean;
 
   /**
    * UNDO a supersession — clear `superseded_at`/`superseded_by` so the row is a
@@ -1516,6 +1648,82 @@ export interface Store {
    * when the user opted in) and lives in the runtime where it can be read,
    * not inside a store method where it would be invisible. */
   listCorroboratedProposed(threshold: number): MemoryItem[];
+
+  // -- memory review (specs/memory-auto-apply.md) --------------------------
+  //
+  // The store records and refuses; it decides nothing. Which row a review
+  // confirms, which pair a tidy pass retires and when a question is asked are
+  // the runtime's pure functions (memory-consolidation.ts) executed by the shell.
+
+  /** Rows waiting for their model review (R36), oldest first, never superseded
+   *  ones. `sessionId` puts that session's rows first (the turn that just ended);
+   *  the others follow, which is how a failed review is retried by the next turn
+   *  of any session (R42). */
+  listPendingReviewMemory(opts?: { sessionId?: string; limit?: number }): MemoryItem[];
+
+  /**
+   * Record a review's outcome on a pending row: set `status`, clear
+   * `review_state`, stamp `reviewed_at`. Returns the row, or undefined.
+   *
+   * REFUSES TO CONFIRM AN EXTERNAL ROW (contract §4 invariant 1, spec R40): such a
+   * row is left `proposed` whatever the caller asked. Unlike `confirmMemory` this
+   * does NOT promote the trust tier — a model agreeing with naby is not a person
+   * vouching for the claim.
+   */
+  settleMemoryReview(
+    id: string,
+    outcome: { status: MemoryStatus; at?: number },
+  ): MemoryItem | undefined;
+
+  /** Stamp `reviewed_at` on rows a tidy pass compared (R15). Empty = no-op. */
+  markMemoryReviewed(ids: readonly string[], at?: number): void;
+
+  /** CONFIRMED, current, non-pending rows no model has compared yet (R14),
+   *  oldest first, `style/` keys excluded (R15). */
+  listUnreviewedMemory(limit: number): MemoryItem[];
+
+  /**
+   * Rewrite one row's value AND provenance in place — the `refines` operation of
+   * a review (R41) and the undo of one (R10). Corroboration resets when the value
+   * materially changed (the putMemory rule); status is untouched; `reviewed_at`
+   * is stamped. Returns the row, or undefined.
+   */
+  reviseMemoryValue(
+    id: string,
+    value: string,
+    provenance: MemoryProvenance,
+    at?: number,
+  ): MemoryItem | undefined;
+
+  /** Merge provenance fields into a row without touching anything else — raising
+   *  a kept row's tier and evidence when an equivalent, better-sourced write was
+   *  folded into it (R41). Returns the row, or undefined. */
+  patchMemoryProvenance(id: string, patch: Partial<MemoryProvenance>): MemoryItem | undefined;
+
+  /** Fold one row's corroboration into another and keep the stronger strength
+   *  (R17 `equivalent`). The source row itself is not touched. */
+  absorbMemoryEvidence(fromId: string, intoId: string): void;
+
+  /** Queue `proposed` rows of one tier created since `since` for review (R33).
+   *  Superseded and already-pending rows are skipped. Returns how many moved. */
+  queueProposedForReview(opts: { source: TrustTier; since: number }): number;
+
+  /** The stored verdict for a pair, in either order, or undefined (R16). */
+  getMemoryPairVerdict(aId: string, bId: string): MemoryPairVerdict | undefined;
+  /** Record a verdict for a pair, replacing any earlier one (R16). */
+  putMemoryPairVerdict(verdict: MemoryPairVerdict): void;
+
+  /** Add a question, or return the OPEN one already asked about the same pair /
+   *  the same memory and key (R25: one open question per pair). */
+  putMemoryQuestion(input: MemoryQuestionInput): MemoryQuestion;
+  getMemoryQuestion(id: string): MemoryQuestion | undefined;
+  /** Questions, oldest first; `status` filters. */
+  listMemoryQuestions(opts?: { status?: MemoryQuestionStatus }): MemoryQuestion[];
+  /** Change a question's bookkeeping (answer, shown count, snooze, status). */
+  updateMemoryQuestion(
+    id: string,
+    patch: Partial<Pick<MemoryQuestion, 'status' | 'answer' | 'answeredAt' | 'shownCount' | 'snoozedUntil'>>,
+  ): MemoryQuestion | undefined;
 
   // -- golden set (Phase 1.5 P15-04) ---------------------------------------
   //

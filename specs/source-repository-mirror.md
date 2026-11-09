@@ -2,11 +2,11 @@
 id: source-repository-mirror
 title: 소스 저장소 정본과 GitHub 미러 규약
 type: interface
-version: 1.0.0
+version: 1.0.1
 status: active
 scope: 소스 정본을 어느 저장소에 두는지, GitHub 미러를 어떻게 맞추는지, 릴리스와 자동 업데이트가 어디서 일어나는지를 정한다. 릴리스 검증 절차 자체는 packaging-path-resolution이 다룬다.
 related: [packaging-path-resolution, phase-1-shell-architecture]
-updated: 2026-10-07
+updated: 2026-11-05
 ---
 
 # 소스 저장소 정본과 GitHub 미러 규약
@@ -17,7 +17,7 @@ updated: 2026-10-07
 
 | 역할 | naby (본체) | cockpit (`shell/` submodule) |
 |---|---|---|
-| **정본** | `git@bitbucket.org:altimedia/ass-naby.git` | `git@bitbucket.org:altimedia/ass-cockpit.git` |
+| **정본** | `git@ssh.bitbucket.org:altimedia/ass-naby.git` | `git@ssh.bitbucket.org:altimedia/ass-cockpit.git` |
 | 미러 (빌드·릴리스) | `git@github.com:leonardo204/naby.git` | `git@github.com:leonardo204/cockpit.git` |
 | upstream | 없음 | `https://github.com/Surething-io/cockpit.git` (받기만 한다) |
 
@@ -38,11 +38,13 @@ naby와 `shell/` 모두 같은 모양으로 둔다.
 새 기기에서 clone하면 아래처럼 맞춘다. `shell/`에서는 저장소 이름을 `ass-cockpit`·`cockpit`으로 바꿔 같은 명령을 실행한다.
 
 ```sh
-git remote set-url origin git@bitbucket.org:altimedia/ass-naby.git
-git remote set-url --add --push origin git@bitbucket.org:altimedia/ass-naby.git
+git remote set-url origin git@ssh.bitbucket.org:altimedia/ass-naby.git
+git remote set-url --add --push origin git@ssh.bitbucket.org:altimedia/ass-naby.git
 git remote set-url --add --push origin git@github.com:leonardo204/naby.git
 git remote add github git@github.com:leonardo204/naby.git
 ```
+
+- Bitbucket SSH 호스트는 `ssh.bitbucket.org`다. 2026-11-12부터 Bitbucket이 SSH 접속을 이 호스트로 옮겨서 2026-11-05에 바꿨다. 예전 `bitbucket.org` 주소가 남은 clone은 위 명령으로 고친다.
 
 ## 4. push 규칙
 
@@ -59,3 +61,7 @@ git remote add github git@github.com:leonardo204/naby.git
 
 - GitHub의 naby와 cockpit은 **공개 저장소**다. 자동 업데이트가 인증 없이 Release를 받으려면 naby가 공개 상태여야 한다. 이 구성은 소스 비공개를 목표로 하지 않는다.
 - 소스까지 비공개로 해야 한다면 이 규약으로는 안 된다. 소스와 Release를 다른 저장소로 나누고, 빌드를 로컬이나 다른 CI로 옮겨야 한다. 이 경우의 업데이트 경로(공개 버킷과 generic provider)는 phase-1-shell-architecture의 Update feed 판단을 따른다. 그때는 이 문서를 새 버전으로 고친다.
+
+## 변경 이력
+
+- 1.0.1 (2026-11-05) — Bitbucket SSH 호스트를 `ssh.bitbucket.org`로 바꿨다.

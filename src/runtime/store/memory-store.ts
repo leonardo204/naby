@@ -46,8 +46,14 @@ import type {
   MemoryDeleteSelector,
   MemoryItem,
   MemoryObservation,
+  MemoryPairVerdict,
+  MemoryProvenance,
+  MemoryQuestion,
+  MemoryQuestionInput,
+  MemoryQuestionStatus,
   MemoryScope,
   MemoryStatus,
+  MemorySupersededReason,
   MemoryVolatility,
   MemoryWriteRequest,
   McpEntry,
@@ -198,6 +204,10 @@ export class MemoryStore implements Store {
    *  session votes once per item, so re-stating a fact in the same conversation
    *  overwrites its own vote instead of adding another. */
   private readonly observations = new Map<string, Map<string, MemoryObservation>>();
+  /** v16 (memory-auto-apply): judged pairs keyed `"<smaller id> <larger id>"`,
+   *  and the questions naby is waiting to ask. */
+  private readonly pairVerdicts = new Map<string, MemoryPairVerdict>();
+  private readonly memoryQuestions = new Map<string, MemoryQuestion>();
   /** The AI-SDK engine's folded-payload summary, per session (session-context §2.3).
    *  A map of its own rather than a `SessionState` field for the same reason the
    *  SQL driver keeps it off `SessionRef`: it is payload-assembly state, and every
@@ -403,9 +413,13 @@ export class MemoryStore implements Store {
     confidence: number;
     status: MemoryStatus;
     volatility?: MemoryVolatility;
+    reviewState?: 'pending';
   }): MemoryItem {
     const now = Date.now();
     const existing = this.findMemoryRow(fields.scope, fields.scopeKey, fields.key);
+    // v16 twin of the SQL CASE: a materially changed value clears `reviewedAt`.
+    const keepReviewedAt =
+      existing?.reviewedAt !== undefined && sameMemoryValue(existing.value, fields.value);
     const item: MemoryItem = {
       id: existing ? existing.id : mintMemoryId(),
       scope: fields.scope,
@@ -433,8 +447,13 @@ export class MemoryStore implements Store {
       // merely re-asserting the fact.
       ...(existing?.supersededAt !== undefined ? { supersededAt: existing.supersededAt } : {}),
       ...(existing?.supersededBy !== undefined ? { supersededBy: existing.supersededBy } : {}),
+      ...(existing?.supersededReason !== undefined
+        ? { supersededReason: existing.supersededReason }
+        : {}),
       ...(fields.volatility ? { volatility: fields.volatility } : {}),
       strength: existing?.strength ?? 1,
+      ...(fields.reviewState ? { reviewState: fields.reviewState } : {}),
+      ...(keepReviewedAt ? { reviewedAt: existing!.reviewedAt } : {}),
     };
     this.memoryItems.set(item.id, item);
     return cloneMemory(item);
@@ -457,6 +476,7 @@ export class MemoryStore implements Store {
       confidence: req.confidence,
       status: decision.status,
       ...(req.volatility ? { volatility: req.volatility } : {}),
+      ...(req.reviewState === 'pending' ? { reviewState: 'pending' as const } : {}),
     });
 
     // A SUPERSEDED ROW THAT IS RE-CLAIMED COMES BACK (P3-M13a §3.1) — only when
@@ -468,9 +488,11 @@ export class MemoryStore implements Store {
       if (live) {
         delete live.supersededAt;
         delete live.supersededBy;
+        delete live.supersededReason;
       }
       delete saved.supersededAt;
       delete saved.supersededBy;
+      delete saved.supersededReason;
     }
 
     // CORROBORATION (P3-M8b §5.3), recorded by the STORE so the reflection pass
@@ -670,6 +692,8 @@ export class MemoryStore implements Store {
     // saying the claim is right as written, which is what the `user` tier means.
     // A row they vouched for must be able to outrank one nobody said.
     item.provenance = { ...item.provenance, source: 'user' };
+    // v16: a person's yes also settles a pending review.
+    delete item.reviewState;
     // P3-M10 §2.1: a confirm IS an access — a person just read the row and said
     // yes. Stamped in the same step as the status, exactly as the SQL driver
     // does it in one UPDATE.
@@ -692,6 +716,8 @@ export class MemoryStore implements Store {
     item.lastInjectedAt = now;
     // A new claim needs new evidence; a whitespace fix is the same claim.
     if (changed) this.observations.delete(id);
+    // v16 (R14): and a claim no model has compared yet.
+    if (changed) delete item.reviewedAt;
     return cloneMemory(item);
   }
 
@@ -712,7 +738,12 @@ export class MemoryStore implements Store {
     }
   }
 
-  supersedeMemory(oldId: string, newId: string, at: number = Date.now()): boolean {
+  supersedeMemory(
+    oldId: string,
+    newId: string,
+    at: number = Date.now(),
+    reason?: MemorySupersededReason,
+  ): boolean {
     if (!oldId || !newId || oldId === newId) return false;
     const older = this.memoryItems.get(oldId);
     if (!older || older.supersededAt !== undefined) return false;
@@ -723,7 +754,17 @@ export class MemoryStore implements Store {
     if (newer.volatility === 'transient' && older.volatility !== 'transient') return false;
     older.supersededAt = Math.trunc(at);
     older.supersededBy = newId;
+    if (reason) older.supersededReason = reason;
+    else delete older.supersededReason;
+    this.closeQuestionsNaming(oldId);
     return true;
+  }
+
+  /** Close every OPEN question naming this memory (R25) — SqliteStore's twin. */
+  private closeQuestionsNaming(memoryId: string): void {
+    for (const q of this.memoryQuestions.values()) {
+      if (q.status === 'open' && (q.aId === memoryId || q.bId === memoryId)) q.status = 'closed';
+    }
   }
 
   revertSupersession(id: string, at: number = Date.now()): boolean {
@@ -731,6 +772,7 @@ export class MemoryStore implements Store {
     if (!item || item.supersededAt === undefined) return false;
     delete item.supersededAt;
     delete item.supersededBy;
+    delete item.supersededReason;
     // A person just chose this row — the same access stamp `confirmMemory` makes,
     // and for the same reason.
     item.lastInjectedAt = Math.trunc(at);
@@ -742,6 +784,7 @@ export class MemoryStore implements Store {
     if ('id' in sel) {
       this.memoryItems.delete(sel.id);
       this.observations.delete(sel.id);
+      this.forgetMemoryReviewOf(sel.id);
       return;
     }
     const source: TrustTier = sel.source;
@@ -751,7 +794,212 @@ export class MemoryStore implements Store {
         continue;
       this.memoryItems.delete(id);
       this.observations.delete(id);
+      this.forgetMemoryReviewOf(id);
     }
+  }
+
+  /** v16: a deleted row's verdicts go and its open questions close (R25). */
+  private forgetMemoryReviewOf(id: string): void {
+    for (const key of [...this.pairVerdicts.keys()]) {
+      const v = this.pairVerdicts.get(key)!;
+      if (v.aId === id || v.bId === id) this.pairVerdicts.delete(key);
+    }
+    this.closeQuestionsNaming(id);
+  }
+
+  // -- memory review (memory-auto-apply) — SqliteStore's twin ---------------
+
+  listPendingReviewMemory(opts?: { sessionId?: string; limit?: number }): MemoryItem[] {
+    const sessionId = opts?.sessionId ?? '';
+    const rows = [...this.memoryItems.values()]
+      .filter((m) => m.reviewState === 'pending' && m.supersededAt === undefined)
+      .sort((a, b) => {
+        const own = Number(b.provenance.sessionId === sessionId) - Number(a.provenance.sessionId === sessionId);
+        return own !== 0 ? own : a.createdAt - b.createdAt;
+      })
+      .map(cloneMemory);
+    return typeof opts?.limit === 'number' ? rows.slice(0, Math.max(0, Math.trunc(opts.limit))) : rows;
+  }
+
+  settleMemoryReview(
+    id: string,
+    outcome: { status: MemoryStatus; at?: number },
+  ): MemoryItem | undefined {
+    const item = this.memoryItems.get(id);
+    if (!item) return undefined;
+    item.status =
+      outcome.status === 'confirmed' && item.provenance.source === 'external' ? 'proposed' : outcome.status;
+    delete item.reviewState;
+    item.reviewedAt = Math.trunc(outcome.at ?? Date.now());
+    return cloneMemory(item);
+  }
+
+  markMemoryReviewed(ids: readonly string[], at: number = Date.now()): void {
+    for (const id of ids) {
+      const item = this.memoryItems.get(id);
+      if (item) item.reviewedAt = Math.trunc(at);
+    }
+  }
+
+  listUnreviewedMemory(limit: number): MemoryItem[] {
+    const n = Math.max(0, Math.trunc(limit));
+    return [...this.memoryItems.values()]
+      .filter(
+        (m) =>
+          m.status === 'confirmed' &&
+          m.reviewedAt === undefined &&
+          m.reviewState === undefined &&
+          m.supersededAt === undefined &&
+          !m.key.startsWith('style/'),
+      )
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, n)
+      .map(cloneMemory);
+  }
+
+  reviseMemoryValue(
+    id: string,
+    value: string,
+    provenance: MemoryProvenance,
+    at: number = Date.now(),
+  ): MemoryItem | undefined {
+    const item = this.memoryItems.get(id);
+    if (!item) return undefined;
+    const now = Math.trunc(at);
+    const changed = !sameMemoryValue(item.value, value);
+    item.value = value;
+    // Only the fields the SQL twin writes; the reservation (`supersedes`) is kept.
+    const next: MemoryProvenance = { source: provenance.source };
+    if (provenance.sessionId !== undefined) next.sessionId = provenance.sessionId;
+    if (provenance.basis !== undefined) next.basis = provenance.basis;
+    if (provenance.createdFrom !== undefined) next.createdFrom = provenance.createdFrom;
+    if (item.provenance.supersedes !== undefined) next.supersedes = item.provenance.supersedes;
+    if (provenance.evidenceQuote !== undefined) next.evidenceQuote = provenance.evidenceQuote;
+    if (provenance.basisKind !== undefined) next.basisKind = provenance.basisKind;
+    item.provenance = next;
+    item.updatedAt = now;
+    item.reviewedAt = now;
+    if (changed) this.observations.delete(id);
+    return cloneMemory(item);
+  }
+
+  patchMemoryProvenance(id: string, patch: Partial<MemoryProvenance>): MemoryItem | undefined {
+    const item = this.memoryItems.get(id);
+    if (!item) return undefined;
+    item.provenance = { ...item.provenance, ...patch };
+    return cloneMemory(item);
+  }
+
+  absorbMemoryEvidence(fromId: string, intoId: string): void {
+    if (!fromId || !intoId || fromId === intoId) return;
+    const from = this.observations.get(fromId);
+    if (from) {
+      let into = this.observations.get(intoId);
+      if (!into) {
+        into = new Map<string, MemoryObservation>();
+        this.observations.set(intoId, into);
+      }
+      for (const [sessionId, obs] of from) {
+        if (!into.has(sessionId)) into.set(sessionId, { ...obs, memoryId: intoId });
+      }
+    }
+    const a = this.memoryItems.get(fromId);
+    const b = this.memoryItems.get(intoId);
+    if (a && b) b.strength = Math.max(b.strength ?? 1, a.strength ?? 1);
+  }
+
+  queueProposedForReview(opts: { source: TrustTier; since: number }): number {
+    let n = 0;
+    for (const item of this.memoryItems.values()) {
+      if (
+        item.status === 'proposed' &&
+        item.provenance.source === opts.source &&
+        item.createdAt >= opts.since &&
+        item.supersededAt === undefined &&
+        item.reviewState === undefined
+      ) {
+        item.reviewState = 'pending';
+        n += 1;
+      }
+    }
+    return n;
+  }
+
+  getMemoryPairVerdict(aId: string, bId: string): MemoryPairVerdict | undefined {
+    const stored = this.pairVerdicts.get(aId < bId ? `${aId} ${bId}` : `${bId} ${aId}`);
+    if (!stored) return undefined;
+    return stored.aId === aId
+      ? { ...stored }
+      : {
+          aId,
+          bId,
+          aUpdatedAt: stored.bUpdatedAt,
+          bUpdatedAt: stored.aUpdatedAt,
+          relation: stored.relation,
+          judgedAt: stored.judgedAt,
+        };
+  }
+
+  putMemoryPairVerdict(verdict: MemoryPairVerdict): void {
+    if (!verdict.aId || !verdict.bId || verdict.aId === verdict.bId) return;
+    const ordered: MemoryPairVerdict =
+      verdict.aId < verdict.bId
+        ? { ...verdict }
+        : {
+            aId: verdict.bId,
+            bId: verdict.aId,
+            aUpdatedAt: verdict.bUpdatedAt,
+            bUpdatedAt: verdict.aUpdatedAt,
+            relation: verdict.relation,
+            judgedAt: verdict.judgedAt,
+          };
+    this.pairVerdicts.set(`${ordered.aId} ${ordered.bId}`, ordered);
+  }
+
+  putMemoryQuestion(input: MemoryQuestionInput): MemoryQuestion {
+    for (const q of this.memoryQuestions.values()) {
+      if (q.status !== 'open' || q.kind !== input.kind) continue;
+      const same =
+        input.kind === 'conflict'
+          ? (q.aId === input.aId && q.bId === input.bId) || (q.aId === input.bId && q.bId === input.aId)
+          : q.aId === input.aId;
+      if (same) return { ...q };
+    }
+    const q: MemoryQuestion = {
+      id: mintMemoryId(),
+      kind: input.kind,
+      aId: input.aId,
+      ...(input.bId ? { bId: input.bId } : {}),
+      ...(input.candidate ? { candidate: { ...input.candidate } } : {}),
+      createdAt: Math.trunc(input.createdAt ?? Date.now()),
+      status: 'open',
+      shownCount: 0,
+    };
+    this.memoryQuestions.set(q.id, q);
+    return { ...q };
+  }
+
+  getMemoryQuestion(id: string): MemoryQuestion | undefined {
+    const q = this.memoryQuestions.get(id);
+    return q ? { ...q } : undefined;
+  }
+
+  listMemoryQuestions(opts?: { status?: MemoryQuestionStatus }): MemoryQuestion[] {
+    return [...this.memoryQuestions.values()]
+      .filter((q) => !opts?.status || q.status === opts.status)
+      .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+      .map((q) => ({ ...q }));
+  }
+
+  updateMemoryQuestion(
+    id: string,
+    patch: Partial<Pick<MemoryQuestion, 'status' | 'answer' | 'answeredAt' | 'shownCount' | 'snoozedUntil'>>,
+  ): MemoryQuestion | undefined {
+    const q = this.memoryQuestions.get(id);
+    if (!q) return undefined;
+    Object.assign(q, patch);
+    if (patch.snoozedUntil === undefined && 'snoozedUntil' in patch) delete q.snoozedUntil;
+    return { ...q };
   }
 
   // -- golden set (Phase 1.5 P15-04) ---------------------------------------

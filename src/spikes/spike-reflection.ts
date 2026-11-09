@@ -45,9 +45,10 @@
 //       saying it twice still counts once.
 //   (n) A materially changed value RESETS the count to 1; a whitespace-only edit
 //       does not.
-//   (o) Consolidation: nothing while the opt-in is off; at the threshold it
-//       promotes an artifact-tier row; an `external` row with more than enough
-//       observations is NEVER promoted (memory-contracts §4 invariant 1).
+//   (o) Consolidation no longer promotes on corroboration at all
+//       (memory-auto-apply R8): a stored `memory.autoConfirmCorroborated=true`
+//       is ignored, and an `external` row is never promoted either way
+//       (memory-contracts §4 invariant 1).
 //   (p) `deleteSession` removes that session's observations while the memory row
 //       itself, and a confirmed row's status, survive.
 // M8c (§6.4) — the widened trigger, also against BOTH drivers:
@@ -77,8 +78,11 @@
 //       calls, and the old row is kept rather than deleted.
 //   (ee) The store enforces the transient rule and never re-stamps a row that is
 //       already superseded.
-//   (ff) `style/<taskType>` is auto-confirmed at the threshold; `style/global/*`
-//       NEVER is, whatever the opt-in says (§3.3).
+//   (ff) corroboration confirms no style row any more (memory-auto-apply R8),
+//       and the pure predicate still says `style/global/*` never may (§3.3).
+// The P3-M13a lexical relation path (cc–hh) now runs only with
+// `memory.autoApply=false` (R8) — those checks switch it off first; the
+// auto-apply path itself is spike:memory-auto-apply.
 //   (gg) A superseded row is out of injection AND out of the evidence pool.
 //   (hh) EQUIVALENT writes nothing and corroborates; REFINES rewrites the
 //       existing key instead of minting a near-duplicate beside it.
@@ -956,7 +960,8 @@ async function checkConsolidation(store: Store, label: string): Promise<void> {
     store.getScopedMemory('session', 'sess-external')[0]?.status,
   ];
 
-  // ON.
+  // The REMOVED opt-in, left set the way an old install might have it: it must
+  // promote nothing (memory-auto-apply R8).
   store.setSetting(MEMORY_AUTO_CONFIRM_KEY, 'true');
   const on = await runReflectionSweep(store, proposingJudge([]), { now: LATER(), cap: 10 });
   const artifactAfter = userMemory(store).find((m) => m.id === artifactRow.id);
@@ -965,12 +970,12 @@ async function checkConsolidation(store: Store, label: string): Promise<void> {
     .find((m) => m.id === externalRow.id);
 
   record(
-    `(o) [${label}] consolidation promotes an artifact row at ${CORROBORATION_THRESHOLD} sessions ONLY when opted in, and NEVER an external one`,
+    `(o) [${label}] corroboration promotes nothing — not at ${CORROBORATION_THRESHOLD} sessions, not with the removed opt-in set, and never an external row`,
     off.autoConfirmed === 0 &&
       statusesWhileOff.every((s) => s === 'proposed') &&
       externalCount >= CORROBORATION_THRESHOLD &&
-      on.autoConfirmed === 1 &&
-      artifactAfter?.status === 'confirmed' &&
+      on.autoConfirmed === 0 &&
+      artifactAfter?.status === 'proposed' &&
       externalAfter?.status === 'proposed',
     `off: autoConfirmed=${off.autoConfirmed} statuses=${statusesWhileOff.join(',')}; ` +
       `on: autoConfirmed=${on.autoConfirmed} artifact=${artifactAfter?.status} external=${externalAfter?.status} (observed by ${externalCount} sessions)`,
@@ -1768,6 +1773,8 @@ function checkFourOps(): void {
  * the stamp.
  */
 async function checkSupersessionLifecycle(store: Store, label: string): Promise<void> {
+  // The P3-M13a reservation path lives behind `memory.autoApply=false` (R8).
+  store.setSetting('memory.autoApply', 'false');
   const older = seedExisting(store, 'home-city', 'Lives in Lisbon.');
   seedM13Session(store, 'sess-m13a', [MOVED_QUOTE, 'so update my address please']);
 
@@ -1873,6 +1880,8 @@ function checkTransientNeverSupersedes(store: Store, label: string): void {
 /** (hh) `equivalent` writes nothing and corroborates; `refines` rewrites the
  *  EXISTING key rather than minting a near-duplicate. */
 async function checkNoopAndUpdate(store: Store, label: string): Promise<void> {
+  // The P3-M13a lexical path lives behind `memory.autoApply=false` (R8).
+  store.setSetting('memory.autoApply', 'false');
   const existing = seedExisting(store, 'metric-units', 'Prefers metric units in every answer.');
   seedM13Session(store, 'sess-m13b', [MOVED_QUOTE, 'and keep using metric units please']);
 
@@ -2046,8 +2055,9 @@ async function checkStylePreferences(store: Store, label: string): Promise<void>
     `proposedStyles=${out.proposedStyles} scoped=${scoped?.key}(${scoped?.type}/${scoped?.scope}) global=${global?.key}`,
   );
 
-  // Now corroborate BOTH to the threshold and turn the opt-in on. The scoped one
-  // is promoted; the global one is not, and no setting can change that.
+  // Now corroborate BOTH to the threshold and set the REMOVED opt-in. Neither is
+  // promoted (memory-auto-apply R8) — and the pure predicate still says the
+  // global one never may be.
   store.setSetting(MEMORY_AUTO_CONFIRM_KEY, 'true');
   for (let i = 0; i < CORROBORATION_THRESHOLD; i += 1) {
     store.corroborateMemory(scoped!.id, `sess-style-${i}`);
@@ -2058,10 +2068,10 @@ async function checkStylePreferences(store: Store, label: string): Promise<void>
   const globalAfter = store.getMemoryById(global!.id);
 
   record(
-    `(ff) [${label}] style/<taskType> is auto-confirmed at the threshold; style/global NEVER is, whatever the setting says (§3.3, HAX cautious adaptation)`,
-    scopedAfter?.status === 'confirmed' &&
+    `(ff) [${label}] corroboration confirms no style row (memory-auto-apply R8); style/global is never auto-confirmable (§3.3)`,
+    scopedAfter?.status === 'proposed' &&
       globalAfter?.status === 'proposed' &&
-      promoted.autoConfirmed === 1 &&
+      promoted.autoConfirmed === 0 &&
       // …and the pure predicate says the same thing on its own.
       shouldAutoConfirmMemory(globalAfter!, 99, { enabled: true }) === false &&
       shouldAutoConfirmMemory(

@@ -571,8 +571,8 @@ console.log('migration v14 → v15');
   });
   check(
     `v14 → v${SCHEMA_VERSION}: both tables created, old rows survive, version stamped`,
-    SCHEMA_VERSION === 15 &&
-      version === 15 &&
+    SCHEMA_VERSION >= 15 &&
+      version === SCHEMA_VERSION &&
       (migrated.getMessages('old')[0] as { content?: string } | undefined)?.content === 'kept' &&
       migrated.getParticipantRecommendation(row.id)?.status === 'pending',
   );

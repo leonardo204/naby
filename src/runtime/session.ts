@@ -17,6 +17,7 @@ import type {
   Executor,
   Gate,
   MessageRouting,
+  HarnessUserOrigin,
   MessageSpeaker,
   ModelSelection,
   RollingSummary,
@@ -82,6 +83,11 @@ export type RunTurnOptions = {
    *  row is stored with this on it, so no learner reads it as the user's words
    *  and the transcript can label it. Absent = an ordinary turn. */
   crossSession?: CrossSessionMeta;
+  /** The HARNESS wrote this turn's prompt (memory-auto-apply R2) — an autonomy
+   *  continuation, a scheduled task, a job report, a kickoff. The user row is
+   *  stored with it, so no learner reads it as the user's words. Absent = the
+   *  user typed it. */
+  harnessOrigin?: HarnessUserOrigin;
 
   /** System prompt for this turn. Passed to the engine on its OWN field, never
    * appended to the history — `ai@7` rejects `role:'system'` inside `messages`
@@ -359,6 +365,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     store.appendMessage(sessionId, { role: 'user', content: userText, speaker: from, routing });
   } else if (opts.crossSession) {
     store.appendMessage(sessionId, { role: 'user', content: userText, crossSession: opts.crossSession });
+  } else if (opts.harnessOrigin) {
+    store.appendMessage(sessionId, { role: 'user', content: userText, harness: opts.harnessOrigin });
   } else {
     store.appendMessage(sessionId, { role: 'user', content: userText });
   }

@@ -1,7 +1,7 @@
 ---
 id: phase-3-conversational-learning-hardening
 type: design
-version: 1.1.0
+version: 1.1.1
 status: implemented
 scope: 대화 학습 루프의 보강 — 기억 갱신 4연산과 대체 이력(M13a), 연속 강도 감쇠와 주입 다양성(M13b), 스타일 프로필(M13c)을 검증된 모델로 붙인다. 기억 계약의 저장·게이트·주입 불변식은 유지하며 가산 개정만 한다.
 related:
@@ -9,7 +9,8 @@ related:
   - phase-3-memory-hygiene
   - phase-3-persona-agent
   - phase-1_5-memory-contracts
-updated: 2026-08-10
+  - memory-auto-apply
+updated: 2026-11-09
 ---
 
 # 대화 학습 보강 (P3-M13)
@@ -46,6 +47,8 @@ naby의 학습 루프는 뼈대가 서 있다 — 턴 중 기억 제안, 세션 
    - `refines` → **UPDATE** — 같은 key에 값 변경 제안(기존 putMemory 경로, 확증 리셋 규칙 그대로).
    - `contradicts` → **ADD** 새 후보 + **대체 예약**. 새 기억이 `confirmed`가 되는 순간 옛 기억에 `superseded_at`·`superseded_by`를 찍는다. 승자는 언제나 최신 타임스탬프 — LLM이 고르지 않는다.
    - `unrelated` → **ADD**.
+
+> ⚠️ 1.1.1: [memory-auto-apply](memory-auto-apply.md) §4가 이 4연산을 **이미 쌓인 기억끼리의 비교**(정리 패스)로 넓히고, 낮은 등급이 높은 등급을 밀어내려 할 때 사용자에게 묻는 규칙을 더한다. 아래 세 규칙은 그대로다. 확정이 빨라져서 대체도 빨라진다.
 
 대체 규칙 세 가지.
 

@@ -38,6 +38,7 @@
 
 import type { RuntimeMessage } from './engine.js';
 import { isUserAuthored } from './participants.js';
+import { MIN_EVIDENCE_CHARS, normalizeEvidenceQuote } from './memory-gate.js';
 import type {
   MemoryItem,
   MemoryScope,
@@ -473,13 +474,13 @@ export type ReflectionCaseInput = {
 
 /** Text of a user message, trimmed and truncated; '' for anything that is not a
  *  user message with content. */
-function userText(msg: RuntimeMessage): string {
+function userText(msg: RuntimeMessage, maxChars: number = REFLECTION_MESSAGE_CHARS): string {
   // ONLY WHAT THE USER TYPED (multi-agent-chat §8.1, R3.8). naby's hand-off to a
   // participant is stored as a labelled user row; read as the user's words it
   // would become evidence for a correction or a memory the user never gave.
   if (msg.role !== 'user' || !isUserAuthored(msg)) return '';
   const text = typeof msg.content === 'string' ? msg.content.trim() : '';
-  return text.length > REFLECTION_MESSAGE_CHARS ? text.slice(0, REFLECTION_MESSAGE_CHARS) : text;
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
 
 /**
@@ -602,16 +603,9 @@ export type ReflectionValidation = {
   dropped: number;
 };
 
-/** Normalize a quote for the substring test: collapse whitespace so a model that
- *  re-wraps a multi-line quote is not punished for the line breaks, while every
- *  actual WORD still has to be the user's. */
-function normalizeQuote(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-/** The shortest quote that can carry evidence. One or two characters would match
- *  almost any message by accident, which would make the check decorative. */
-const MIN_EVIDENCE_CHARS = 4;
+/** The quote normalizer is the memory gate's (memory-auto-apply R2): reflection
+ *  and `naby_remember` must agree on what "the user said this" means. */
+const normalizeQuote = normalizeEvidenceQuote;
 
 /**
  * Keep only the verdicts that are ADMISSIBLE (spec §4.4):
@@ -687,7 +681,13 @@ export function validateReflectionVerdicts(
  */
 export function collectReflectionUserMessages(
   messages: readonly RuntimeMessage[],
-  opts?: { messageCap?: number; cap?: number },
+  opts?: {
+    messageCap?: number;
+    cap?: number;
+    /** Per-message truncation. `naby_remember`'s quote check (memory-auto-apply
+     *  R2) reads whole messages; the judge's window keeps the default. */
+    maxChars?: number;
+  },
 ): ReflectionUserMessage[] {
   const messageCap = Math.max(1, opts?.messageCap ?? REFLECTION_MESSAGE_CAP);
   const cap = Math.max(0, opts?.cap ?? REFLECTION_USER_MESSAGE_CAP);
@@ -697,7 +697,7 @@ export function collectReflectionUserMessages(
   for (let i = windowStart; i < messages.length; i += 1) {
     const msg = messages[i];
     if (!msg) continue;
-    const text = userText(msg);
+    const text = userText(msg, opts?.maxChars);
     if (!text) continue;
     out.push({ seq: i, text });
   }

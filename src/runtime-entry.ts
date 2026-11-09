@@ -42,6 +42,7 @@ export type {
   ToolOutput,
   ToolSchema,
   TurnStats,
+  HarnessUserOrigin,
   Usage,
   VoicePort,
   VoiceRenderRequest,
@@ -167,7 +168,8 @@ export {
   ADD_MCP_TOOL_NAME,
   type McpProposalSink,
   // naby_remember — the agent captures what it learned about the user (P3-M4a).
-  // Every capture lands as a PROPOSAL; only a human confirm makes it injectable.
+  // Every capture lands `proposed`; since memory-auto-apply an ELIGIBLE one is
+  // confirmed by the review after its turn, the rest by a person.
   makeRemember,
   rememberSchema,
   REMEMBER_TOOL_NAME,
@@ -177,6 +179,7 @@ export {
   resolveMemoryScopeKey,
   validateRememberInput,
   type MemoryLearningSink,
+  type MemoryActivationSink,
   // naby_checkin — the agent pauses and asks how to proceed (P3-M5). The answer
   // is the trust meter's label; the agent is never told how it scored.
   makeCheckin,
@@ -450,6 +453,19 @@ export type {
   // The scoped-memory read filter (Phase 3 P3-M10) — status/type/search/stale
   // plus the limit/offset window the memory browser pages with.
   ScopedMemoryQuery,
+  // memory-auto-apply (specs/memory-auto-apply.md): basis, review state, who
+  // superseded a row, judged pairs and the questions naby waits to ask.
+  MemoryBasisKind,
+  MemoryReviewState,
+  MemorySupersededReason,
+  MemoryPairRelation,
+  MemoryPairVerdict,
+  MemoryQuestion,
+  MemoryQuestionAnswer,
+  MemoryQuestionCandidate,
+  MemoryQuestionInput,
+  MemoryQuestionKind,
+  MemoryQuestionStatus,
 } from './runtime/store/store.js';
 // The "is this the same claim" test corroboration resets on. Exported because a
 // caller that needs to predict whether a write will clear the evidence (the
@@ -674,6 +690,20 @@ export {
 // runs it before a write lands. The injection helpers are what runTurn uses to
 // assemble memory into a turn (and are exported so the shell can pre/post-inspect).
 export { decideMemoryWrite } from './runtime/memory-gate.js';
+// memory-auto-apply §2: the evidence rule, the one quote check, and the one
+// "did outside content enter this turn" predicate (R3, R2, R4).
+export {
+  decideMemoryActivation,
+  isExternalContentTool,
+  locateEvidenceQuote,
+  normalizeEvidenceQuote,
+  MIN_EVIDENCE_CHARS,
+  type EvidenceQuoteCheck,
+  type MemoryActivation,
+  type MemoryActivationInput,
+  type MemoryBasis,
+  type MemoryHoldReason,
+} from './runtime/memory-gate.js';
 // Phase 1.6 HP-01 — the deterministic harness IMPORT gate. Pure; the store's
 // putHarnessItem/importHarnessSet run it before an import lands. Exported so the
 // shell (HP-06 review UI) can pre-inspect an import decision.
@@ -1630,6 +1660,24 @@ export {
   type ConsolidationOp,
   type MemoryMatch,
   type PairVerdict,
+  // memory-auto-apply §2a/§4: the review prompt, its parser, and the two
+  // answer → operation tables.
+  buildMemoryReviewPrompt,
+  decideReviewOutcome,
+  decideTidyOperation,
+  isJustStated,
+  parseMemoryReviewAnswer,
+  selectReviewContext,
+  REVIEW_LIST_FULL_CAP,
+  REVIEW_LIST_LEXICAL,
+  REVIEW_LIST_RECENT,
+  TIDY_BATCH_CAP,
+  type MemoryReviewPrompt,
+  type MemoryReviewSubject,
+  type MemoryReviewVerdict,
+  type ReviewOutcome,
+  type ReviewRelation,
+  type TidyOperation,
 } from './runtime/memory-consolidation.js';
 
 // -- style fingerprint (Phase 3, P3-M13c) ------------------------------------

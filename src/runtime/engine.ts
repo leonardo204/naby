@@ -178,7 +178,14 @@ export type TurnStats = {
   durationMs: number;
   /** When the turn ENDED (epoch ms) — not when its bubble was created. */
   endedAt: number;
+  /** The memories injected into this turn, by id (memory-auto-apply R13) — what
+   *  the "N memories used" line under the answer lists. Absent = none, or a turn
+   *  recorded before this existed. */
+  memoryIds?: string[];
 };
+
+/** Who wrote a harness-driven user row (memory-auto-apply R2). */
+export type HarnessUserOrigin = 'autonomy' | 'scheduled' | 'job-report' | 'kickoff';
 
 /** The agent that spoke a row (multi-agent-chat §8.1). */
 export type MessageSpeaker = { agentId: string; name: string };
@@ -256,6 +263,13 @@ export type RuntimeMessage =
        *  rows only. Like `routing`, a row carrying it was NOT typed by the user
        *  (`isUserAuthored` is false). Inert JSON in the payload — no migration. */
       crossSession?: CrossSessionMeta;
+      /** A user row the HARNESS wrote to drive a turn (memory-auto-apply R2): the
+       *  autonomy loop's continuation prompt, a scheduled task, a background-job
+       *  report, a fast-growth kickoff. Like `routing`, a row carrying it was NOT
+       *  typed by the user (`isUserAuthored` is false), so no learner reads it as
+       *  the user's words and no memory can quote it as evidence. Inert JSON in
+       *  the payload — no migration. */
+      harness?: HarnessUserOrigin;
     }
   | {
       role: 'tool';

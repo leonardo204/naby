@@ -138,6 +138,11 @@ export type ActivityKind =
   | 'memory_updated'
   | 'memory_superseded'
   | 'memory_deleted'
+  // memory-auto-apply: a review settled a row, a question was raised, and the
+  // per-call summary of a review / tidy pass (counts and the model, never text).
+  | 'memory_reviewed'
+  | 'memory_question'
+  | 'memory_review'
   | 'reflection_run'
   // -- harness / settings ---------------------------------------------------
   | 'harness_change'

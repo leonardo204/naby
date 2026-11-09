@@ -2,11 +2,11 @@
 id: phase-3-memory-hygiene
 title: Phase 3 P3-M10 — 기억 위생과 주권
 type: design
-version: 0.3.0
+version: 0.3.1
 status: active
 scope: 기억의 감쇠(접근 기반 주입 강등·검토 큐 승격), 사용자 주권 컨트롤(항목 편집·학습 끄기·임시 세션), 그리고 기억 브라우저(전용 모달·검색·필터·페이지네이션)를 다룬다. 기억 계약(phase-1_5-memory-contracts)의 저장·게이트·주입 불변식은 유지하며 가산 개정만 한다. ⚠️ 0.3.0: 고정 30/90일 절벽은 P3-M13b의 연속 강도 모델(R = e^(−t/(S×30일)), S=1이면 이 문서의 값과 동일)로 일반화됐다 — [phase-3-conversational-learning-hardening](phase-3-conversational-learning-hardening.md) §3.2가 소유한다.
-related: [phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-1_5-memory-contracts, phase-3-persona-agent]
-updated: 2026-08-04
+related: [phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-1_5-memory-contracts, phase-3-persona-agent, memory-auto-apply]
+updated: 2026-11-09
 implemented: 0.2.0
 ---
 
@@ -39,6 +39,8 @@ implemented: 0.2.0
 - **임시 세션(비학습)** — 세션 단위 토글. 켜진 세션에서는 기억 캡처·회고 제안·확증 관측이 생기지 않고, 회고 스윕이 그 세션을 건너뛴다. 세션 행에 `no_learn` 플래그(v10에 동승). 탭 UI에 작은 표시.
 
 ## 4. 기억 브라우저 (UI 재구조)
+
+> ⚠️ 0.3.1: [memory-auto-apply](memory-auto-apply.md) §6이 브라우저 맨 위에 "확인이 필요한 것"과 "최근 배운 것" 두 묶음을 더하고, 자동 승인 토글을 "배운 것을 바로 쓰기"로 바꾼다. 검색·필터·편집·감쇠 규칙은 그대로다.
 
 - 설정>에이전트의 기억 섹션은 **요약 카드로 축소**한다: 스코프별 확정/대기 수 + 최근 `proposed` 3건(확인/삭제 인라인) + "전체 보기" 버튼.
 - "전체 보기"가 **전용 전체 높이 모달**(설정 모달과 같은 계층, 그 위)을 연다: 검색(키/값 부분 일치), 필터(스코프·타입·상태·"오래됨"), 페이지네이션(50개 단위, 스토어에 limit/offset 읽기 추가 — 가산), 항목 행에서 확인/편집/삭제/출처 보기.

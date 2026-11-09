@@ -15,10 +15,23 @@ import type { Executor, ToolOutput, ToolSchema } from './engine.js';
 import type {
   McpEntry,
   MemoryItem,
+  MemoryProvenance,
+  MemoryQuestionCandidate,
   MemoryScope,
   MemoryType,
   MemoryWriteRequest,
 } from './store/store.js';
+import { sameMemoryValue } from './store/store.js';
+import {
+  decideMemoryActivation,
+  decideMemoryWrite,
+  locateEvidenceQuote,
+  type EvidenceQuoteCheck,
+  type MemoryActivation,
+  type MemoryBasis,
+  type MemoryHoldReason,
+} from './memory-gate.js';
+import { TRUST_RANK } from './trust.js';
 import { validateMcpEntry } from './mcp.js';
 import {
   DELEGATE_TOOL_NAME,
@@ -341,11 +354,15 @@ export function makeAddMcp(sink: McpProposalSink): Executor {
 // WHAT KEEPS THIS FROM BECOMING A POISONING VECTOR:
 //   * Every write asks for `proposed`, never `confirmed`. Only confirmed memory
 //     is injected (contract §5), so a captured row cannot shape a single turn
-//     until the human confirms it in the review UI. "완전 자동 메모리는 만들지
-//     않는다" (strategy §2.3) is enforced here, by construction.
-//   * provenance.source is 'artifact' — a local artifact tier, NOT 'user'. The
-//     model saying "the user prefers X" is not the same as the user saying it,
-//     and the trust ordering must reflect that (a later 'user'-tier row wins).
+//     until something agrees to it. Since memory-auto-apply that something may
+//     be the review after the turn instead of a click — but ONLY for a write the
+//     evidence rule made eligible (memory-gate.ts `decideMemoryActivation`): the
+//     user's own quoted words, or a project/session convention from a turn that
+//     read nothing from outside. Outside content still waits for a person.
+//   * The trust tier is the EVIDENCE's, not the model's claim: `user` only for a
+//     verified quote the model marked `stated`, `external` for a turn that read
+//     outside content, `artifact` otherwise. The model saying "the user prefers X"
+//     is not the user saying it, and the trust ordering still reflects that.
 //   * Secret-shaped values are refused deterministically (looksLikeSecret).
 //     app.db encryption is still an open decision (strategy §7.2), so a token
 //     written into durable memory would be a plaintext credential at rest.
@@ -377,6 +394,29 @@ export interface MemoryLearningSink {
   userId: string;
   /** The routed agent's own scope, used when the model names none (P3-M4b). */
   defaultScope?: MemoryScope;
+  /** memory-auto-apply: the evidence rule's inputs and the write's side
+   *  channels. ABSENT = the legacy proposal-only tool, byte for byte. */
+  activation?: MemoryActivationSink;
+}
+
+/** What `naby_remember` needs to apply the evidence rule (specs/memory-auto-apply.md §2). */
+export interface MemoryActivationSink {
+  /** `memory.autoApply` as read at turn start (R8). */
+  autoApply: boolean;
+  /** Has external content entered this turn so far (R4)? Read at call time. */
+  externalTurn(): boolean;
+  /** The messages the user TYPED in this session (R2) — `isUserAuthored` rows. */
+  userMessages(): readonly { text: string }[];
+  /** The row at (scope, scopeKey, key), if any. */
+  getExisting(scope: MemoryScope, scopeKey: string, key: string): MemoryItem | undefined;
+  /** Record this session agreeing with a row, changing nothing else. */
+  corroborate(id: string): boolean;
+  /** Raise a kept row's provenance when a better-sourced restatement arrives. */
+  upgradeProvenance?(id: string, patch: Partial<MemoryProvenance>): void;
+  /** The gate refused overwriting a user-tier row (R24 case 3). */
+  onOverwriteRefused?(existing: MemoryItem, candidate: MemoryQuestionCandidate): void;
+  /** A write landed. `alongside` = the row in use it was written next to. */
+  onWritten?(item: MemoryItem, info: { activation: MemoryActivation; alongside?: MemoryItem }): void;
 }
 
 /** Scopes the agent may write. 'org' is deliberately absent: team-wide memory is
@@ -460,9 +500,54 @@ export function validateRememberInput(input: {
   return problems;
 }
 
-/** Build the remember executor bound to a turn's sink. Every write lands as a
- *  PROPOSAL and the returned message tells the model exactly that, so it neither
- *  claims to the user that the fact is now active nor repeats the call. */
+/** The tail every legacy (proposal-only) result carries — kept word for word,
+ *  because it is still exactly true when `memory.autoApply` is off (R8, R12). */
+const PROPOSAL_TAIL =
+  'memory only shapes future answers after the USER agrees to it. The app offers them ' +
+  'that agreement on this very tool call, so do not send them to a settings screen to ' +
+  'find it. Do not call this again for the same fact, and do not tell the user it is ' +
+  'already being applied.';
+
+/** Why a held write is held, in the words the MODEL needs (R12). */
+const HOLD_REASON_TEXT: Record<MemoryHoldReason, string> = {
+  external:
+    'it was written in a turn that read outside content (a web page, a tool result, another agent), so the user must confirm it',
+  'user-scope-unquoted':
+    'a lasting fact about the user needs their own words as evidence — pass `evidenceQuote` when they said it',
+  'unverified-quote':
+    'the `evidenceQuote` given is not something the user typed in this conversation',
+  'auto-apply-off': 'the user has turned off using learned memory without confirmation',
+};
+
+/** The highest key suffix tried before giving up and writing over the row. */
+const FRESH_KEY_TRIES = 9;
+
+/**
+ * Build the remember executor bound to a turn's sink.
+ *
+ * TWO PATHS, chosen by the sink. Without `activation` (every caller written
+ * before memory-auto-apply, and the spikes that pin that contract) every write
+ * is a PROPOSAL exactly as before. With it, the evidence rule decides (§2):
+ *
+ *   * ELIGIBLE writes land `proposed` + review-pending (R36) on the tier the rule
+ *     chose, and the model is told it may say "remembered" (R12). The review after
+ *     the turn confirms, merges, refines or holds them — it is never this call.
+ *   * HELD writes land `proposed` with a reason, and the model is told why and
+ *     not to claim the fact is in use (R11, R12).
+ *
+ * Three guards around the write keep a write from DESTROYING anything before its
+ * review has looked at it:
+ *
+ *   * RESTATING a fact already held, word for word, writes nothing: it records
+ *     this session's corroboration (and a better source, R41) and says so.
+ *   * WRITING A DIFFERENT VALUE OVER A ROW IN USE goes to a fresh key
+ *     (`<key>-2`), so the old row keeps injecting until the review decides between
+ *     them — refine in place, supersede, or both (R41). Upserting over it would
+ *     have taken the old claim out of use, and out of existence, on the model's say.
+ *   * …unless the gate would REFUSE that overwrite (a lower tier over a confirmed
+ *     user-tier row): the refusal stands, as before, and the candidate is kept as
+ *     a question for the user (R24 case 3).
+ */
 export function makeRemember(sink: MemoryLearningSink): Executor {
   return async (input): Promise<ToolOutput> => {
     const rec = asRecord(input);
@@ -490,37 +575,144 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
     }
 
     const normalizedKey = normalizeMemoryKey(key);
+    const activation = sink.activation;
+    if (!activation) return legacyRemember(sink, { scope, scopeKey, type, normalizedKey, value });
+
+    // -- the evidence rule (§2) ---------------------------------------------
+    const rawQuote = typeof rec.evidenceQuote === 'string' ? rec.evidenceQuote.trim() : '';
+    const quote = rawQuote.slice(0, MEMORY_VALUE_MAX);
+    const basis: MemoryBasis | undefined =
+      rec.basis === 'stated' || rec.basis === 'inferred' ? rec.basis : undefined;
+    const quoteCheck: EvidenceQuoteCheck = !quote
+      ? 'none'
+      : locateEvidenceQuote(quote, activation.userMessages())
+        ? 'verified'
+        : 'fabricated';
+    const decision = decideMemoryActivation({
+      scope: scope as MemoryScope,
+      ...(basis ? { basis } : {}),
+      quote: quoteCheck,
+      externalTurn: activation.externalTurn(),
+      autoApply: activation.autoApply,
+    });
+    const eligible = decision.status === 'confirmed';
+    const provenance: MemoryWriteRequest['provenance'] = {
+      source: decision.source,
+      sessionId: sink.sessionId,
+      basis: 'learned from this conversation',
+      // Only a quote that PASSED the check is evidence (R30); a failed one is
+      // reported back to the model and kept nowhere.
+      ...(quoteCheck === 'verified' ? { evidenceQuote: quote } : {}),
+      ...(basis ? { basisKind: basis } : {}),
+    };
+
+    // -- restatement: nothing new to write ----------------------------------
+    let writeKey = normalizedKey;
+    const existing = activation.getExisting(scope as MemoryScope, scopeKey, normalizedKey);
+    const current = existing && existing.supersededAt === undefined ? existing : undefined;
+    if (current && current.status === 'confirmed' && sameMemoryValue(current.value, value.trim())) {
+      activation.corroborate(current.id);
+      // A better source for the same claim raises the kept row (R41).
+      if (eligible && TRUST_RANK[decision.source] > TRUST_RANK[current.provenance.source]) {
+        activation.upgradeProvenance?.(current.id, {
+          source: decision.source,
+          ...(provenance.evidenceQuote ? { evidenceQuote: provenance.evidenceQuote } : {}),
+          ...(basis ? { basisKind: basis } : {}),
+        });
+      }
+      return {
+        content:
+          `"${normalizedKey}" was already remembered with this exact meaning, so nothing new was saved. ` +
+          'It is already in use; do not call this again for it.',
+        data: {
+          id: current.id,
+          key: current.key,
+          scope: current.scope,
+          status: current.status,
+          value: current.value,
+          review: 'known',
+        },
+      };
+    }
+
+    // -- a different value over a row in use --------------------------------
+    if (current && current.status === 'confirmed' && current.reviewState === undefined) {
+      const refusal = decideMemoryWrite(
+        {
+          scope: scope as MemoryScope,
+          scopeKey,
+          type: type as MemoryType,
+          key: normalizedKey,
+          value: value.trim(),
+          provenance,
+          confidence: CAPTURE_CONFIDENCE,
+          requestedStatus: 'proposed',
+        },
+        current,
+      );
+      if (refusal.behavior === 'deny') {
+        activation.onOverwriteRefused?.(current, {
+          scope: scope as MemoryScope,
+          scopeKey,
+          key: normalizedKey,
+          value: value.trim(),
+          type: type as MemoryType,
+          sessionId: sink.sessionId,
+        });
+        return {
+          content:
+            `Nothing was remembered: ${refusal.reason.replace(/\.$/, '')}. ` +
+            'naby will ask the user which of the two to keep, so do not ask them again in this conversation.',
+          isError: true,
+        };
+      }
+      writeKey = freshMemoryKey(activation, scope as MemoryScope, scopeKey, normalizedKey);
+    }
+
     try {
-      // The write gate runs INSIDE putMemory (decideMemoryWrite): it can refuse
-      // outright (throws) or pin the status. We ask for 'proposed' regardless, so
-      // a capture never becomes injectable without a human.
+      // The write gate still runs INSIDE putMemory (decideMemoryWrite). Every
+      // write asks for `proposed`; eligibility is carried as the review hold.
       const saved = sink.putMemory({
         scope: scope as MemoryScope,
         scopeKey,
         type: type as MemoryType,
-        key: normalizedKey,
+        key: writeKey,
         value: value.trim(),
-        provenance: {
-          source: 'artifact',
-          sessionId: sink.sessionId,
-          basis: 'learned from this conversation',
-        },
+        provenance,
         confidence: CAPTURE_CONFIDENCE,
         requestedStatus: 'proposed',
+        ...(eligible ? { reviewState: 'pending' as const } : {}),
       });
+      activation.onWritten?.(saved, {
+        activation: decision,
+        ...(writeKey !== normalizedKey && current ? { alongside: current } : {}),
+      });
+      const data = {
+        id: saved.id,
+        key: saved.key,
+        scope: saved.scope,
+        status: saved.status,
+        value: saved.value,
+        review: eligible ? 'pending' : 'held',
+        ...(decision.status === 'proposed' ? { holdReason: decision.holdReason } : {}),
+      };
+      if (eligible) {
+        return {
+          content:
+            `Saved "${saved.key}" to ${scope} memory; in use from the next turn after a quick check. ` +
+            'You may tell the user you have remembered it ("기억했어요"). ' +
+            'Do not call this again for the same fact.',
+          data,
+        };
+      }
       return {
         content:
-          `Noted "${normalizedKey}" in ${scope} memory as a PROPOSAL. It is not in use yet — ` +
-          'memory only shapes future answers after the USER agrees to it. The app offers them ' +
-          'that agreement on this very tool call, so do not send them to a settings screen to ' +
-          'find it. Do not call this again for the same fact, and do not tell the user it is ' +
-          'already being applied.',
-        data: { id: saved.id, key: saved.key, scope: saved.scope, status: saved.status },
+          `Noted "${saved.key}" in ${scope} memory as a PROPOSAL, because ` +
+          `${HOLD_REASON_TEXT[decision.status === 'proposed' ? decision.holdReason : 'auto-apply-off']}. ` +
+          `It is not in use yet — ${PROPOSAL_TAIL}`,
+        data,
       };
     } catch (e) {
-      // A gate deny (e.g. a lower tier trying to overwrite a confirmed row). The
-      // store's `memory write denied:` prefix is for logs; the model gets the
-      // gate's own sentence, which already says what to do instead.
       const why = (e instanceof Error ? e.message : String(e))
         .replace(/^memory write denied: /, '')
         .replace(/\.$/, '');
@@ -530,6 +722,64 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
       };
     }
   };
+}
+
+/** `<key>-2`, `<key>-3`, … — the first key in this scope that is free (or holds
+ *  only a row that is not in use), so a new claim can wait for review BESIDE the
+ *  row it may replace. Falls back to the key itself. */
+function freshMemoryKey(
+  activation: MemoryActivationSink,
+  scope: MemoryScope,
+  scopeKey: string,
+  key: string,
+): string {
+  for (let n = 2; n <= FRESH_KEY_TRIES; n += 1) {
+    const candidate = `${key}-${n}`.slice(0, 64);
+    const taken = activation.getExisting(scope, scopeKey, candidate);
+    if (!taken || taken.supersededAt !== undefined || taken.status !== 'confirmed') return candidate;
+  }
+  return key;
+}
+
+/** The pre-memory-auto-apply write, unchanged: a proposal on the artifact tier. */
+function legacyRemember(
+  sink: MemoryLearningSink,
+  w: { scope: string; scopeKey: string; type: string; normalizedKey: string; value: string },
+): ToolOutput {
+  try {
+    // The write gate runs INSIDE putMemory (decideMemoryWrite): it can refuse
+    // outright (throws) or pin the status. We ask for 'proposed' regardless, so
+    // a capture never becomes injectable without a human.
+    const saved = sink.putMemory({
+      scope: w.scope as MemoryScope,
+      scopeKey: w.scopeKey,
+      type: w.type as MemoryType,
+      key: w.normalizedKey,
+      value: w.value.trim(),
+      provenance: {
+        source: 'artifact',
+        sessionId: sink.sessionId,
+        basis: 'learned from this conversation',
+      },
+      confidence: CAPTURE_CONFIDENCE,
+      requestedStatus: 'proposed',
+    });
+    return {
+      content: `Noted "${w.normalizedKey}" in ${w.scope} memory as a PROPOSAL. It is not in use yet — ${PROPOSAL_TAIL}`,
+      data: { id: saved.id, key: saved.key, scope: saved.scope, status: saved.status },
+    };
+  } catch (e) {
+    // A gate deny (e.g. a lower tier trying to overwrite a confirmed row). The
+    // store's `memory write denied:` prefix is for logs; the model gets the
+    // gate's own sentence, which already says what to do instead.
+    const why = (e instanceof Error ? e.message : String(e))
+      .replace(/^memory write denied: /, '')
+      .replace(/\.$/, '');
+    return {
+      content: `Nothing was remembered: ${why}.`,
+      isError: true,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -736,8 +986,11 @@ export const rememberSchema: ToolSchema = {
   description:
     'Remember a durable fact about THIS user so future conversations start from it — how they want ' +
     'work done, a standing rule, a term their team uses, the state of an ongoing project. Call it the ' +
-    'moment you learn something that would still be true next week. The entry is saved as a PROPOSAL ' +
-    'and does NOT affect any answer until the user confirms it, so proposing one is safe and cheap. ' +
+    'moment you learn something that would still be true next week. When the user TOLD you (e.g. ' +
+    '"remember this", "from now on…"), pass basis "stated" and copy their exact words into evidenceQuote: ' +
+    'that is saved and used from the next turn after a quick check. A fact you inferred yourself is ' +
+    'basis "inferred". Anything learned from a web page, a tool result or another agent waits for the ' +
+    'user to confirm it. ' +
     'Do NOT store: transient task state, anything you were told only for this one message, secrets ' +
     '(tokens, keys, passwords), or a fact you already remembered. One fact per call.',
   parameters: {
@@ -763,6 +1016,17 @@ export const rememberSchema: ToolSchema = {
         enum: ['session', 'project', 'user'],
         description:
           'How far it applies: "user" for anywhere, "project" for this working directory only, "session" for this conversation only. Defaults to the agent\'s own scope.',
+      },
+      basis: {
+        type: 'string',
+        enum: ['stated', 'inferred'],
+        description:
+          '"stated" when the user said it themselves, "inferred" when you concluded it from what they did or said.',
+      },
+      evidenceQuote: {
+        type: 'string',
+        description:
+          'The user\'s own words this came from, copied character for character from one of their messages in this conversation. A paraphrase does not count. Required for a "user"-scope fact to be used without their confirmation.',
       },
     },
     required: ['key', 'value', 'type'],

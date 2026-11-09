@@ -1063,7 +1063,14 @@ export function isUserAuthored(m: RuntimeMessage): boolean {
   if (m.role !== 'user') return false;
   // A turn another session started (cross-session-messaging §3.3) is not the
   // user's words either: it is naby's request from another tab, or its answer.
-  return m.speaker === undefined && m.routing === undefined && m.crossSession === undefined;
+  // Nor is a row the harness wrote to drive a turn — the autonomy loop's
+  // "carry on", a scheduled task, a job report (memory-auto-apply R2).
+  return (
+    m.speaker === undefined &&
+    m.routing === undefined &&
+    m.crossSession === undefined &&
+    m.harness === undefined
+  );
 }
 
 

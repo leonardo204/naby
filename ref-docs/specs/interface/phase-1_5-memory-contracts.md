@@ -2,11 +2,11 @@
 id: phase-1_5-memory-contracts
 title: Phase 1.5 — Memory Contracts (scoped schema, write gate, injection, Store extension)
 type: interface
-version: 0.4.0
+version: 0.4.1
 status: draft
 scope: The on-disk and in-process contracts for Phase 1.5 scoped memory — the memory record shape (scope/type/provenance/confidence/status), the keying model and how it extends (not violates) the Phase-1 sessionId-only invariant, the cascade-exemption rules, the deterministic memory write-gate contract, the turn-time retrieval + token-budget injection contract, and the Store interface additions.
-related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl, phase-3-continuous-learning]
-updated: 2026-07-30
+related: [phase-1_5-personalization-data-layer, phase-1-contracts, personalization-strategy, phase-2-personalization-hitl, phase-3-continuous-learning, memory-auto-apply]
+updated: 2026-11-09
 ---
 
 # Phase 1.5 — Memory Contracts
@@ -138,6 +138,7 @@ type InjectedMemory = {
 **Invariants:**
 
 - **Budget is a hard ceiling.** `tokensUsed ≤ tokenBudget` always; over-budget candidates are dropped and **counted** (`droppedForBudget`) — a silent truncation would read as "nothing relevant" when the opposite is true.
+- *(0.4.1 note)* [`memory-auto-apply`](../../../specs/memory-auto-apply.md) keeps this invariant and the four gate invariants of §4 unchanged. What it changes is WHEN a trusted-tier write asks for `confirmed`: a write whose evidence quote is found in the user's own messages becomes `confirmed` after a background model review instead of waiting for a click. External-origin writes still land `proposed`.
 - **Only `confirmed` memory injects by default.** `proposed` rows do not shape a turn until confirmed (they may be surfaced for confirmation via P15-06, not injected). Prevents un-vetted / poisoned candidates from acting before review.
 - **Scope precedence on ties:** `session` (working) > `project` > `user` > `org` for the same relevance, reflecting immediacy; type priority (working/episodic/semantic/procedural) is a tunable, not a contract (impl §7-open).
 - **Injection is logged per turn.** The set of injected `item.id`s is recorded (impl P15-02 acceptance) so "memory hit rate" (impl §5) is computable and so a bad injection is auditable.

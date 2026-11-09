@@ -2,11 +2,11 @@
 id: phase-3-continuous-learning
 title: Phase 3 P3-M8 — 연속 학습 (세션 회고와 암묵 라벨)
 type: design
-version: 0.9.0
+version: 0.9.1
 status: active
 scope: 모든 세션의 대화록을 학습 증거로 바꾸는 연속 학습 루프. 세션 회고 패스, 암묵 교정(correctedAfter) 기록, 기억 통합, 원장 확장, 학습 깊이 표시를 M8a~M8d로 나눈다. 신뢰 판정 알고리즘 자체는 butterfly-trust-meter가, 원장 계약은 checkin-contracts가 계속 소유한다.
-related: [phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-conversational-learning-hardening, personalization-strategy, phase-1_5-memory-contracts]
-updated: 2026-08-04
+related: [phase-3-persona-agent, phase-3-butterfly-trust-meter, phase-3-checkin-contracts, phase-3-conversational-learning-hardening, personalization-strategy, phase-1_5-memory-contracts, memory-auto-apply]
+updated: 2026-11-09
 ---
 
 # Phase 3 P3-M8 — 연속 학습 (세션 회고와 암묵 라벨)
@@ -140,6 +140,8 @@ M8a가 남긴 버그 하나를 고친다. **"judge가 없다"와 "judge가 읽�
 - 관측은 커서처럼 진행 상태가 아니라 증거지만, 근거 대화가 지워지면 함께 지운다 — 세션 삭제가 그 세션의 관측 행을 지우고, 기억 삭제가 그 기억의 관측을 지운다. 이미 confirmed된 항목이 관측 감소로 되돌아가지는 않는다.
 
 ### 5.4 승인 큐와 옵트인 자동 confirm
+
+> ⚠️ 0.9.1: [memory-auto-apply](memory-auto-apply.md)가 이 절을 대체한다. 근거 인용이 사용자 메시지에 있는 후보는 바로 `confirmed`가 되고, `memory.autoConfirmCorroborated`는 없어진다. 확증 관측(§5.3)은 주입 순위와 강도에 계속 쓴다.
 
 - 기억 검토 API가 항목별 확증 수를 함께 내고, 검토 UI는 `proposed`를 확증 수 내림차순으로 정렬하며 "세션 N회 관측" 배지를 단다. 사람이 가장 검증된 후보부터 본다.
 - 설정 `memory.autoConfirmCorroborated`(기본 꺼짐). 켜면 통합 단계가 **artifact 등급이고 확증 ≥ `CORROBORATION_THRESHOLD`(3)인** `proposed`를 `confirmed`로 승격하고 로그를 남긴다. `external`은 설정과 무관하게 절대 자동 confirm되지 않는다 — 기억 계약 §4 불변식 1은 그대로다.

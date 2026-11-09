@@ -69,9 +69,18 @@ import type {
   HarnessTrust,
   MemoryDeleteSelector,
   MemoryItem,
+  MemoryPairRelation,
+  MemoryPairVerdict,
   MemoryProvenance,
+  MemoryQuestion,
+  MemoryQuestionAnswer,
+  MemoryQuestionCandidate,
+  MemoryQuestionInput,
+  MemoryQuestionKind,
+  MemoryQuestionStatus,
   MemoryScope,
   MemoryStatus,
+  MemorySupersededReason,
   MemoryType,
   MemoryVolatility,
   MemoryWriteRequest,
@@ -317,7 +326,23 @@ function openSilently(path: string): DatabaseSyncType {
 // of each session saw). Purely additive, no ALTER, no backfill: an upgraded
 // database simply has no recommendations and no cursors, which is exactly what
 // lets the boot sweep back-fill it (D18).
-export const SCHEMA_VERSION = 15;
+//
+// v16 — MEMORY AUTO-APPLY (specs/memory-auto-apply.md §7 R35). Two tables and
+// five `memory_items` columns. The columns: `prov_evidence_quote` (the user's own
+// words a memory was read out of, kept only when found verbatim), `prov_basis_kind`
+// (stated | inferred), `superseded_reason` (who retired a row: tidy-* / review /
+// question), `review_state` ('pending' while a row waits for its model review) and
+// `reviewed_at` (when a model last compared the row with its scope). Added by the
+// same column-absence-gated ALTER as v10-v14, and present in the CREATE for a fresh
+// database. The tables, both IF NOT EXISTS: `memory_pair_verdicts` (a judged pair
+// is never asked again until one side changes, R16) and `memory_questions` (what
+// naby is waiting to ask, R25).
+//
+// NO BACKFILL, and every NULL is the honest reading: an existing row has no quote
+// (none was ever asked for), no basis, no review pending, and was never compared
+// — which is exactly what puts it in the tidy backlog (R14). An existing
+// `confirmed` row keeps injecting; nothing about it changes until a review looks.
+export const SCHEMA_VERSION = 16;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -375,6 +400,11 @@ CREATE TABLE IF NOT EXISTS memory_items (
   prov_supersedes   TEXT,            -- v12: RESERVATION — the row this one replaces once confirmed
   volatility        TEXT,            -- v12: stable | transient; NULL reads as stable
   strength          REAL NOT NULL DEFAULT 1,  -- v12: S of R = exp(-t / (S x 30d)); 1..STRENGTH_CAP
+  prov_evidence_quote TEXT,          -- v16: the user's verbatim words, when found in the session
+  prov_basis_kind   TEXT,            -- v16: stated | inferred; NULL = unknown
+  superseded_reason TEXT,            -- v16: who superseded it (tidy-* | review-contradicts | question)
+  review_state      TEXT,            -- v16: 'pending' while waiting for the model review; NULL = not waiting
+  reviewed_at       INTEGER,         -- v16: when a model last compared it with its scope; NULL = never
   UNIQUE (scope, scope_key, key)
 );
 
@@ -408,6 +438,38 @@ CREATE TABLE IF NOT EXISTS memory_observations (
   PRIMARY KEY (memory_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS memory_observations_by_session ON memory_observations (session_id);
+
+-- v16 (memory-auto-apply R16). One row per judged PAIR, stored a_id < b_id. The
+-- two updated_at values are what each side said when it was judged: a later edit
+-- to either makes the verdict stale and the pair is asked again. 'both-valid' is
+-- the user's "keep both" answer and is never re-asked.
+CREATE TABLE IF NOT EXISTS memory_pair_verdicts (
+  a_id         TEXT NOT NULL,
+  b_id         TEXT NOT NULL,
+  a_updated_at INTEGER NOT NULL,
+  b_updated_at INTEGER NOT NULL,
+  relation     TEXT NOT NULL,   -- equivalent | refines | contradicts | unrelated | both-valid
+  judged_at    INTEGER NOT NULL,
+  PRIMARY KEY (a_id, b_id)
+);
+
+-- v16 (memory-auto-apply R25). What naby is waiting to ask the user. One OPEN
+-- question per pair is enforced by putMemoryQuestion; a question closes when
+-- either memory is deleted or superseded.
+CREATE TABLE IF NOT EXISTS memory_questions (
+  id             TEXT PRIMARY KEY,
+  kind           TEXT NOT NULL,   -- conflict | overwrite
+  a_id           TEXT NOT NULL,
+  b_id           TEXT,            -- conflict only
+  candidate_json TEXT,            -- overwrite only: the refused value
+  created_at     INTEGER NOT NULL,
+  status         TEXT NOT NULL,   -- open | answered | closed
+  answer         TEXT,            -- a | b | both
+  answered_at    INTEGER,
+  shown_count    INTEGER NOT NULL DEFAULT 0,
+  snoozed_until  INTEGER
+);
+CREATE INDEX IF NOT EXISTS memory_questions_by_status ON memory_questions (status);
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
   name    TEXT PRIMARY KEY,
@@ -744,6 +806,12 @@ type MemoryRow = {
   prov_supersedes?: string | null;
   volatility?: string | null;
   strength?: number | null;
+  // v16 (memory-auto-apply). Optional for the same reason.
+  prov_evidence_quote?: string | null;
+  prov_basis_kind?: string | null;
+  superseded_reason?: string | null;
+  review_state?: string | null;
+  reviewed_at?: number | null;
 };
 
 function toMemoryItem(row: MemoryRow): MemoryItem {
@@ -756,6 +824,10 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     provenance.createdFrom = row.prov_created_from;
   if (row.prov_supersedes !== null && row.prov_supersedes !== undefined)
     provenance.supersedes = row.prov_supersedes;
+  if (row.prov_evidence_quote !== null && row.prov_evidence_quote !== undefined)
+    provenance.evidenceQuote = row.prov_evidence_quote;
+  if (row.prov_basis_kind === 'stated' || row.prov_basis_kind === 'inferred')
+    provenance.basisKind = row.prov_basis_kind;
   return {
     id: row.id,
     scope: row.scope as MemoryScope,
@@ -790,7 +862,72 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     // covers only a partial SELECT and a row read mid-migration, where 1 (the
     // column's own DEFAULT) is the right answer.
     strength: row.strength === null || row.strength === undefined ? 1 : Number(row.strength),
+    // v16. Absent rather than null, for the reason every optional above is.
+    ...(row.review_state === 'pending' ? { reviewState: 'pending' as const } : {}),
+    ...(row.reviewed_at !== null && row.reviewed_at !== undefined
+      ? { reviewedAt: Number(row.reviewed_at) }
+      : {}),
+    ...(row.superseded_reason !== null && row.superseded_reason !== undefined && row.superseded_at != null
+      ? { supersededReason: row.superseded_reason as MemorySupersededReason }
+      : {}),
   };
+}
+
+// Row shapes for the two v16 tables.
+type PairVerdictRow = {
+  a_id: string;
+  b_id: string;
+  a_updated_at: number;
+  b_updated_at: number;
+  relation: string;
+  judged_at: number;
+};
+
+type QuestionRow = {
+  id: string;
+  kind: string;
+  a_id: string;
+  b_id: string | null;
+  candidate_json: string | null;
+  created_at: number;
+  status: string;
+  answer: string | null;
+  answered_at: number | null;
+  shown_count: number;
+  snoozed_until: number | null;
+};
+
+function toMemoryQuestion(row: QuestionRow): MemoryQuestion {
+  let candidate: MemoryQuestionCandidate | undefined;
+  if (row.candidate_json) {
+    try {
+      candidate = JSON.parse(row.candidate_json) as MemoryQuestionCandidate;
+    } catch {
+      candidate = undefined;
+    }
+  }
+  return {
+    id: row.id,
+    kind: row.kind as MemoryQuestionKind,
+    aId: row.a_id,
+    ...(row.b_id ? { bId: row.b_id } : {}),
+    ...(candidate ? { candidate } : {}),
+    createdAt: Number(row.created_at),
+    status: row.status as MemoryQuestionStatus,
+    ...(row.answer ? { answer: row.answer as MemoryQuestionAnswer } : {}),
+    ...(row.answered_at !== null && row.answered_at !== undefined
+      ? { answeredAt: Number(row.answered_at) }
+      : {}),
+    shownCount: Number(row.shown_count ?? 0),
+    ...(row.snoozed_until !== null && row.snoozed_until !== undefined
+      ? { snoozedUntil: Number(row.snoozed_until) }
+      : {}),
+  };
+}
+
+/** A pair's storage order — the smaller id first, so one pair is one row. */
+function orderPair(aId: string, bId: string): [string, string, boolean] {
+  return aId < bId ? [aId, bId, false] : [bId, aId, true];
 }
 
 // ---------------------------------------------------------------------------
@@ -1331,6 +1468,13 @@ export class SqliteStore implements Store {
         ['prov_supersedes', 'TEXT'],
         ['volatility', 'TEXT'],
         ['strength', 'REAL NOT NULL DEFAULT 1'],
+        // v16 (memory-auto-apply R35): all nullable, so no backfill — see
+        // SCHEMA_VERSION for why NULL is the honest reading of each.
+        ['prov_evidence_quote', 'TEXT'],
+        ['prov_basis_kind', 'TEXT'],
+        ['superseded_reason', 'TEXT'],
+        ['review_state', 'TEXT'],
+        ['reviewed_at', 'INTEGER'],
       ];
       for (const [name, decl] of additions) {
         if (!memoryCols.some((c) => c.name === name)) {
@@ -1657,6 +1801,7 @@ export class SqliteStore implements Store {
     confidence: number;
     status: MemoryStatus;
     volatility?: MemoryVolatility;
+    reviewState?: 'pending';
   }): MemoryItem {
     const now = Date.now();
     const existing = this.db
@@ -1670,11 +1815,18 @@ export class SqliteStore implements Store {
     const prov = fields.provenance;
 
     if (existing) {
+      // v16: a MATERIALLY changed value is a claim no model has compared yet, so
+      // `reviewed_at` is cleared (R14); a restatement keeps it. `review_state` is
+      // whatever this write asked for — a write that is not itself pending is not
+      // waiting for anything.
+      const valueChanged = !sameMemoryValue(existing.value, fields.value);
       this.db
         .prepare(
           `UPDATE memory_items SET
              type = ?, value = ?, prov_source = ?, prov_session_id = ?,
              prov_basis = ?, prov_created_from = ?, prov_supersedes = ?,
+             prov_evidence_quote = ?, prov_basis_kind = ?, review_state = ?,
+             reviewed_at = CASE WHEN ? THEN NULL ELSE reviewed_at END,
              volatility = ?, confidence = ?, status = ?,
              updated_at = ?
            WHERE id = ?`,
@@ -1687,6 +1839,10 @@ export class SqliteStore implements Store {
           prov.basis ?? null,
           prov.createdFrom ?? null,
           prov.supersedes ?? null,
+          prov.evidenceQuote ?? null,
+          prov.basisKind ?? null,
+          fields.reviewState ?? null,
+          valueChanged ? 1 : 0,
           fields.volatility ?? null,
           fields.confidence,
           fields.status,
@@ -1699,9 +1855,10 @@ export class SqliteStore implements Store {
           `INSERT INTO memory_items
              (id, scope, scope_key, type, key, value,
               prov_source, prov_session_id, prov_basis, prov_created_from,
-              prov_supersedes, volatility,
+              prov_supersedes, prov_evidence_quote, prov_basis_kind, review_state,
+              volatility,
               confidence, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -1715,6 +1872,9 @@ export class SqliteStore implements Store {
           prov.basis ?? null,
           prov.createdFrom ?? null,
           prov.supersedes ?? null,
+          prov.evidenceQuote ?? null,
+          prov.basisKind ?? null,
+          fields.reviewState ?? null,
           fields.volatility ?? null,
           fields.confidence,
           fields.status,
@@ -1737,6 +1897,8 @@ export class SqliteStore implements Store {
     if (prov.basis !== undefined) provenance.basis = prov.basis;
     if (prov.createdFrom !== undefined) provenance.createdFrom = prov.createdFrom;
     if (prov.supersedes !== undefined) provenance.supersedes = prov.supersedes;
+    if (prov.evidenceQuote !== undefined) provenance.evidenceQuote = prov.evidenceQuote;
+    if (prov.basisKind !== undefined) provenance.basisKind = prov.basisKind;
     return {
       id,
       scope: fields.scope,
@@ -1796,6 +1958,10 @@ export class SqliteStore implements Store {
       confidence: req.confidence,
       status: decision.status,
       ...(req.volatility ? { volatility: req.volatility } : {}),
+      // v16 (R36): a pending review is a HOLD, never an elevation — the row is
+      // `proposed` whatever it says here, so a writer asking for it can only make
+      // its own write wait.
+      ...(req.reviewState === 'pending' ? { reviewState: 'pending' as const } : {}),
     });
 
     // A SUPERSEDED ROW THAT IS RE-CLAIMED COMES BACK (P3-M13a §3.1). Only when
@@ -1810,11 +1976,12 @@ export class SqliteStore implements Store {
     if (existingRow && valueChanged && existingRow.superseded_at != null) {
       this.db
         .prepare(
-          'UPDATE memory_items SET superseded_at = NULL, superseded_by = NULL WHERE id = ?',
+          'UPDATE memory_items SET superseded_at = NULL, superseded_by = NULL, superseded_reason = NULL WHERE id = ?',
         )
         .run(saved.id);
       delete saved.supersededAt;
       delete saved.supersededBy;
+      delete saved.supersededReason;
     }
 
     // CORROBORATION (P3-M8b, §5.3). Recorded HERE rather than by the caller so a
@@ -1853,7 +2020,12 @@ export class SqliteStore implements Store {
     return saved;
   }
 
-  supersedeMemory(oldId: string, newId: string, at: number = Date.now()): boolean {
+  supersedeMemory(
+    oldId: string,
+    newId: string,
+    at: number = Date.now(),
+    reason?: MemorySupersededReason,
+  ): boolean {
     this.assertOpen();
     if (!oldId || !newId || oldId === newId) return false;
     const older = this.db
@@ -1870,10 +2042,30 @@ export class SqliteStore implements Store {
     // however the reservation was made.
     if (newer.volatility === 'transient' && older.volatility !== 'transient') return false;
     this.db
-      .prepare('UPDATE memory_items SET superseded_at = ?, superseded_by = ? WHERE id = ?')
-      .run(Math.trunc(at), newId, oldId);
-    logActivity('memory_superseded', { oldId, newId, key: older.key, scope: older.scope });
+      .prepare(
+        'UPDATE memory_items SET superseded_at = ?, superseded_by = ?, superseded_reason = ? WHERE id = ?',
+      )
+      .run(Math.trunc(at), newId, reason ?? null, oldId);
+    // A retired memory is no longer a side of anything worth asking about (R25).
+    this.closeQuestionsNaming(oldId);
+    logActivity('memory_superseded', {
+      oldId,
+      newId,
+      key: older.key,
+      scope: older.scope,
+      ...(reason ? { reason } : {}),
+    });
     return true;
+  }
+
+  /** Close every OPEN question that names this memory (R25). */
+  private closeQuestionsNaming(memoryId: string): void {
+    this.db
+      .prepare(
+        `UPDATE memory_questions SET status = 'closed'
+          WHERE status = 'open' AND (a_id = ? OR b_id = ?)`,
+      )
+      .run(memoryId, memoryId);
   }
 
   revertSupersession(id: string, at: number = Date.now()): boolean {
@@ -1890,7 +2082,8 @@ export class SqliteStore implements Store {
     this.db
       .prepare(
         `UPDATE memory_items
-            SET superseded_at = NULL, superseded_by = NULL, last_injected_at = ?
+            SET superseded_at = NULL, superseded_by = NULL, superseded_reason = NULL,
+                last_injected_at = ?
           WHERE id = ?`,
       )
       .run(now, id);
@@ -2072,8 +2265,10 @@ export class SqliteStore implements Store {
     const now = Date.now();
     this.db
       .prepare(
+        // v16: a person's yes also settles a pending review — there is nothing
+        // left for a model to decide about a row the user vouched for.
         `UPDATE memory_items SET status = 'confirmed', prov_source = 'user',
-            updated_at = ?, last_injected_at = ?
+            updated_at = ?, last_injected_at = ?, review_state = NULL
           WHERE id = ? AND status = 'proposed'`,
       )
       .run(now, now, id);
@@ -2093,13 +2288,16 @@ export class SqliteStore implements Store {
     // The SAME "is this the same claim" test putMemory applies (P3-M8b §5.3),
     // asked BEFORE the write while the old value is still readable.
     const changed = !sameMemoryValue(existing.value, value);
+    // v16 (R14): a person's edit is a claim no model has compared with the rest
+    // of the scope, so a material change puts the row back in the tidy backlog.
     this.db
       .prepare(
         `UPDATE memory_items
-            SET value = ?, prov_source = 'user', updated_at = ?, last_injected_at = ?
+            SET value = ?, prov_source = 'user', updated_at = ?, last_injected_at = ?,
+                reviewed_at = CASE WHEN ? THEN NULL ELSE reviewed_at END
           WHERE id = ?`,
       )
-      .run(value, now, now, id);
+      .run(value, now, now, changed ? 1 : 0, id);
     // A materially different value is a NEW claim, so the sessions that agreed
     // with the OLD one no longer agree with anything — the identical rule, and
     // the identical statement, as `recordMemoryObservation`'s clear. A pure
@@ -2158,7 +2356,28 @@ export class SqliteStore implements Store {
     if ('id' in sel) {
       this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(sel.id);
       this.db.prepare('DELETE FROM memory_items WHERE id = ?').run(sel.id);
+      // v16: the row's verdicts and open questions go with it (R25) — a verdict
+      // about a memory that no longer exists can only ever be wrong.
+      this.db
+        .prepare('DELETE FROM memory_pair_verdicts WHERE a_id = ? OR b_id = ?')
+        .run(sel.id, sel.id);
+      this.closeQuestionsNaming(sel.id);
       return;
+    }
+    // Bulk delete-by-source: close the questions first, while the ids are still
+    // readable.
+    {
+      const ids = (
+        sel.sessionId !== undefined
+          ? this.db
+              .prepare('SELECT id FROM memory_items WHERE prov_source = ? AND prov_session_id = ?')
+              .all(sel.source, sel.sessionId)
+          : this.db.prepare('SELECT id FROM memory_items WHERE prov_source = ?').all(sel.source)
+      ) as { id: string }[];
+      for (const { id } of ids) {
+        this.db.prepare('DELETE FROM memory_pair_verdicts WHERE a_id = ? OR b_id = ?').run(id, id);
+        this.closeQuestionsNaming(id);
+      }
     }
     // delete-by-source (poisoning rollback): drop every row from one trust tier,
     // optionally narrowed to the session it was learned in.
@@ -2186,6 +2405,307 @@ export class SqliteStore implements Store {
         .prepare('DELETE FROM memory_items WHERE prov_source = ?')
         .run(source);
     }
+  }
+
+  // -- memory review (memory-auto-apply) -----------------------------------
+
+  listPendingReviewMemory(opts?: { sessionId?: string; limit?: number }): MemoryItem[] {
+    this.assertOpen();
+    const limit =
+      typeof opts?.limit === 'number' ? ` LIMIT ${Math.max(0, Math.trunc(opts.limit))}` : '';
+    // The session's own rows first (the turn that just ended), then the rest by
+    // age — a review that failed elsewhere is retried by whichever turn ends next.
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+          WHERE review_state = 'pending' AND superseded_at IS NULL
+          ORDER BY CASE WHEN prov_session_id = ? THEN 0 ELSE 1 END, created_at ASC${limit}`,
+      )
+      .all(opts?.sessionId ?? '') as MemoryRow[];
+    return rows.map(toMemoryItem);
+  }
+
+  settleMemoryReview(
+    id: string,
+    outcome: { status: MemoryStatus; at?: number },
+  ): MemoryItem | undefined {
+    this.assertOpen();
+    const row = this.db.prepare('SELECT * FROM memory_items WHERE id = ?').get(id) as
+      | MemoryRow
+      | undefined;
+    if (!row) return undefined;
+    // Contract §4 invariant 1, restated where it can be enforced: a review can
+    // never be the path an external row becomes confirmed (spec R40).
+    const status: MemoryStatus =
+      outcome.status === 'confirmed' && row.prov_source === 'external' ? 'proposed' : outcome.status;
+    const at = Math.trunc(outcome.at ?? Date.now());
+    this.db
+      .prepare(
+        `UPDATE memory_items SET status = ?, review_state = NULL, reviewed_at = ?
+          WHERE id = ?`,
+      )
+      .run(status, at, id);
+    logActivity('memory_reviewed', { id, key: row.key, scope: row.scope, status });
+    return this.getMemoryById(id);
+  }
+
+  markMemoryReviewed(ids: readonly string[], at: number = Date.now()): void {
+    this.assertOpen();
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db
+      .prepare(`UPDATE memory_items SET reviewed_at = ? WHERE id IN (${placeholders})`)
+      .run(Math.trunc(at), ...ids);
+  }
+
+  listUnreviewedMemory(limit: number): MemoryItem[] {
+    this.assertOpen();
+    const n = Math.max(0, Math.trunc(limit));
+    if (n === 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+          WHERE status = 'confirmed' AND reviewed_at IS NULL AND review_state IS NULL
+            AND superseded_at IS NULL AND key NOT GLOB 'style/*'
+          ORDER BY created_at ASC LIMIT ${n}`,
+      )
+      .all() as MemoryRow[];
+    return rows.map(toMemoryItem);
+  }
+
+  reviseMemoryValue(
+    id: string,
+    value: string,
+    provenance: MemoryProvenance,
+    at: number = Date.now(),
+  ): MemoryItem | undefined {
+    this.assertOpen();
+    const existing = this.db.prepare('SELECT * FROM memory_items WHERE id = ?').get(id) as
+      | MemoryRow
+      | undefined;
+    if (!existing) return undefined;
+    const now = Math.trunc(at);
+    const changed = !sameMemoryValue(existing.value, value);
+    this.db
+      .prepare(
+        `UPDATE memory_items SET
+           value = ?, prov_source = ?, prov_session_id = ?, prov_basis = ?,
+           prov_created_from = ?, prov_evidence_quote = ?, prov_basis_kind = ?,
+           updated_at = ?, reviewed_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        value,
+        provenance.source,
+        provenance.sessionId ?? null,
+        provenance.basis ?? null,
+        provenance.createdFrom ?? null,
+        provenance.evidenceQuote ?? null,
+        provenance.basisKind ?? null,
+        now,
+        now,
+        id,
+      );
+    // The putMemory rule: a new claim needs new evidence.
+    if (changed) {
+      this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(id);
+    }
+    logActivity('memory_updated', {
+      id,
+      key: existing.key,
+      previousValue: existing.value,
+      value,
+      changed,
+      via: 'review',
+    });
+    return this.getMemoryById(id);
+  }
+
+  patchMemoryProvenance(id: string, patch: Partial<MemoryProvenance>): MemoryItem | undefined {
+    this.assertOpen();
+    const current = this.getMemoryById(id);
+    if (!current) return undefined;
+    const next: MemoryProvenance = { ...current.provenance, ...patch };
+    this.db
+      .prepare(
+        `UPDATE memory_items SET
+           prov_source = ?, prov_session_id = ?, prov_basis = ?, prov_created_from = ?,
+           prov_evidence_quote = ?, prov_basis_kind = ?
+         WHERE id = ?`,
+      )
+      .run(
+        next.source,
+        next.sessionId ?? null,
+        next.basis ?? null,
+        next.createdFrom ?? null,
+        next.evidenceQuote ?? null,
+        next.basisKind ?? null,
+        id,
+      );
+    return this.getMemoryById(id);
+  }
+
+  absorbMemoryEvidence(fromId: string, intoId: string): void {
+    this.assertOpen();
+    if (!fromId || !intoId || fromId === intoId) return;
+    // Every session that agreed with the retired twin agrees with the survivor
+    // too — they said the same thing. One vote per session still holds (the PK).
+    this.db
+      .prepare(
+        `INSERT INTO memory_observations (memory_id, session_id, observed_at, created_from)
+           SELECT ?, session_id, observed_at, created_from
+             FROM memory_observations WHERE memory_id = ?
+         ON CONFLICT(memory_id, session_id) DO NOTHING`,
+      )
+      .run(intoId, fromId);
+    this.db
+      .prepare(
+        `UPDATE memory_items SET strength = MAX(COALESCE(strength, 1),
+           COALESCE((SELECT strength FROM memory_items WHERE id = ?), 1))
+          WHERE id = ?`,
+      )
+      .run(fromId, intoId);
+  }
+
+  queueProposedForReview(opts: { source: TrustTier; since: number }): number {
+    this.assertOpen();
+    const result = this.db
+      .prepare(
+        `UPDATE memory_items SET review_state = 'pending'
+          WHERE status = 'proposed' AND prov_source = ? AND created_at >= ?
+            AND superseded_at IS NULL AND review_state IS NULL`,
+      )
+      .run(opts.source, Math.trunc(opts.since)) as { changes?: number | bigint };
+    return Number(result.changes ?? 0);
+  }
+
+  getMemoryPairVerdict(aId: string, bId: string): MemoryPairVerdict | undefined {
+    this.assertOpen();
+    const [first, second, swapped] = orderPair(aId, bId);
+    const row = this.db
+      .prepare('SELECT * FROM memory_pair_verdicts WHERE a_id = ? AND b_id = ?')
+      .get(first, second) as PairVerdictRow | undefined;
+    if (!row) return undefined;
+    // Handed back in the CALLER's order, so `aUpdatedAt` always belongs to `aId`.
+    return swapped
+      ? {
+          aId,
+          bId,
+          aUpdatedAt: Number(row.b_updated_at),
+          bUpdatedAt: Number(row.a_updated_at),
+          relation: row.relation as MemoryPairRelation,
+          judgedAt: Number(row.judged_at),
+        }
+      : {
+          aId,
+          bId,
+          aUpdatedAt: Number(row.a_updated_at),
+          bUpdatedAt: Number(row.b_updated_at),
+          relation: row.relation as MemoryPairRelation,
+          judgedAt: Number(row.judged_at),
+        };
+  }
+
+  putMemoryPairVerdict(verdict: MemoryPairVerdict): void {
+    this.assertOpen();
+    if (!verdict.aId || !verdict.bId || verdict.aId === verdict.bId) return;
+    const [first, second, swapped] = orderPair(verdict.aId, verdict.bId);
+    this.db
+      .prepare(
+        `INSERT INTO memory_pair_verdicts (a_id, b_id, a_updated_at, b_updated_at, relation, judged_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(a_id, b_id) DO UPDATE SET
+           a_updated_at = excluded.a_updated_at, b_updated_at = excluded.b_updated_at,
+           relation = excluded.relation, judged_at = excluded.judged_at`,
+      )
+      .run(
+        first,
+        second,
+        Math.trunc(swapped ? verdict.bUpdatedAt : verdict.aUpdatedAt),
+        Math.trunc(swapped ? verdict.aUpdatedAt : verdict.bUpdatedAt),
+        verdict.relation,
+        Math.trunc(verdict.judgedAt),
+      );
+  }
+
+  putMemoryQuestion(input: MemoryQuestionInput): MemoryQuestion {
+    this.assertOpen();
+    // ONE OPEN QUESTION PER PAIR (R25), in either order; for an `overwrite`, one
+    // per (memory, key) — re-trying the same refused write must not stack copies.
+    const open = this.listMemoryQuestions({ status: 'open' }).find((q) => {
+      if (q.kind !== input.kind) return false;
+      if (input.kind === 'conflict') {
+        return (
+          (q.aId === input.aId && q.bId === input.bId) ||
+          (q.aId === input.bId && q.bId === input.aId)
+        );
+      }
+      return q.aId === input.aId;
+    });
+    if (open) return open;
+    const id = mintMemoryId();
+    const createdAt = Math.trunc(input.createdAt ?? Date.now());
+    this.db
+      .prepare(
+        `INSERT INTO memory_questions
+           (id, kind, a_id, b_id, candidate_json, created_at, status, shown_count)
+         VALUES (?, ?, ?, ?, ?, ?, 'open', 0)`,
+      )
+      .run(
+        id,
+        input.kind,
+        input.aId,
+        input.bId ?? null,
+        input.candidate ? JSON.stringify(input.candidate) : null,
+        createdAt,
+      );
+    logActivity('memory_question', { id, kind: input.kind });
+    return this.getMemoryQuestion(id)!;
+  }
+
+  getMemoryQuestion(id: string): MemoryQuestion | undefined {
+    this.assertOpen();
+    const row = this.db.prepare('SELECT * FROM memory_questions WHERE id = ?').get(id) as
+      | QuestionRow
+      | undefined;
+    return row ? toMemoryQuestion(row) : undefined;
+  }
+
+  listMemoryQuestions(opts?: { status?: MemoryQuestionStatus }): MemoryQuestion[] {
+    this.assertOpen();
+    const rows = (
+      opts?.status
+        ? this.db
+            .prepare('SELECT * FROM memory_questions WHERE status = ? ORDER BY created_at ASC, id ASC')
+            .all(opts.status)
+        : this.db.prepare('SELECT * FROM memory_questions ORDER BY created_at ASC, id ASC').all()
+    ) as QuestionRow[];
+    return rows.map(toMemoryQuestion);
+  }
+
+  updateMemoryQuestion(
+    id: string,
+    patch: Partial<Pick<MemoryQuestion, 'status' | 'answer' | 'answeredAt' | 'shownCount' | 'snoozedUntil'>>,
+  ): MemoryQuestion | undefined {
+    this.assertOpen();
+    const current = this.getMemoryQuestion(id);
+    if (!current) return undefined;
+    const next = { ...current, ...patch };
+    this.db
+      .prepare(
+        `UPDATE memory_questions SET status = ?, answer = ?, answered_at = ?,
+           shown_count = ?, snoozed_until = ?
+          WHERE id = ?`,
+      )
+      .run(
+        next.status,
+        next.answer ?? null,
+        next.answeredAt ?? null,
+        Math.max(0, Math.trunc(next.shownCount ?? 0)),
+        next.snoozedUntil ?? null,
+        id,
+      );
+    return this.getMemoryQuestion(id);
   }
 
   // -- golden set (Phase 1.5 P15-04) ---------------------------------------
@@ -2998,7 +3518,8 @@ export class SqliteStore implements Store {
                   WHERE m.session_id = r.session_id AND m.role = 'user'
                     AND json_extract(m.payload, '$.speaker') IS NULL
                     AND json_extract(m.payload, '$.routing') IS NULL
-                    AND json_extract(m.payload, '$.crossSession') IS NULL) AS user_count,
+                    AND json_extract(m.payload, '$.crossSession') IS NULL
+                    AND json_extract(m.payload, '$.harness') IS NULL) AS user_count,
                 c.user_message_count AS cursor,
                 c.failed_at AS failed_at
          FROM recent r
