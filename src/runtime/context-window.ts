@@ -123,7 +123,11 @@ export const FALLBACK_CONTEXT_WINDOW = 128_000;
  * Append a name here only after its model card says so; see the RULES comment
  * for why this is a list rather than a version comparison.
  */
-export const ONE_M_DEFAULT_CLAUDE_MODELS: readonly string[] = ['claude-opus-5-5'];
+export const ONE_M_DEFAULT_CLAUDE_MODELS: readonly string[] = [
+  'claude-opus-5-5',
+  'claude-sonnet-5-5',
+  'claude-haiku-5-5',
+];
 
 /**
  * Whether `id` names one of ONE_M_DEFAULT_CLAUDE_MODELS.
@@ -158,7 +162,7 @@ const RULES: ReadonlyArray<{ test: (id: string) => boolean; window: number }> = 
   // `[1m]` marker (see engine.ts `contextWindowReported`). Checked BEFORE the
   // generic Claude rule, which would answer 200k.
   { test: (id) => id.includes('claude-fable'), window: CLAUDE_1M_CONTEXT_WINDOW },
-  // Opus ids whose DEFAULT window is 1M, with no `[1m]` marker needed. Opus 5.5
+  // Claude ids whose DEFAULT window is 1M, with no `[1m]` marker needed. Opus 5.5
   // is the first: Anthropic publishes 1,000,000 as its default, and SDK 0.3.283's
   // catalog lists it only as plain `opus` (resolving to `claude-opus-5-5`), with
   // no `opus[1m]` row left to carry the marker.

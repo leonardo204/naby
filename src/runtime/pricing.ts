@@ -111,6 +111,25 @@ export const MODEL_PRICES: readonly ModelPrice[] = [
     cachedInputPerMTok: 0.5,
     source: 'anthropic.com/pricing (API, standard tier)',
   },
+  // Sonnet 5.5 reads cache at half Sonnet 5's rate. Longest prefix wins.
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-sonnet-5-5',
+    inputPerMTok: 2,
+    outputPerMTok: 10,
+    cachedInputPerMTok: 0.1,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
+  // Haiku 5.5 is priced by prompt length; this is the rate up to 100k tokens.
+  // A longer prompt costs 5x, which a per-model row cannot express.
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-haiku-5-5',
+    inputPerMTok: 0.1,
+    outputPerMTok: 0.5,
+    cachedInputPerMTok: 0.01,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
   {
     providerKind: 'anthropic',
     modelPrefix: 'claude-sonnet-5',
