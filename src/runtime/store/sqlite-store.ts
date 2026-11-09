@@ -342,7 +342,10 @@ function openSilently(path: string): DatabaseSyncType {
 // (none was ever asked for), no basis, no review pending, and was never compared
 // — which is exactly what puts it in the tidy backlog (R14). An existing
 // `confirmed` row keeps injecting; nothing about it changes until a review looks.
-export const SCHEMA_VERSION = 16;
+//
+// v17 (memory-auto-apply R45): `memory_items.summary`, the short line shown when
+// showing a long value. Same column-absence-gated ALTER; NULL = not summarized yet.
+export const SCHEMA_VERSION = 17;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -404,6 +407,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
   prov_basis_kind   TEXT,            -- v16: stated | inferred; NULL = unknown
   superseded_reason TEXT,            -- v16: who superseded it (tidy-* | review-contradicts | question)
   review_state      TEXT,            -- v16: 'pending' while waiting for the model review; NULL = not waiting
+  summary           TEXT,            -- v17: short line shown in place of a long value; never injected
   reviewed_at       INTEGER,         -- v16: when a model last compared it with its scope; NULL = never
   UNIQUE (scope, scope_key, key)
 );
@@ -811,6 +815,7 @@ type MemoryRow = {
   prov_basis_kind?: string | null;
   superseded_reason?: string | null;
   review_state?: string | null;
+  summary?: string | null;
   reviewed_at?: number | null;
 };
 
@@ -864,6 +869,7 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     strength: row.strength === null || row.strength === undefined ? 1 : Number(row.strength),
     // v16. Absent rather than null, for the reason every optional above is.
     ...(row.review_state === 'pending' ? { reviewState: 'pending' as const } : {}),
+    ...(row.summary ? { summary: row.summary } : {}),
     ...(row.reviewed_at !== null && row.reviewed_at !== undefined
       ? { reviewedAt: Number(row.reviewed_at) }
       : {}),
@@ -1475,6 +1481,7 @@ export class SqliteStore implements Store {
         ['superseded_reason', 'TEXT'],
         ['review_state', 'TEXT'],
         ['reviewed_at', 'INTEGER'],
+        ['summary', 'TEXT'],
       ];
       for (const [name, decl] of additions) {
         if (!memoryCols.some((c) => c.name === name)) {
@@ -1827,6 +1834,7 @@ export class SqliteStore implements Store {
              prov_basis = ?, prov_created_from = ?, prov_supersedes = ?,
              prov_evidence_quote = ?, prov_basis_kind = ?, review_state = ?,
              reviewed_at = CASE WHEN ? THEN NULL ELSE reviewed_at END,
+             summary = CASE WHEN ? THEN NULL ELSE summary END,
              volatility = ?, confidence = ?, status = ?,
              updated_at = ?
            WHERE id = ?`,
@@ -1842,6 +1850,7 @@ export class SqliteStore implements Store {
           prov.evidenceQuote ?? null,
           prov.basisKind ?? null,
           fields.reviewState ?? null,
+          valueChanged ? 1 : 0,
           valueChanged ? 1 : 0,
           fields.volatility ?? null,
           fields.confidence,
@@ -2288,6 +2297,7 @@ export class SqliteStore implements Store {
     // The SAME "is this the same claim" test putMemory applies (P3-M8b §5.3),
     // asked BEFORE the write while the old value is still readable.
     const changed = !sameMemoryValue(existing.value, value);
+    if (changed) this.db.prepare('UPDATE memory_items SET summary = NULL WHERE id = ?').run(id);
     // v16 (R14): a person's edit is a claim no model has compared with the rest
     // of the scope, so a material change puts the row back in the tidy backlog.
     this.db
@@ -2458,6 +2468,26 @@ export class SqliteStore implements Store {
       .run(Math.trunc(at), ...ids);
   }
 
+  listMemoryToSummarize(limit: number, minChars: number, minLineBreaks: number): MemoryItem[] {
+    this.assertOpen();
+    const n = Math.max(0, Math.trunc(limit));
+    if (n === 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+          WHERE review_state IS NULL AND summary IS NULL AND prov_source != 'external'
+            AND (length(value) > ? OR length(value) - length(replace(value, char(10), '')) >= ?)
+          ORDER BY superseded_at IS NOT NULL, status != 'proposed', updated_at DESC LIMIT ${n}`,
+      )
+      .all(Math.trunc(minChars), Math.trunc(minLineBreaks)) as MemoryRow[];
+    return rows.map(toMemoryItem);
+  }
+
+  setMemorySummary(id: string, summary: string): void {
+    this.assertOpen();
+    this.db.prepare('UPDATE memory_items SET summary = ? WHERE id = ?').run(summary, id);
+  }
+
   listUnreviewedMemory(limit: number): MemoryItem[] {
     this.assertOpen();
     const n = Math.max(0, Math.trunc(limit));
@@ -2486,6 +2516,7 @@ export class SqliteStore implements Store {
     if (!existing) return undefined;
     const now = Math.trunc(at);
     const changed = !sameMemoryValue(existing.value, value);
+    if (changed) this.db.prepare('UPDATE memory_items SET summary = NULL WHERE id = ?').run(id);
     this.db
       .prepare(
         `UPDATE memory_items SET

@@ -425,9 +425,9 @@ function reviewTable(): void {
       'refine',
     ],
     [
-      'R18: an inferred refinement of a user-tier memory → question',
+      'R18: an inferred refinement of a user-tier memory → refine, no question',
       decideReviewOutcome(inferred, { relations: [{ existing: userOld, relation: 'refines' }] }),
-      'question',
+      'refine',
     ],
     [
       'R17a: the user just said the opposite of a user-tier memory → supersede, no question',
@@ -435,9 +435,9 @@ function reviewTable(): void {
       'supersede',
     ],
     [
-      'R18/R21: an inference contradicting a user-tier memory → question',
+      'R18/R21: an inference contradicting a user-tier memory → supersede, no question',
       decideReviewOutcome(inferred, { relations: [{ existing: userOld, relation: 'contradicts' }] }),
-      'question',
+      'supersede',
     ],
     [
       'R17: an inference contradicting an artifact-tier memory → supersede (newer wins)',
@@ -494,10 +494,10 @@ function tidyTable(): void {
   check('(f) refines: the more specific (subject) stays', ref.op === 'supersede' && ref.keep.id === 'b', JSON.stringify(ref));
   const con = decideTidyOperation(a, b, 'contradicts');
   check('(f) contradicts: the newer stays', con.op === 'supersede' && con.keep.id === 'b', JSON.stringify(con));
-  check('(f) R18: two user-tier memories that contradict → question', decideTidyOperation(userA, userB, 'contradicts').op === 'question');
+  check('(f) R18: two user-tier memories that contradict → the newer stays', decideTidyOperation(userA, userB, 'contradicts').op === 'supersede');
   check(
-    '(f) R18: an artifact-tier row may not retire a user-tier one → question',
-    decideTidyOperation(b, userA, 'refines').op === 'question',
+    '(f) R18: an artifact-tier refinement retires a user-tier row without asking',
+    decideTidyOperation(b, userA, 'refines').op === 'supersede',
   );
   check(
     '(f) a transient fact never retires a stable one',

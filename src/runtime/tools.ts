@@ -16,7 +16,6 @@ import type {
   McpEntry,
   MemoryItem,
   MemoryProvenance,
-  MemoryQuestionCandidate,
   MemoryScope,
   MemoryType,
   MemoryWriteRequest,
@@ -413,8 +412,6 @@ export interface MemoryActivationSink {
   corroborate(id: string): boolean;
   /** Raise a kept row's provenance when a better-sourced restatement arrives. */
   upgradeProvenance?(id: string, patch: Partial<MemoryProvenance>): void;
-  /** The gate refused overwriting a user-tier row (R24 case 3). */
-  onOverwriteRefused?(existing: MemoryItem, candidate: MemoryQuestionCandidate): void;
   /** A write landed. `alongside` = the row in use it was written next to. */
   onWritten?(item: MemoryItem, info: { activation: MemoryActivation; alongside?: MemoryItem }): void;
 }
@@ -650,19 +647,13 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
         },
         current,
       );
-      if (refusal.behavior === 'deny') {
-        activation.onOverwriteRefused?.(current, {
-          scope: scope as MemoryScope,
-          scopeKey,
-          key: normalizedKey,
-          value: value.trim(),
-          type: type as MemoryType,
-          sessionId: sink.sessionId,
-        });
+      // R18: a write the evidence rule allows goes on beside the old row, and
+      // the review retires the old one. Only a write without evidence is refused.
+      if (refusal.behavior === 'deny' && !eligible) {
         return {
           content:
             `Nothing was remembered: ${refusal.reason.replace(/\.$/, '')}. ` +
-            'naby will ask the user which of the two to keep, so do not ask them again in this conversation.',
+            'To change it, quote what the user said in evidenceQuote.',
           isError: true,
         };
       }

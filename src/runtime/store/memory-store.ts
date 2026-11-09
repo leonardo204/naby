@@ -707,6 +707,7 @@ export class MemoryStore implements Store {
     // Asked BEFORE the write, while the old value is still there — the same
     // `sameMemoryValue` test putMemory applies (P3-M8b §5.3).
     const changed = !sameMemoryValue(item.value, value);
+    if (changed) delete item.summary;
     item.value = value;
     // The user typed this sentence themselves, which is what the `user` tier
     // means (§3). The promotion is why an edited row can outrank the
@@ -841,6 +842,31 @@ export class MemoryStore implements Store {
     }
   }
 
+  listMemoryToSummarize(limit: number, minChars: number, minLineBreaks: number): MemoryItem[] {
+    const n = Math.max(0, Math.trunc(limit));
+    return [...this.memoryItems.values()]
+      .filter(
+        (m) =>
+          m.reviewState === undefined &&
+          m.summary === undefined &&
+          m.provenance.source !== 'external' &&
+          (m.value.length > minChars || m.value.split('\n').length > minLineBreaks),
+      )
+      .sort(
+        (a, b) =>
+          Number(a.supersededAt !== undefined) - Number(b.supersededAt !== undefined) ||
+          Number(a.status !== 'proposed') - Number(b.status !== 'proposed') ||
+          b.updatedAt - a.updatedAt,
+      )
+      .slice(0, n)
+      .map(cloneMemory);
+  }
+
+  setMemorySummary(id: string, summary: string): void {
+    const item = this.memoryItems.get(id);
+    if (item) item.summary = summary;
+  }
+
   listUnreviewedMemory(limit: number): MemoryItem[] {
     const n = Math.max(0, Math.trunc(limit));
     return [...this.memoryItems.values()]
@@ -867,6 +893,7 @@ export class MemoryStore implements Store {
     if (!item) return undefined;
     const now = Math.trunc(at);
     const changed = !sameMemoryValue(item.value, value);
+    if (changed) delete item.summary;
     item.value = value;
     // Only the fields the SQL twin writes; the reservation (`supersedes`) is kept.
     const next: MemoryProvenance = { source: provenance.source };

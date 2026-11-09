@@ -390,6 +390,9 @@ export type MemoryItem = {
   volatility?: MemoryVolatility;
   /** memory-auto-apply R36: `pending` while the row waits for its model review. */
   reviewState?: MemoryReviewState;
+  /** memory-auto-apply R45: a short line shown in place of a long value. Display
+   *  only, never injected; cleared when the value changes. */
+  summary?: string;
   /** memory-auto-apply R14/R15: WHEN a model last compared this row against the
    *  rest of its scope. Absent = never — the backlog the tidy pass works through
    *  (every row written before v16, and every row a person edited since). */
@@ -1677,6 +1680,9 @@ export interface Store {
 
   /** Stamp `reviewed_at` on rows a tidy pass compared (R15). Empty = no-op. */
   markMemoryReviewed(ids: readonly string[], at?: number): void;
+  /** Rows whose value is taller than three lines and has no summary yet (R46). */
+  listMemoryToSummarize(limit: number, minChars: number, minLineBreaks: number): MemoryItem[];
+  setMemorySummary(id: string, summary: string): void;
 
   /** CONFIRMED, current, non-pending rows no model has compared yet (R14),
    *  oldest first, `style/` keys excluded (R15). */
