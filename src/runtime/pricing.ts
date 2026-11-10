@@ -76,6 +76,15 @@ export const MODEL_PRICES: readonly ModelPrice[] = [
   // `claude-fable-5` prefix because its cache-read rate differs (0.25 vs 1.00);
   // longest prefix wins, so `claude-fable-5-1` lands here and `claude-fable-5`
   // stays on the older row.
+  // Fable 5.2 is cheaper than 5.1 on every column. Longest prefix wins.
+  {
+    providerKind: 'anthropic',
+    modelPrefix: 'claude-fable-5-2',
+    inputPerMTok: 8,
+    outputPerMTok: 40,
+    cachedInputPerMTok: 0.2,
+    source: 'anthropic.com/pricing (API, standard tier)',
+  },
   {
     providerKind: 'anthropic',
     modelPrefix: 'claude-fable-5-1',

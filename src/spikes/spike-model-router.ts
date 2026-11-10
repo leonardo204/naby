@@ -816,6 +816,17 @@ function checkCatalog(): void {
     JSON.stringify(withoutCatalog),
   );
 
+  // (p3) SDK 0.3.322 lists Fable 5.1 and 5.2; the newer wins whatever the order.
+  const fable0322 = pickCatalogValue('fable', [
+    { value: 'claude-fable-5-1', resolvedModel: 'claude-fable-5-1' },
+    { value: 'claude-fable-5-2', resolvedModel: 'claude-fable-5-2' },
+    { value: 'claude-fable-5', resolvedModel: 'claude-fable-5' },
+  ]);
+  record(
+    '(p3) 0.3.322 catalog: fable picks claude-fable-5-2 even when 5.1 is listed first',
+    fable0322 === 'claude-fable-5-2',
+    fable0322,
+  );
   const emptyCatalog = pickCatalogValue('fable', []);
   record('(p) empty catalog → fable alias', emptyCatalog === 'fable', emptyCatalog);
 

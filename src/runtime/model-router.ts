@@ -966,12 +966,35 @@ export function pickCatalogValue(
     return plain?.value ?? OPUS_1M_VALUE;
   }
   if (tier === 'fable') {
-    const row = rows.find(
-      (r) => typeof r?.value === 'string' && r.value.startsWith(FABLE_VALUE_PREFIX),
-    );
-    return row?.value ?? 'fable';
+    // The NEWEST fable the catalog lists, not the first: SDK 0.3.322 knows both
+    // Fable 5.1 and 5.2, and row order is the CLI's business. Equal versions
+    // keep catalog order, so a `[1m]` row listed first still wins its tie.
+    let best: { value: string; version: number[] } | undefined;
+    for (const r of rows) {
+      if (typeof r?.value !== 'string' || !r.value.startsWith(FABLE_VALUE_PREFIX)) continue;
+      const version = fableVersion(r.value);
+      if (!best || compareVersions(version, best.version) > 0) best = { value: r.value, version };
+    }
+    return best?.value ?? 'fable';
   }
   return tier;
+}
+
+/** `claude-fable-5-2[1m]` → [5, 2]; `claude-fable-5` → [5]. */
+function fableVersion(value: string): number[] {
+  const rest = value.slice(FABLE_VALUE_PREFIX.length).replace(/\[[^\]]*\]$/, '');
+  return rest
+    .split('-')
+    .filter((part) => /^\d+$/.test(part))
+    .map(Number);
+}
+
+function compareVersions(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 /**

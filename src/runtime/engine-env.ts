@@ -22,8 +22,8 @@
 // `CLAUDE_CODE_MODEL_CAPABILITIES`; neither picks a turn's model, so neither is
 // listed. (`spike:subagent-model` was NOT re-run against a real sign-in for that
 // bump.) Re-checked against SDK 0.3.319 / CLI **2.1.319** (build 2026-11-05) on
-// 2026-11-09: every name is still present and `ANTHROPIC_DEFAULT_MODEL` is now
-// listed (`spike:subagent-model` was not re-run for this bump either). They are therefore a fact about one build, not a documented contract: the CLI has
+// 2026-11-09 (and against SDK 0.3.322 / CLI 2.1.322 on 2026-11-10): every name is
+// still present and `ANTHROPIC_DEFAULT_MODEL` is now listed (`spike:subagent-model` was not re-run for this bump either). They are therefore a fact about one build, not a documented contract: the CLI has
 // already changed how it resolves a subagent model once (the environment variable
 // came FIRST before 2.1.251), and it can add or drop a variable in any release.
 // SO, ON EVERY SDK BUMP: re-extract the strings from the new binary, reconcile
