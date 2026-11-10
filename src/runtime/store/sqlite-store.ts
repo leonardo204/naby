@@ -45,6 +45,16 @@ import { sameMemoryValue } from './store.js';
 // memory-hygiene, so the SQL that raises strength and the predicate that reads it
 // can never disagree about the cap.
 import { STRENGTH_CAP } from '../memory-hygiene.js';
+// memory-tiers (v18): the tier a row enters use in (R1–R3), the migration's
+// assignment (R21) and the once-a-day strength rule (R10) are the runtime's pure
+// rules — the store applies them so neither driver can skip them.
+import {
+  initialMemoryTier,
+  isStatedProvenance,
+  migratedMemoryTier,
+  MEMORY_TIERS_MIGRATED_AT_KEY,
+  startOfLocalDay,
+} from '../memory-tiers.js';
 import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
 import type { ParticipantProfile } from '../participants.js';
 import { RECOMMEND_BACKFILL_LIMIT, RECOMMEND_EVERY } from '../participant-recommend.js';
@@ -81,6 +91,10 @@ import type {
   MemoryScope,
   MemoryStatus,
   MemorySupersededReason,
+  MemoryAnchorOrigin,
+  MemoryTier,
+  MemoryTierEvidence,
+  MemoryTierPatch,
   MemoryType,
   MemoryVolatility,
   MemoryWriteRequest,
@@ -345,7 +359,25 @@ function openSilently(path: string): DatabaseSyncType {
 //
 // v17 (memory-auto-apply R45): `memory_items.summary`, the short line shown when
 // showing a long value. Same column-absence-gated ALTER; NULL = not summarized yet.
-export const SCHEMA_VERSION = 17;
+//
+// v18 — MEMORY TIERS (specs/memory-tiers.md). Eight `memory_items` columns and one
+// `memory_observations` column, by the same column-absence-gated ALTER:
+// `memory_tier` (short | long | anchored; NULL for a row not in use), `tier_since`
+// (when it entered that tier — the retention clock), `archived_at` (R11),
+// `anchor_origin` (auto | explicit | user), `anchor_blocked` (R6: the user undid an
+// anchoring — never automatically again), `anchor_candidate` (R17: met R5 while the
+// anchored budget was full), `pin_requested` (R5: an explicit pin waiting for the
+// review) and `injection_log` (R4: the first injection per session, as a small
+// JSON list — only short rows need it, so it is a column rather than a table);
+// `memory_observations.stated` marks an agreement that was the user's own
+// verified words (R5).
+//
+// THE ONE BACKFILL IN THIS SERIES (R21): when `memory_tier` is added to an
+// existing table, every confirmed row gets a tier — long for a user-tier stated
+// row or one corroborated in two or more sessions, short otherwise — and the
+// migration instant is written to settings so nothing is archived for 30 days
+// (R22). Strength is kept (R23).
+export const SCHEMA_VERSION = 18;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -409,6 +441,14 @@ CREATE TABLE IF NOT EXISTS memory_items (
   review_state      TEXT,            -- v16: 'pending' while waiting for the model review; NULL = not waiting
   summary           TEXT,            -- v17: short line shown in place of a long value; never injected
   reviewed_at       INTEGER,         -- v16: when a model last compared it with its scope; NULL = never
+  memory_tier       TEXT,            -- v18: short | long | anchored; NULL = not in use (proposed / pending)
+  tier_since        INTEGER,         -- v18: when it entered its tier (the retention clock)
+  archived_at       INTEGER,         -- v18: archived (hidden; restorable 30 days); NULL = live
+  anchor_origin     TEXT,            -- v18: auto | explicit | user, when anchored
+  anchor_blocked    INTEGER NOT NULL DEFAULT 0,  -- v18: 1 = the user undid an anchoring (R6)
+  anchor_candidate  INTEGER NOT NULL DEFAULT 0,  -- v18: 1 = met R5 while the anchored budget was full (R17)
+  pin_requested     INTEGER NOT NULL DEFAULT 0,  -- v18: 1 = explicit pin waiting for the review (R5)
+  injection_log     TEXT,            -- v18: JSON [{s, at}] first injection per session (R4)
   UNIQUE (scope, scope_key, key)
 );
 
@@ -439,6 +479,7 @@ CREATE TABLE IF NOT EXISTS memory_observations (
   session_id   TEXT NOT NULL,
   observed_at  INTEGER NOT NULL,   -- epoch ms of the write that recorded it
   created_from TEXT,               -- "<sessionId>:<seq>" of the evidence, if any
+  stated       INTEGER NOT NULL DEFAULT 0,  -- v18: 1 = the user's own verified words (memory-tiers R5)
   PRIMARY KEY (memory_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS memory_observations_by_session ON memory_observations (session_id);
@@ -817,6 +858,15 @@ type MemoryRow = {
   review_state?: string | null;
   summary?: string | null;
   reviewed_at?: number | null;
+  // v18 (memory-tiers). Optional for the same reason.
+  memory_tier?: string | null;
+  tier_since?: number | null;
+  archived_at?: number | null;
+  anchor_origin?: string | null;
+  anchor_blocked?: number | null;
+  anchor_candidate?: number | null;
+  pin_requested?: number | null;
+  injection_log?: string | null;
 };
 
 function toMemoryItem(row: MemoryRow): MemoryItem {
@@ -876,7 +926,38 @@ function toMemoryItem(row: MemoryRow): MemoryItem {
     ...(row.superseded_reason !== null && row.superseded_reason !== undefined && row.superseded_at != null
       ? { supersededReason: row.superseded_reason as MemorySupersededReason }
       : {}),
+    // v18 (memory-tiers). Absent rather than null/false, like every optional above.
+    ...(row.memory_tier === 'short' || row.memory_tier === 'long' || row.memory_tier === 'anchored'
+      ? { tier: row.memory_tier as MemoryTier }
+      : {}),
+    ...(row.tier_since != null ? { tierSince: Number(row.tier_since) } : {}),
+    ...(row.archived_at != null ? { archivedAt: Number(row.archived_at) } : {}),
+    ...(row.anchor_origin === 'auto' || row.anchor_origin === 'explicit' || row.anchor_origin === 'user'
+      ? { anchorOrigin: row.anchor_origin as MemoryAnchorOrigin }
+      : {}),
+    ...(Number(row.anchor_blocked ?? 0) === 1 ? { anchorBlocked: true } : {}),
+    ...(Number(row.anchor_candidate ?? 0) === 1 ? { anchorCandidate: true } : {}),
+    ...(Number(row.pin_requested ?? 0) === 1 ? { pinRequested: true } : {}),
   };
+}
+
+/** v18: the injection log column (R4) — `[{ s: sessionId, at }]`, one entry per
+ *  session, capped. Unreadable reads as empty: it is evidence, not state. */
+const INJECTION_LOG_CAP = 8;
+function parseInjectionLog(raw: string | null | undefined): { s: string; at: number }[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (e): e is { s: string; at: number } =>
+            !!e && typeof e === 'object' && typeof (e as { s?: unknown }).s === 'string' &&
+            typeof (e as { at?: unknown }).at === 'number',
+        )
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 // Row shapes for the two v16 tables.
@@ -1021,7 +1102,8 @@ function scopedMemoryFilter(
     // rather than being treated as infinitely old.
     // The `isStaleForReview` predicate, in SQL — see `staleSql` for the strength
     // term and why it is expressed as a shift of the cutoff.
-    clauses.push("status = 'confirmed'", staleSql());
+    // memory-tiers R18: an anchored row does not decay, so it is never "unused".
+    clauses.push("status = 'confirmed'", staleSql(), "(memory_tier IS NULL OR memory_tier != 'anchored')");
     params.push(Math.trunc(opts.staleBefore), Math.max(0, Math.trunc(opts.staleWindowMs ?? 0)));
   }
   if (typeof opts?.superseded === 'boolean') {
@@ -1029,6 +1111,12 @@ function scopedMemoryFilter(
     // "was it replaced" and "when" are the same fact and cannot drift apart.
     clauses.push(opts.superseded ? 'superseded_at IS NOT NULL' : 'superseded_at IS NULL');
   }
+  if (opts?.tier) {
+    clauses.push('memory_tier = ?');
+    params.push(opts.tier);
+  }
+  // v18 (memory-tiers R11): archived rows are hidden unless asked for.
+  clauses.push(opts?.archived === true ? 'archived_at IS NOT NULL' : 'archived_at IS NULL');
   return { sql: clauses.join(' AND '), params };
 }
 
@@ -1381,6 +1469,16 @@ export class SqliteStore implements Store {
     // Durability + concurrency posture for a desktop app: WAL survives a hard
     // kill of the renderer, and FK enforcement is off by design (we cascade
     // deletes explicitly, so a partially-written session is never referenced).
+    //
+    // A WRITE THAT MEETS A LOCK WAITS, IT DOES NOT FAIL (memory-worker R3). There
+    // is more than one connection to this file: the memory process opens its own
+    // (R1), and inside the app server the Next route bundle and the WebSocket
+    // bundle each hold one. WAL keeps readers and the writer out of each other's
+    // way, but two WRITERS still take turns, and without a busy timeout the second
+    // one throws SQLITE_BUSY at once. Five seconds is far longer than any write
+    // here holds the lock — the memory process commits in small batches — and set
+    // FIRST, because switching to WAL is itself a write that can meet a lock.
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.migrate();
@@ -1467,6 +1565,9 @@ export class SqliteStore implements Store {
     // SQLite accepts that only because it carries a DEFAULT — which is also what
     // makes the migration backfill-free, since DEFAULT 1 is the value that
     // reproduces the pre-M13 decay behaviour exactly (see SCHEMA_VERSION).
+    // v18 (memory-tiers R21): adding the tier column to an EXISTING table is the
+    // migration that assigns tiers. Read before the ALTER loop adds it.
+    const tiersArriving = memoryCols.length > 0 && !memoryCols.some((c) => c.name === 'memory_tier');
     if (memoryCols.length > 0) {
       const additions: [string, string][] = [
         ['superseded_at', 'INTEGER'],
@@ -1482,6 +1583,15 @@ export class SqliteStore implements Store {
         ['review_state', 'TEXT'],
         ['reviewed_at', 'INTEGER'],
         ['summary', 'TEXT'],
+        // v18 (memory-tiers): nullable or DEFAULT 0 — see SCHEMA_VERSION.
+        ['memory_tier', 'TEXT'],
+        ['tier_since', 'INTEGER'],
+        ['archived_at', 'INTEGER'],
+        ['anchor_origin', 'TEXT'],
+        ['anchor_blocked', 'INTEGER NOT NULL DEFAULT 0'],
+        ['anchor_candidate', 'INTEGER NOT NULL DEFAULT 0'],
+        ['pin_requested', 'INTEGER NOT NULL DEFAULT 0'],
+        ['injection_log', 'TEXT'],
       ];
       for (const [name, decl] of additions) {
         if (!memoryCols.some((c) => c.name === name)) {
@@ -1489,6 +1599,16 @@ export class SqliteStore implements Store {
         }
       }
     }
+    // v?->v18 (memory-tiers R5): the observation's `stated` mark. DEFAULT 0 is the
+    // honest reading of every existing agreement — none was recorded as the
+    // user's verified words, so none counts toward anchoring (R21: migration
+    // never anchors).
+    const obsCols = this.db.prepare('PRAGMA table_info(memory_observations)').all() as { name: string }[];
+    if (obsCols.length > 0 && !obsCols.some((c) => c.name === 'stated')) {
+      this.db.exec('ALTER TABLE memory_observations ADD COLUMN stated INTEGER NOT NULL DEFAULT 0');
+    }
+    if (tiersArriving) this.assignMigratedTiers();
+
     // v?->v14 (multi-agent-chat §8.1): the participant profile column. Column-
     // gated for the same reason as every ALTER above; nullable and backfill-free —
     // NULL is the truth for every persona and custom row.
@@ -1578,6 +1698,41 @@ export class SqliteStore implements Store {
     if (current !== SCHEMA_VERSION) {
       this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     }
+  }
+
+  /**
+   * v18 (memory-tiers R21–R23): give every existing row in use its tier, in one
+   * transaction, and record the migration instant so nothing is archived for
+   * the grace window (R22). Strength is not touched (R23). Never anchors.
+   */
+  private assignMigratedTiers(): void {
+    const now = Date.now();
+    const rows = this.db
+      .prepare("SELECT * FROM memory_items WHERE status = 'confirmed'")
+      .all() as MemoryRow[];
+    const counts = new Map<string, number>();
+    for (const r of this.db
+      .prepare('SELECT memory_id, COUNT(DISTINCT session_id) AS n FROM memory_observations GROUP BY memory_id')
+      .all() as { memory_id: string; n: number }[]) {
+      counts.set(r.memory_id, Number(r.n));
+    }
+    this.db.exec('BEGIN');
+    try {
+      const update = this.db.prepare('UPDATE memory_items SET memory_tier = ?, tier_since = ? WHERE id = ?');
+      for (const row of rows) {
+        update.run(migratedMemoryTier(toMemoryItem(row), counts.get(row.id) ?? 0), now, row.id);
+      }
+      this.db
+        .prepare(
+          'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        )
+        .run(MEMORY_TIERS_MIGRATED_AT_KEY, String(now));
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+    logActivity('memory_tiers_migrated', { rows: rows.length });
   }
 
   private assertOpen(): void {
@@ -1836,7 +1991,12 @@ export class SqliteStore implements Store {
              reviewed_at = CASE WHEN ? THEN NULL ELSE reviewed_at END,
              summary = CASE WHEN ? THEN NULL ELSE summary END,
              volatility = ?, confidence = ?, status = ?,
-             updated_at = ?
+             updated_at = ?,
+             -- v18 (memory-tiers R11): writing an archived key again is the
+             -- memory coming back into use — unarchived, tier re-entered.
+             memory_tier = CASE WHEN archived_at IS NOT NULL THEN NULL ELSE memory_tier END,
+             tier_since = CASE WHEN archived_at IS NOT NULL THEN NULL ELSE tier_since END,
+             archived_at = NULL
            WHERE id = ?`,
         )
         .run(
@@ -1891,6 +2051,9 @@ export class SqliteStore implements Store {
           now,
         );
     }
+
+    // v18 (memory-tiers R1): a row that is now in use has a tier.
+    this.syncMemoryTier(id, now);
 
     // Re-read rather than reconstruct. The row now carries columns this method
     // never writes (`last_injected_at`, `superseded_at`, `strength`), and a
@@ -1956,6 +2119,33 @@ export class SqliteStore implements Store {
       throw new Error(`memory write denied: ${decision.reason}`);
     }
     const valueChanged = existingRow ? !sameMemoryValue(existingRow.value, req.value) : false;
+    // v18 (memory-tiers R18): NAIBY NEVER CHANGES AN ANCHORED ROW. An upsert over
+    // one with a different value is refused (loudly, like every deny); the same
+    // value is a restatement that only adds this session's agreement. A person
+    // changes an anchored row through `updateMemoryValue`, never through here.
+    if (existingRow && existingRow.memory_tier === 'anchored' && existingRow.archived_at == null) {
+      if (valueChanged) {
+        logActivity('memory_write', {
+          scope: req.scope,
+          scopeKey: req.scopeKey,
+          key: req.key,
+          decision: 'deny',
+          reason: 'anchored',
+        });
+        throw new Error('memory write denied: an anchored memory is changed only by a person');
+      }
+      if (req.provenance.sessionId && existingRow.superseded_at == null) {
+        this.recordMemoryObservation(
+          existingRow.id,
+          req.provenance.sessionId,
+          false,
+          req.provenance.createdFrom,
+          undefined,
+          isStatedProvenance(req.provenance),
+        );
+      }
+      return toMemoryItem(existingRow);
+    }
     // 'allow' carries the (possibly downgraded) status; 'hold' pins 'proposed'.
     const saved = this.writeMemoryRow({
       scope: req.scope,
@@ -2008,6 +2198,8 @@ export class SqliteStore implements Store {
         req.provenance.sessionId,
         valueChanged,
         req.provenance.createdFrom,
+        undefined,
+        isStatedProvenance(req.provenance),
       );
     }
     // WHAT THE AGENT LEARNED, AND ON WHOSE SAY-SO. `status` distinguishes a
@@ -2050,6 +2242,9 @@ export class SqliteStore implements Store {
     // Lisbon". Asked here rather than at the call site because it has to hold
     // however the reservation was made.
     if (newer.volatility === 'transient' && older.volatility !== 'transient') return false;
+    // memory-tiers R18: naby never retires an anchored row. The one supersession
+    // that may is a person's answer to a question ('question').
+    if (older.memory_tier === 'anchored' && reason !== 'question') return false;
     this.db
       .prepare(
         'UPDATE memory_items SET superseded_at = ?, superseded_by = ?, superseded_reason = ? WHERE id = ?',
@@ -2116,19 +2311,45 @@ export class SqliteStore implements Store {
     valueChanged: boolean,
     createdFrom?: string,
     at?: number,
+    stated = false,
   ): void {
     if (valueChanged) {
       this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(memoryId);
+      // v18 (R4): the injection evidence was for the old claim too.
+      this.db.prepare('UPDATE memory_items SET injection_log = NULL WHERE id = ?').run(memoryId);
     }
+    // `stated` only ever rises within a session (R5): one verified restatement
+    // in a conversation is enough for that conversation to count.
     this.db
       .prepare(
-        `INSERT INTO memory_observations (memory_id, session_id, observed_at, created_from)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO memory_observations (memory_id, session_id, observed_at, created_from, stated)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(memory_id, session_id) DO UPDATE SET
            observed_at = excluded.observed_at,
-           created_from = excluded.created_from`,
+           created_from = excluded.created_from,
+           stated = MAX(stated, excluded.stated)`,
       )
-      .run(memoryId, sessionId, Math.trunc(at ?? Date.now()), createdFrom ?? null);
+      .run(memoryId, sessionId, Math.trunc(at ?? Date.now()), createdFrom ?? null, stated ? 1 : 0);
+  }
+
+  /**
+   * v18 (memory-tiers R1): keep `memory_tier` in step with `status`. A row in use
+   * without a tier gets the one it enters in (`initialMemoryTier`, clock started
+   * now); a row that left use loses its tier — never an anchored one, which no
+   * write can demote (putMemory refuses the write first).
+   */
+  private syncMemoryTier(id: string, at: number = Date.now()): void {
+    const row = this.db.prepare('SELECT * FROM memory_items WHERE id = ?').get(id) as MemoryRow | undefined;
+    if (!row) return;
+    if (row.status === 'confirmed') {
+      if (row.memory_tier == null) {
+        this.db
+          .prepare('UPDATE memory_items SET memory_tier = ?, tier_since = ? WHERE id = ?')
+          .run(initialMemoryTier(toMemoryItem(row)), Math.trunc(at), id);
+      }
+    } else if (row.memory_tier != null && row.memory_tier !== 'anchored') {
+      this.db.prepare('UPDATE memory_items SET memory_tier = NULL, tier_since = NULL WHERE id = ?').run(id);
+    }
   }
 
   getMemoryById(id: string): MemoryItem | undefined {
@@ -2142,7 +2363,7 @@ export class SqliteStore implements Store {
   corroborateMemory(
     id: string,
     sessionId: string,
-    opts?: { createdFrom?: string; at?: number },
+    opts?: { createdFrom?: string; at?: number; stated?: boolean },
   ): boolean {
     this.assertOpen();
     if (!id || !sessionId) return false;
@@ -2152,7 +2373,7 @@ export class SqliteStore implements Store {
     if (!row || row.superseded_at != null) return false;
     // `valueChanged: false` — the whole point of this method is that nothing
     // changed, so the existing evidence is kept and this session is added to it.
-    this.recordMemoryObservation(id, sessionId, false, opts?.createdFrom, opts?.at);
+    this.recordMemoryObservation(id, sessionId, false, opts?.createdFrom, opts?.at, opts?.stated === true);
     return true;
   }
 
@@ -2183,7 +2404,7 @@ export class SqliteStore implements Store {
         `SELECT m.*, COUNT(DISTINCT o.session_id) AS n
            FROM memory_items m
            JOIN memory_observations o ON o.memory_id = m.id
-          WHERE m.status = 'proposed' AND m.superseded_at IS NULL
+          WHERE m.status = 'proposed' AND m.superseded_at IS NULL AND m.archived_at IS NULL
           GROUP BY m.id
          HAVING n >= ?
           ORDER BY n DESC, m.updated_at DESC`,
@@ -2241,6 +2462,7 @@ export class SqliteStore implements Store {
       .prepare(
         `SELECT * FROM memory_items
           WHERE status = 'confirmed' AND ${staleSql()}
+            AND archived_at IS NULL AND (memory_tier IS NULL OR memory_tier != 'anchored')
           ORDER BY COALESCE(last_injected_at, updated_at) ASC${limit}`,
       )
       .all(Math.trunc(before), Math.max(0, Math.trunc(opts?.windowMs ?? 0))) as MemoryRow[];
@@ -2281,6 +2503,7 @@ export class SqliteStore implements Store {
           WHERE id = ? AND status = 'proposed'`,
       )
       .run(now, now, id);
+    this.syncMemoryTier(id, now);
     // The one act that turns a proposal into something that will shape future
     // turns. Logged unconditionally — a confirm of an already-confirmed row is a
     // no-op in SQL, and knowing it was attempted is worth a line.
@@ -2314,6 +2537,7 @@ export class SqliteStore implements Store {
     // whitespace/format fix keeps the evidence, because it is the same claim.
     if (changed) {
       this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(id);
+      this.db.prepare('UPDATE memory_items SET injection_log = NULL WHERE id = ?').run(id);
     }
     // BOTH VALUES. An edit is the one memory event whose "before" is otherwise
     // unrecoverable — the row now holds only the "after".
@@ -2330,28 +2554,178 @@ export class SqliteStore implements Store {
     return row ? toMemoryItem(row) : undefined;
   }
 
-  markMemoriesInjected(ids: readonly string[], at: number = Date.now()): void {
+  markMemoriesInjected(
+    ids: readonly string[],
+    at: number = Date.now(),
+    opts?: { sessionId?: string },
+  ): void {
     this.assertOpen();
     // NOTHING AT ALL for an empty list — not even a prepared statement. This runs
     // on every turn, and a turn that injected no memory must leave the database
     // untouched (contract §5's no-op invariant, extended to writes).
     if (ids.length === 0) return;
     const placeholders = ids.map(() => '?').join(', ');
-    // P3-M13b (§3.2): SELECTION IS REHEARSAL. The same statement that records
-    // WHEN a memory was used also raises HOW STRONGLY it is held, capped at
-    // STRENGTH_CAP so nothing becomes immortal — the MemoryBank model, where a
-    // recalled item decays more slowly next time rather than being pinned.
-    //
-    // ONE UPDATE, not a read-modify-write: `MIN(strength + 1, cap)` in SQL keeps
-    // this a single statement on the hot injection path and makes the cap
-    // impossible to race past.
+    const now = Math.trunc(at);
+    // P3-M13b (§3.2): SELECTION IS REHEARSAL — the same statement that records
+    // WHEN a memory was used raises HOW STRONGLY it is held, capped at
+    // STRENGTH_CAP. memory-tiers R10: AT MOST ONCE PER LOCAL CALENDAR DAY. The
+    // CASE reads the OLD `last_injected_at` (SQLite evaluates every SET against
+    // the pre-update row), so a second use on the same day stamps the time and
+    // leaves the strength alone. The day boundary is computed in JS by the same
+    // `startOfLocalDay` the in-memory twin uses.
     this.db
       .prepare(
         `UPDATE memory_items
-            SET last_injected_at = ?, strength = MIN(COALESCE(strength, 1) + 1, ${STRENGTH_CAP})
+            SET strength = CASE WHEN last_injected_at IS NULL OR last_injected_at < ?
+                                THEN MIN(COALESCE(strength, 1) + 1, ${STRENGTH_CAP})
+                                ELSE strength END,
+                last_injected_at = ?
           WHERE id IN (${placeholders})`,
       )
-      .run(Math.trunc(at), ...ids);
+      .run(startOfLocalDay(now), now, ...ids);
+    // memory-tiers R4: the first injection per session, for SHORT rows only —
+    // the only ones whose promotion can still turn on it. Usually no row.
+    const sessionId = opts?.sessionId;
+    if (!sessionId) return;
+    const shortRows = this.db
+      .prepare(
+        `SELECT id, injection_log FROM memory_items
+          WHERE id IN (${placeholders}) AND memory_tier = 'short'`,
+      )
+      .all(...ids) as { id: string; injection_log: string | null }[];
+    for (const row of shortRows) {
+      const log = parseInjectionLog(row.injection_log);
+      if (log.some((e) => e.s === sessionId) || log.length >= INJECTION_LOG_CAP) continue;
+      log.push({ s: sessionId, at: now });
+      this.db.prepare('UPDATE memory_items SET injection_log = ? WHERE id = ?').run(JSON.stringify(log), row.id);
+    }
+  }
+
+  // -- memory tiers (memory-tiers.md, v18) ---------------------------------
+
+  setMemoryTierState(id: string, patch: MemoryTierPatch): MemoryItem | undefined {
+    this.assertOpen();
+    const sets: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (patch.tier !== undefined) {
+      sets.push('memory_tier = ?');
+      params.push(patch.tier);
+    }
+    if (patch.tierSince !== undefined) {
+      sets.push('tier_since = ?');
+      params.push(Math.trunc(patch.tierSince));
+    }
+    if (patch.anchorOrigin !== undefined) {
+      sets.push('anchor_origin = ?');
+      params.push(patch.anchorOrigin);
+    }
+    if (patch.anchorBlocked !== undefined) {
+      sets.push('anchor_blocked = ?');
+      params.push(patch.anchorBlocked ? 1 : 0);
+    }
+    if (patch.anchorCandidate !== undefined) {
+      sets.push('anchor_candidate = ?');
+      params.push(patch.anchorCandidate ? 1 : 0);
+    }
+    if (patch.pinRequested !== undefined) {
+      sets.push('pin_requested = ?');
+      params.push(patch.pinRequested ? 1 : 0);
+    }
+    if (sets.length > 0) {
+      this.db.prepare(`UPDATE memory_items SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+      if (patch.tier !== undefined) logActivity('memory_tier', { id, tier: patch.tier, origin: patch.anchorOrigin ?? null });
+    }
+    return this.getMemoryById(id);
+  }
+
+  listTieredMemory(opts?: { tier?: MemoryTier; archived?: boolean }): MemoryItem[] {
+    this.assertOpen();
+    const clauses = ["status = 'confirmed'", 'superseded_at IS NULL'];
+    const params: string[] = [];
+    clauses.push(opts?.archived === true ? 'archived_at IS NOT NULL' : 'archived_at IS NULL');
+    if (opts?.tier) {
+      clauses.push('memory_tier = ?');
+      params.push(opts.tier);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM memory_items WHERE ${clauses.join(' AND ')} ORDER BY created_at ASC`)
+      .all(...params) as MemoryRow[];
+    return rows.map(toMemoryItem);
+  }
+
+  getMemoryTierEvidence(ids: readonly string[]): Record<string, MemoryTierEvidence> {
+    this.assertOpen();
+    const out: Record<string, MemoryTierEvidence> = {};
+    if (ids.length === 0) return out;
+    const entry = (id: string): MemoryTierEvidence => (out[id] ??= { observations: [], injections: [] });
+    // Chunked: a full pass can name every row in use, and SQLite caps bound
+    // parameters per statement.
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400);
+      const placeholders = chunk.map(() => '?').join(', ');
+      for (const o of this.db
+        .prepare(
+          `SELECT memory_id, session_id, observed_at, stated FROM memory_observations
+            WHERE memory_id IN (${placeholders})`,
+        )
+        .all(...chunk) as { memory_id: string; session_id: string; observed_at: number; stated: number }[]) {
+        entry(o.memory_id).observations.push({
+          sessionId: o.session_id,
+          at: Number(o.observed_at),
+          stated: Number(o.stated ?? 0) === 1,
+        });
+      }
+      for (const r of this.db
+        .prepare(`SELECT id, injection_log FROM memory_items WHERE id IN (${placeholders}) AND injection_log IS NOT NULL`)
+        .all(...chunk) as { id: string; injection_log: string | null }[]) {
+        for (const e of parseInjectionLog(r.injection_log)) entry(r.id).injections.push({ sessionId: e.s, at: e.at });
+      }
+    }
+    return out;
+  }
+
+  archiveMemory(ids: readonly string[], at: number = Date.now()): number {
+    this.assertOpen();
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => '?').join(', ');
+    // R18: never an anchored row. R11: never re-stamped.
+    const result = this.db
+      .prepare(
+        `UPDATE memory_items SET archived_at = ?
+          WHERE id IN (${placeholders}) AND archived_at IS NULL
+            AND (memory_tier IS NULL OR memory_tier != 'anchored')`,
+      )
+      .run(Math.trunc(at), ...ids) as { changes?: number | bigint };
+    const n = Number(result.changes ?? 0);
+    // R13: a count, never which memories.
+    if (n > 0) logActivity('memory_archived', { count: n });
+    return n;
+  }
+
+  restoreMemory(id: string, at: number = Date.now()): boolean {
+    this.assertOpen();
+    const now = Math.trunc(at);
+    const result = this.db
+      .prepare(
+        `UPDATE memory_items
+            SET archived_at = NULL, memory_tier = 'long', tier_since = ?, last_injected_at = ?
+          WHERE id = ? AND archived_at IS NOT NULL`,
+      )
+      .run(now, now, id) as { changes?: number | bigint };
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  listMemoryToPurge(archivedBefore: number, supersededBefore: number): MemoryItem[] {
+    this.assertOpen();
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_items
+          WHERE (archived_at IS NOT NULL AND archived_at <= ?)
+             OR (superseded_at IS NOT NULL AND superseded_at <= ?)
+          ORDER BY created_at ASC`,
+      )
+      .all(Math.trunc(archivedBefore), Math.trunc(supersededBefore)) as MemoryRow[];
+    return rows.map(toMemoryItem);
   }
 
   deleteMemory(sel: MemoryDeleteSelector): void {
@@ -2455,6 +2829,7 @@ export class SqliteStore implements Store {
           WHERE id = ?`,
       )
       .run(status, at, id);
+    this.syncMemoryTier(id, at);
     logActivity('memory_reviewed', { id, key: row.key, scope: row.scope, status });
     return this.getMemoryById(id);
   }
@@ -2476,6 +2851,7 @@ export class SqliteStore implements Store {
       .prepare(
         `SELECT * FROM memory_items
           WHERE review_state IS NULL AND summary IS NULL AND prov_source != 'external'
+            AND archived_at IS NULL
             AND (length(value) > ? OR length(value) - length(replace(value, char(10), '')) >= ?)
           ORDER BY superseded_at IS NOT NULL, status != 'proposed', updated_at DESC LIMIT ${n}`,
       )
@@ -2496,7 +2872,7 @@ export class SqliteStore implements Store {
       .prepare(
         `SELECT * FROM memory_items
           WHERE status = 'confirmed' AND reviewed_at IS NULL AND review_state IS NULL
-            AND superseded_at IS NULL AND key NOT GLOB 'style/*'
+            AND superseded_at IS NULL AND archived_at IS NULL AND key NOT GLOB 'style/*'
           ORDER BY created_at ASC LIMIT ${n}`,
       )
       .all() as MemoryRow[];
@@ -2540,6 +2916,7 @@ export class SqliteStore implements Store {
     // The putMemory rule: a new claim needs new evidence.
     if (changed) {
       this.db.prepare('DELETE FROM memory_observations WHERE memory_id = ?').run(id);
+      this.db.prepare('UPDATE memory_items SET injection_log = NULL WHERE id = ?').run(id);
     }
     logActivity('memory_updated', {
       id,
@@ -2583,10 +2960,10 @@ export class SqliteStore implements Store {
     // too — they said the same thing. One vote per session still holds (the PK).
     this.db
       .prepare(
-        `INSERT INTO memory_observations (memory_id, session_id, observed_at, created_from)
-           SELECT ?, session_id, observed_at, created_from
+        `INSERT INTO memory_observations (memory_id, session_id, observed_at, created_from, stated)
+           SELECT ?, session_id, observed_at, created_from, stated
              FROM memory_observations WHERE memory_id = ?
-         ON CONFLICT(memory_id, session_id) DO NOTHING`,
+         ON CONFLICT(memory_id, session_id) DO UPDATE SET stated = MAX(stated, excluded.stated)`,
       )
       .run(intoId, fromId);
     this.db

@@ -418,7 +418,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     // what keeps a no-memory turn byte-for-byte AND write-for-write a Phase-1
     // turn.
     if (injected.items.length > 0) {
-      store.markMemoriesInjected(injected.items.map((item) => item.id));
+      // memory-tiers R4: with the session, so promotion can count the distinct
+      // sessions (and days) a short-term memory was used in.
+      store.markMemoriesInjected(injected.items.map((item) => item.id), Date.now(), { sessionId });
     }
     // Record what was injected (item ids, tokensUsed, droppedForBudget) so a
     // bad injection is auditable and memory hit rate is computable.

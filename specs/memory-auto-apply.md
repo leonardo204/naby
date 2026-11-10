@@ -5,7 +5,7 @@ type: design
 version: 0.5.1
 status: review
 scope: 나비가 배운 기억을 사용자 확인 없이 바로 쓰게 하는 규칙과, 쌓인 기억의 중복·상충을 백그라운드에서 정리하는 규칙. 무엇이 바로 쓰이고 무엇이 여전히 확인을 받는지(근거 규칙), 모든 기억이 거치는 모델 검수, 채팅의 "기억했어요 · 취소" 표시, 기억끼리 비교하는 정리 패스, 사용자에게 되묻는 팝업, 설정 기억 화면의 재구성, 기존 제안 행의 이전을 다룬다. 주입(턴마다 기억을 고르는 방법)과 감쇠 규칙은 바꾸지 않는다.
-related: [phase-1_5-memory-contracts, phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-3-memory-hygiene, personalization-strategy, phase-3-butterfly-trust-meter, cross-project-context]
+related: [memory-tiers, phase-1_5-memory-contracts, phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-3-memory-hygiene, personalization-strategy, phase-3-butterfly-trust-meter, cross-project-context]
 updated: 2026-11-09
 ---
 

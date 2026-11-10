@@ -41,6 +41,7 @@ app.setName('Naby');
 
 type SqliteHandle = {
   prepare(sql: string): { get(): unknown };
+  exec(sql: string): void;
   close(): void;
 };
 
@@ -79,6 +80,12 @@ function holdsUserData(dbPath: string): boolean | undefined {
       DatabaseSync: new (path: string) => SqliteHandle;
     };
     db = new DatabaseSync(dbPath);
+    // Every connection waits on a lock instead of failing (memory-worker R3).
+    try {
+      db.exec('PRAGMA busy_timeout = 5000');
+    } catch {
+      // Best effort: a count that meets a lock is answered "unknown" below anyway.
+    }
 
     // Opened read-write on purpose: a read-only open fails outright on a
     // database left with a hot -wal, which is exactly the state a crashed

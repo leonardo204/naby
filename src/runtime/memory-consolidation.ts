@@ -639,7 +639,11 @@ export type ReviewOutcome =
   | { op: 'confirm' }
   | { op: 'merge'; target: MemoryItem; upgrade: boolean }
   | { op: 'refine'; target: MemoryItem }
-  | { op: 'supersede'; target: MemoryItem };
+  | { op: 'supersede'; target: MemoryItem }
+  /** memory-tiers R19: the subject contradicts an ANCHORED row. The subject is
+   *  kept (confirmed) but the anchored row wins — the caller retires the
+   *  SUBJECT in its favour and shows the "replace it" chip. */
+  | { op: 'anchored-wins'; target: MemoryItem };
 
 const RELATION_PRIORITY: Record<ReviewRelation, number> = {
   contradicts: 0,
@@ -658,6 +662,15 @@ export function decideReviewOutcome(
   const top = ranked[0];
   if (!top) return { op: 'confirm' };
   const target = top.existing;
+
+  // memory-tiers R18/R19: NAIBY NEVER CHANGES AN ANCHORED ROW. The same claim
+  // folds into it (its evidence grows, its words and tier do not move); a
+  // refinement lives beside it; a contradiction is kept but loses to it.
+  if (target.tier === 'anchored') {
+    if (top.relation === 'equivalent') return { op: 'merge', target, upgrade: false };
+    if (top.relation === 'refines') return { op: 'confirm' };
+    return { op: 'anchored-wins', target };
+  }
 
   switch (top.relation) {
     case 'equivalent':
@@ -713,6 +726,25 @@ export function decideTidyOperation(
   let keep: MemoryItem;
   let retire: MemoryItem;
   let reason: 'tidy-equivalent' | 'tidy-refines' | 'tidy-contradicts';
+  // memory-tiers R18: an anchored row is never retired by the tidy pass. Two
+  // anchored rows are left alone (a person anchored both). One anchored row
+  // wins an equivalence or a contradiction outright, and keeps a refinement
+  // only when it is itself the more specific side.
+  const subjectAnchored = subject.tier === 'anchored';
+  const otherAnchored = other.tier === 'anchored';
+  if (subjectAnchored || otherAnchored) {
+    if (relation === 'unrelated' || (subjectAnchored && otherAnchored)) return { op: 'none' };
+    const anchoredRow = subjectAnchored ? subject : other;
+    const plainRow = subjectAnchored ? other : subject;
+    if (relation === 'refines' && !subjectAnchored) return { op: 'none' };
+    if (relation === 'contradicts' && !maySupersede(anchoredRow, plainRow)) return { op: 'none' };
+    return {
+      op: 'supersede',
+      keep: anchoredRow,
+      retire: plainRow,
+      reason: relation === 'equivalent' ? 'tidy-equivalent' : relation === 'refines' ? 'tidy-refines' : 'tidy-contradicts',
+    };
+  }
   switch (relation) {
     case 'equivalent': {
       const rank = TRUST_RANK[subject.provenance.source] - TRUST_RANK[other.provenance.source];

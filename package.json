@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.48.17",
+  "version": "1.48.18",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -107,7 +107,9 @@
     "spike:rank": "tsx src/spikes/spike-rank.ts",
     "spike:boot-services": "npm run build:electron && tsx src/spikes/spike-boot-services.ts",
     "spike:hygiene": "tsx src/spikes/spike-hygiene.ts",
+    "spike:memory-tiers": "tsx src/spikes/spike-memory-tiers.ts",
     "spike:memory-auto-apply": "tsx src/spikes/spike-memory-auto-apply.ts",
+    "spike:memory-worker": "npm run build:runtime && cd shell && npm run build:server && cd .. && tsx src/spikes/spike-memory-worker.ts",
     "spike:activity": "tsx src/spikes/spike-activity-log.ts",
     "spike:compaction": "tsx src/spikes/spike-compaction.ts",
     "spike:model-router": "tsx src/spikes/spike-model-router.ts",

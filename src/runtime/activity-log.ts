@@ -143,6 +143,11 @@ export type ActivityKind =
   | 'memory_reviewed'
   | 'memory_question'
   | 'memory_review'
+  // memory-tiers: a tier change, an archive pass (a count, never which rows) and
+  // the v18 migration's tier assignment.
+  | 'memory_tier'
+  | 'memory_archived'
+  | 'memory_tiers_migrated'
   | 'reflection_run'
   // -- harness / settings ---------------------------------------------------
   | 'harness_change'

@@ -1155,7 +1155,9 @@ async function checkStaleReview(store: Store, label: string): Promise<void> {
     requestedStatus: 'confirmed',
   });
   // Three injections ⇒ strength 4 ⇒ four review windows before it is asked about.
-  for (let i = 0; i < 3; i += 1) store.markMemoriesInjected([wellUsed.id], cutoff - 1);
+  // memory-tiers R10: strength rises at most once per local day, so the three
+  // uses are on three different days (the last one at the cutoff).
+  for (let i = 2; i >= 0; i -= 1) store.markMemoriesInjected([wellUsed.id], cutoff - 1 - i * 24 * 60 * 60 * 1000);
   const strong = await runReflectionSweep(store, proposingJudge([]), { now, cap: 10 });
   record(
     `(t3) [${label}] a well-used memory idle past 90 days is NOT in the review queue — the queue tracks strength, not age`,

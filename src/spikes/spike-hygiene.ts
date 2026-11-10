@@ -981,14 +981,20 @@ function checkStrengthRises(): void {
       store.markMemoriesInjected([item.id], NOW);
       return store.getScopedMemory('user', 'local')[0]?.strength;
     })();
-    // Far past the cap: the SQL does MIN(strength + 1, cap) in one statement, so
-    // this is also the check that the ceiling cannot be raced past.
-    for (let i = 0; i < STRENGTH_CAP + 5; i += 1) store.markMemoriesInjected([item.id], NOW);
+    // memory-tiers R10: a second use on the SAME local day stamps the time and
+    // leaves the strength alone (spacing, not volume).
+    store.markMemoriesInjected([item.id], NOW + 60_000);
+    const sameDay = store.getScopedMemory('user', 'local')[0]?.strength;
+    // Far past the cap, one use per day: the SQL does MIN(strength + 1, cap) in
+    // one statement, so this is also the check that the ceiling cannot be raced
+    // past.
+    const DAY = 24 * 60 * 60 * 1000;
+    for (let i = 1; i <= STRENGTH_CAP + 5; i += 1) store.markMemoriesInjected([item.id], NOW + i * DAY);
     const capped = store.getScopedMemory('user', 'local')[0]?.strength;
     record(
-      `(l/${label}) selection RAISES strength by 1 and stops at STRENGTH_CAP`,
-      after1 === 2 && capped === STRENGTH_CAP,
-      `after one injection = ${String(after1)}; after ${STRENGTH_CAP + 6} = ${String(capped)} (cap ${STRENGTH_CAP})`,
+      `(l/${label}) selection RAISES strength by 1 (once per day, memory-tiers R10) and stops at STRENGTH_CAP`,
+      after1 === 2 && sameDay === 2 && capped === STRENGTH_CAP,
+      `after one injection = ${String(after1)}; same day again = ${String(sameDay)}; after ${STRENGTH_CAP + 5} more days = ${String(capped)} (cap ${STRENGTH_CAP})`,
     );
   });
 }

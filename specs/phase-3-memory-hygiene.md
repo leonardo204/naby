@@ -2,11 +2,11 @@
 id: phase-3-memory-hygiene
 title: Phase 3 P3-M10 — 기억 위생과 주권
 type: design
-version: 0.3.1
+version: 0.4.0
 status: active
-scope: 기억의 감쇠(접근 기반 주입 강등·검토 큐 승격), 사용자 주권 컨트롤(항목 편집·학습 끄기·임시 세션), 그리고 기억 브라우저(전용 모달·검색·필터·페이지네이션)를 다룬다. 기억 계약(phase-1_5-memory-contracts)의 저장·게이트·주입 불변식은 유지하며 가산 개정만 한다. ⚠️ 0.3.0: 고정 30/90일 절벽은 P3-M13b의 연속 강도 모델(R = e^(−t/(S×30일)), S=1이면 이 문서의 값과 동일)로 일반화됐다 — [phase-3-conversational-learning-hardening](phase-3-conversational-learning-hardening.md) §3.2가 소유한다.
-related: [phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-1_5-memory-contracts, phase-3-persona-agent, memory-auto-apply]
-updated: 2026-11-09
+scope: 기억의 감쇠(접근 기반 주입 강등·검토 큐 승격), 사용자 주권 컨트롤(항목 편집·학습 끄기·임시 세션), 그리고 기억 브라우저(전용 모달·검색·필터·페이지네이션)를 다룬다. 기억 계약(phase-1_5-memory-contracts)의 저장·게이트·주입 불변식은 유지하며 가산 개정만 한다. ⚠️ 0.3.0: 고정 30/90일 절벽은 P3-M13b의 연속 강도 모델(R = e^(−t/(S×30일)), S=1이면 이 문서의 값과 동일)로 일반화됐다 — [phase-3-conversational-learning-hardening](phase-3-conversational-learning-hardening.md) §3.2가 소유한다. ⚠️ 0.4.0: 자동 삭제 거절(§2.2)과 90일 검토 큐는 [memory-tiers](memory-tiers.md) §4가 대신한다.
+related: [memory-tiers, phase-3-continuous-learning, phase-3-conversational-learning-hardening, phase-1_5-memory-contracts, phase-3-persona-agent, memory-auto-apply]
+updated: 2026-11-10
 implemented: 0.2.0
 ---
 
@@ -31,6 +31,8 @@ implemented: 0.2.0
 
 - 주입 랭킹에서 **신선도 페널티**: `last_injected_at`(없으면 `updatedAt`)이 `MEMORY_STALE_MS`(기본 30일)보다 오래면 관련도 동점 비교에서 뒤로 물러난다. 관련도 자체를 깎지 않는다 — 질의와 강하게 맞는 낡은 기억은 여전히 이긴다(관련도 > 신선도). M8c의 "동점은 기존 순서" 규칙에 신선도 단계를 하나 끼우는 가산 변경이다.
 - `MEMORY_DECAY_REVIEW_MS`(기본 90일) 초과 미접근 confirmed 항목은 회고 스윕 끝의 통합 단계가 **검토 큐로 표시**한다(`status`는 그대로, 새 플래그가 아니라 `last_injected_at` 기준 파생 — 저장 상태를 늘리지 않는다). 브라우저의 "오래됨" 필터가 이것을 보여주고, 사용자가 지우거나 "계속 유지"(접근 갱신)를 고른다. **자동 삭제는 하지 않는다** — 삭제는 언제나 사람이 한다.
+
+> ⚠️ 0.4.0: 이 결정은 [memory-tiers](memory-tiers.md) §4가 대신한다. §8을 본다.
 
 ## 3. 주권 컨트롤 (G6)
 
@@ -117,3 +119,13 @@ implemented: 0.2.0
 - **감쇠 상수(30일·90일)의 적정성.** §6이 미결정으로 둔 그대로다. 실사용 분포를 보고 정한다. 틀려도 대가가 작도록 설계했다 — 30일은 동점 순서만, 90일은 필터 하나만 움직인다.
 - **브라우저 모달의 시각 렌더.** jsdom에는 레이아웃 엔진이 없어서 소스 단언으로 대신했다(설정 레이아웃 테스트와 같은 방식이다). 실제 그려지는 모습은 사람이 봐야 한다.
 - **대용량 기억에서의 페이지네이션 성능.** 인덱스는 넣었지만 수만 행 규모로 측정하지 않았다.
+
+## 8. 0.4.0 개정 — 단기·장기·고정 기억
+
+[단기·장기·고정 기억](memory-tiers.md)(스키마 18)이 이 문서의 두 결정을 대신한다.
+
+- **자동 삭제를 한다.** §2.2의 "삭제는 언제나 사람이 한다"는 더 이상 맞지 않는다. 단기 기억은 14일 안에 장기로 오르지 못하면, 장기 기억은 마지막으로 쓰인 뒤 `min(90일 × S, 365일)`이 지나면 보관되고, 보관 30일 뒤 지워진다(memory-tiers R8~R14).
+- **90일 검토 큐는 표시로만 남는다.** "오래됨" 필터와 회고의 `staleForReview` 집계는 그대로 돈다. 다만 정리는 사람이 아니라 보관 작업이 하므로 큐는 더 이상 결정을 기다리는 목록이 아니다. 보관된 기억과 고정 기억은 이 큐에 오르지 않는다.
+- **강도는 하루에 한 번만 오른다**(memory-tiers R10). 신선도 단계와 관련도 우선 규칙(§2.2 첫 항목)은 바꾸지 않는다. 고정 기억은 순위 밖에서 먼저 주입된다.
+
+주권 컨트롤(§3)과 기억 브라우저(§4)는 그대로다. 브라우저에는 단계 필터와 "보관됨" 필터가 더해졌다.

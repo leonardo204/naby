@@ -23,6 +23,8 @@ import { memoryMatchesSearch, sameMemoryValue } from './store.js';
 // The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model, so
 // the two drivers cannot cap rehearsal at different numbers.
 import { memoryStrength, STRENGTH_CAP } from '../memory-hygiene.js';
+// memory-tiers (v18): the same pure rules the SQL driver applies.
+import { initialMemoryTier, isStatedProvenance, startOfLocalDay } from '../memory-tiers.js';
 import type { RollingSummary, RuntimeMessage, TurnStats } from '../engine.js';
 import { isUserAuthored } from '../participants.js';
 import { RECOMMEND_BACKFILL_LIMIT, RECOMMEND_EVERY } from '../participant-recommend.js';
@@ -54,6 +56,9 @@ import type {
   MemoryScope,
   MemoryStatus,
   MemorySupersededReason,
+  MemoryTier,
+  MemoryTierEvidence,
+  MemoryTierPatch,
   MemoryVolatility,
   MemoryWriteRequest,
   McpEntry,
@@ -207,6 +212,8 @@ export class MemoryStore implements Store {
   /** v16 (memory-auto-apply): judged pairs keyed `"<smaller id> <larger id>"`,
    *  and the questions naby is waiting to ask. */
   private readonly pairVerdicts = new Map<string, MemoryPairVerdict>();
+  /** v18 twin of `memory_items.injection_log` (memory-tiers R4). */
+  private readonly injectionLog = new Map<string, { s: string; at: number }[]>();
   private readonly memoryQuestions = new Map<string, MemoryQuestion>();
   /** The AI-SDK engine's folded-payload summary, per session (session-context §2.3).
    *  A map of its own rather than a `SessionState` field for the same reason the
@@ -454,9 +461,50 @@ export class MemoryStore implements Store {
       strength: existing?.strength ?? 1,
       ...(fields.reviewState ? { reviewState: fields.reviewState } : {}),
       ...(keepReviewedAt ? { reviewedAt: existing!.reviewedAt } : {}),
+      // v18 (memory-tiers): the tier columns the SQL UPDATE does not name are
+      // kept — except that writing an ARCHIVED key again brings the memory back
+      // into use: unarchived, tier re-entered (the SQL CASE's twin).
+      ...(existing && existing.archivedAt === undefined
+        ? {
+            ...(existing.tier ? { tier: existing.tier } : {}),
+            ...(existing.tierSince !== undefined ? { tierSince: existing.tierSince } : {}),
+          }
+        : {}),
+      ...(existing?.anchorOrigin ? { anchorOrigin: existing.anchorOrigin } : {}),
+      ...(existing?.anchorBlocked ? { anchorBlocked: true } : {}),
+      ...(existing?.anchorCandidate ? { anchorCandidate: true } : {}),
+      ...(existing?.pinRequested ? { pinRequested: true } : {}),
     };
     this.memoryItems.set(item.id, item);
+    this.syncMemoryTier(item, now);
     return cloneMemory(item);
+  }
+
+  /** v18 twin of SqliteStore.syncMemoryTier (memory-tiers R1). */
+  private syncMemoryTier(item: MemoryItem, at: number): void {
+    if (item.status === 'confirmed') {
+      if (item.tier === undefined) {
+        item.tier = initialMemoryTier(item);
+        item.tierSince = Math.trunc(at);
+      }
+    } else if (item.tier !== undefined && item.tier !== 'anchored') {
+      delete item.tier;
+      delete item.tierSince;
+    }
+  }
+
+  /** Upsert one session's observation (the SQL ON CONFLICT's twin). */
+  private observe(memoryId: string, sessionId: string, at: number, createdFrom?: string, stated = false): void {
+    let bySession = this.observations.get(memoryId);
+    if (!bySession) {
+      bySession = new Map<string, MemoryObservation>();
+      this.observations.set(memoryId, bySession);
+    }
+    const prior = bySession.get(sessionId);
+    const observation: MemoryObservation = { memoryId, sessionId, observedAt: Math.trunc(at) };
+    if (createdFrom !== undefined) observation.createdFrom = createdFrom;
+    if (stated || prior?.stated) observation.stated = true;
+    bySession.set(sessionId, observation);
   }
 
   putMemory(req: MemoryWriteRequest): MemoryItem {
@@ -466,6 +514,14 @@ export class MemoryStore implements Store {
       throw new Error(`memory write denied: ${decision.reason}`);
     }
     const valueChanged = existing ? !sameMemoryValue(existing.value, req.value) : false;
+    // v18 (memory-tiers R18): the twin of SqliteStore's anchored guard.
+    if (existing && existing.tier === 'anchored' && existing.archivedAt === undefined) {
+      if (valueChanged) throw new Error('memory write denied: an anchored memory is changed only by a person');
+      if (req.provenance.sessionId && existing.supersededAt === undefined) {
+        this.observe(existing.id, req.provenance.sessionId, Date.now(), req.provenance.createdFrom, isStatedProvenance(req.provenance));
+      }
+      return cloneMemory(existing);
+    }
     const saved = this.writeMemoryItem({
       scope: req.scope,
       scopeKey: req.scopeKey,
@@ -506,23 +562,19 @@ export class MemoryStore implements Store {
       // A materially different value is a NEW claim, so the old sessions' votes
       // for the old claim are cleared: the count always means "distinct sessions
       // that agree with what this row says now".
-      if (valueChanged) this.observations.delete(saved.id);
-      let bySession = this.observations.get(saved.id);
-      if (!bySession) {
-        bySession = new Map<string, MemoryObservation>();
-        this.observations.set(saved.id, bySession);
-      }
-      const observation: MemoryObservation = {
-        memoryId: saved.id,
-        sessionId: req.provenance.sessionId,
-        observedAt: Date.now(),
-      };
-      if (req.provenance.createdFrom !== undefined) {
-        observation.createdFrom = req.provenance.createdFrom;
+      if (valueChanged) {
+        this.observations.delete(saved.id);
+        this.injectionLog.delete(saved.id);
       }
       // Keyed by session id, so one conversation votes once however often it
       // repeats itself — the composite primary key, expressed as a nested map.
-      bySession.set(req.provenance.sessionId, observation);
+      this.observe(
+        saved.id,
+        req.provenance.sessionId,
+        Date.now(),
+        req.provenance.createdFrom,
+        isStatedProvenance(req.provenance),
+      );
     }
     return saved;
   }
@@ -537,25 +589,14 @@ export class MemoryStore implements Store {
   corroborateMemory(
     id: string,
     sessionId: string,
-    opts?: { createdFrom?: string; at?: number },
+    opts?: { createdFrom?: string; at?: number; stated?: boolean },
   ): boolean {
     if (!id || !sessionId) return false;
     const item = this.memoryItems.get(id);
     // Refuses a superseded row, exactly as SqliteStore does: evidence must not
     // accumulate behind a belief that has already been replaced.
     if (!item || item.supersededAt !== undefined) return false;
-    let bySession = this.observations.get(id);
-    if (!bySession) {
-      bySession = new Map<string, MemoryObservation>();
-      this.observations.set(id, bySession);
-    }
-    const observation: MemoryObservation = {
-      memoryId: id,
-      sessionId,
-      observedAt: Math.trunc(opts?.at ?? Date.now()),
-    };
-    if (opts?.createdFrom !== undefined) observation.createdFrom = opts.createdFrom;
-    bySession.set(sessionId, observation);
+    this.observe(id, sessionId, opts?.at ?? Date.now(), opts?.createdFrom, opts?.stated === true);
     return true;
   }
 
@@ -578,6 +619,7 @@ export class MemoryStore implements Store {
       // P3-M13a: a replaced proposal is not a promotion candidate — the same
       // `superseded_at IS NULL` clause the SQL driver applies.
       if (item.supersededAt !== undefined) continue;
+      if (item.archivedAt !== undefined) continue;
       const n = this.observations.get(item.id)?.size ?? 0;
       if (n >= min) rows.push({ item, n });
     }
@@ -622,11 +664,16 @@ export class MemoryStore implements Store {
       // (lastInjectedAt, falling back to updatedAt) before the strength-shifted
       // cutoff.
       if (item.status !== 'confirmed') return false;
+      // memory-tiers R18: an anchored row does not decay.
+      if (item.tier === 'anchored') return false;
       if (!isStaleAgainstCutoff(item, opts.staleBefore, opts.staleWindowMs)) return false;
     }
     if (typeof opts?.superseded === 'boolean') {
       if ((item.supersededAt !== undefined) !== opts.superseded) return false;
     }
+    if (opts?.tier && item.tier !== opts.tier) return false;
+    // v18 (memory-tiers R11): archived rows only when asked for.
+    if ((item.archivedAt !== undefined) !== (opts?.archived === true)) return false;
     return true;
   }
 
@@ -669,6 +716,7 @@ export class MemoryStore implements Store {
     const rows: MemoryItem[] = [];
     for (const item of this.memoryItems.values()) {
       if (item.status !== 'confirmed') continue;
+      if (item.archivedAt !== undefined || item.tier === 'anchored') continue;
       if (!isStaleAgainstCutoff(item, before, opts?.windowMs)) continue;
       rows.push(cloneMemory(item));
     }
@@ -698,6 +746,7 @@ export class MemoryStore implements Store {
     // yes. Stamped in the same step as the status, exactly as the SQL driver
     // does it in one UPDATE.
     item.lastInjectedAt = now;
+    this.syncMemoryTier(item, now);
   }
 
   updateMemoryValue(id: string, value: string, at: number = Date.now()): MemoryItem | undefined {
@@ -717,26 +766,131 @@ export class MemoryStore implements Store {
     item.lastInjectedAt = now;
     // A new claim needs new evidence; a whitespace fix is the same claim.
     if (changed) this.observations.delete(id);
+    if (changed) this.injectionLog.delete(id);
     // v16 (R14): and a claim no model has compared yet.
     if (changed) delete item.reviewedAt;
     return cloneMemory(item);
   }
 
-  markMemoriesInjected(ids: readonly string[], at: number = Date.now()): void {
+  markMemoriesInjected(
+    ids: readonly string[],
+    at: number = Date.now(),
+    opts?: { sessionId?: string },
+  ): void {
     // Empty is a genuine no-op — see the Store interface: injection runs every
     // turn and a turn that injected nothing must touch nothing.
     if (ids.length === 0) return;
     const now = Math.trunc(at);
+    const dayStart = startOfLocalDay(now);
     for (const id of ids) {
       const item = this.memoryItems.get(id);
       // Silently skips an id that no longer exists, exactly as the SQL UPDATE's
       // `WHERE id IN (...)` matches no row for one.
       if (!item) continue;
+      // P3-M13b + memory-tiers R10: selection is rehearsal, at most once per
+      // local day — the twin of the SQL CASE, reading the OLD stamp.
+      if (item.lastInjectedAt === undefined || item.lastInjectedAt < dayStart) {
+        item.strength = Math.min(STRENGTH_CAP, (item.strength ?? 1) + 1);
+      }
       item.lastInjectedAt = now;
-      // P3-M13b: selection is rehearsal — the twin of the SQL
-      // `MIN(strength + 1, cap)`.
-      item.strength = Math.min(STRENGTH_CAP, (item.strength ?? 1) + 1);
+      // memory-tiers R4: first injection per session, short rows only.
+      if (opts?.sessionId && item.tier === 'short') {
+        const log = this.injectionLog.get(id) ?? [];
+        if (!log.some((e) => e.s === opts.sessionId) && log.length < 8) {
+          log.push({ s: opts.sessionId, at: now });
+          this.injectionLog.set(id, log);
+        }
+      }
     }
+  }
+
+  // -- memory tiers (memory-tiers.md) — SqliteStore's twin -----------------
+
+  setMemoryTierState(id: string, patch: MemoryTierPatch): MemoryItem | undefined {
+    const item = this.memoryItems.get(id);
+    if (!item) return undefined;
+    if (patch.tier !== undefined) {
+      if (patch.tier === null) delete item.tier;
+      else item.tier = patch.tier;
+    }
+    if (patch.tierSince !== undefined) item.tierSince = Math.trunc(patch.tierSince);
+    if (patch.anchorOrigin !== undefined) {
+      if (patch.anchorOrigin === null) delete item.anchorOrigin;
+      else item.anchorOrigin = patch.anchorOrigin;
+    }
+    const flag = (key: 'anchorBlocked' | 'anchorCandidate' | 'pinRequested', v: boolean | undefined) => {
+      if (v === undefined) return;
+      if (v) item[key] = true;
+      else delete item[key];
+    };
+    flag('anchorBlocked', patch.anchorBlocked);
+    flag('anchorCandidate', patch.anchorCandidate);
+    flag('pinRequested', patch.pinRequested);
+    return cloneMemory(item);
+  }
+
+  listTieredMemory(opts?: { tier?: MemoryTier; archived?: boolean }): MemoryItem[] {
+    return [...this.memoryItems.values()]
+      .filter(
+        (m) =>
+          m.status === 'confirmed' &&
+          m.supersededAt === undefined &&
+          (m.archivedAt !== undefined) === (opts?.archived === true) &&
+          (!opts?.tier || m.tier === opts.tier),
+      )
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(cloneMemory);
+  }
+
+  getMemoryTierEvidence(ids: readonly string[]): Record<string, MemoryTierEvidence> {
+    const out: Record<string, MemoryTierEvidence> = {};
+    for (const id of ids) {
+      const obs = this.observations.get(id);
+      const inj = this.injectionLog.get(id);
+      if (!obs?.size && !inj?.length) continue;
+      out[id] = {
+        observations: [...(obs?.values() ?? [])].map((o) => ({
+          sessionId: o.sessionId,
+          at: o.observedAt,
+          stated: o.stated === true,
+        })),
+        injections: (inj ?? []).map((e) => ({ sessionId: e.s, at: e.at })),
+      };
+    }
+    return out;
+  }
+
+  archiveMemory(ids: readonly string[], at: number = Date.now()): number {
+    let n = 0;
+    for (const id of ids) {
+      const item = this.memoryItems.get(id);
+      if (!item || item.archivedAt !== undefined || item.tier === 'anchored') continue;
+      item.archivedAt = Math.trunc(at);
+      n += 1;
+    }
+    return n;
+  }
+
+  restoreMemory(id: string, at: number = Date.now()): boolean {
+    const item = this.memoryItems.get(id);
+    if (!item || item.archivedAt === undefined) return false;
+    const now = Math.trunc(at);
+    delete item.archivedAt;
+    item.tier = 'long';
+    item.tierSince = now;
+    item.lastInjectedAt = now;
+    return true;
+  }
+
+  listMemoryToPurge(archivedBefore: number, supersededBefore: number): MemoryItem[] {
+    return [...this.memoryItems.values()]
+      .filter(
+        (m) =>
+          (m.archivedAt !== undefined && m.archivedAt <= archivedBefore) ||
+          (m.supersededAt !== undefined && m.supersededAt <= supersededBefore),
+      )
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(cloneMemory);
   }
 
   supersedeMemory(
@@ -753,6 +907,8 @@ export class MemoryStore implements Store {
     // The volatility guard of §3.1, identical to SqliteStore's: a transient fact
     // never retires a stable (or untagged) one.
     if (newer.volatility === 'transient' && older.volatility !== 'transient') return false;
+    // memory-tiers R18, identical to SqliteStore's.
+    if (older.tier === 'anchored' && reason !== 'question') return false;
     older.supersededAt = Math.trunc(at);
     older.supersededBy = newId;
     if (reason) older.supersededReason = reason;
@@ -785,6 +941,7 @@ export class MemoryStore implements Store {
     if ('id' in sel) {
       this.memoryItems.delete(sel.id);
       this.observations.delete(sel.id);
+      this.injectionLog.delete(sel.id);
       this.forgetMemoryReviewOf(sel.id);
       return;
     }
@@ -832,6 +989,7 @@ export class MemoryStore implements Store {
       outcome.status === 'confirmed' && item.provenance.source === 'external' ? 'proposed' : outcome.status;
     delete item.reviewState;
     item.reviewedAt = Math.trunc(outcome.at ?? Date.now());
+    this.syncMemoryTier(item, item.reviewedAt);
     return cloneMemory(item);
   }
 
@@ -849,6 +1007,7 @@ export class MemoryStore implements Store {
         (m) =>
           m.reviewState === undefined &&
           m.summary === undefined &&
+          m.archivedAt === undefined &&
           m.provenance.source !== 'external' &&
           (m.value.length > minChars || m.value.split('\n').length > minLineBreaks),
       )
@@ -876,6 +1035,7 @@ export class MemoryStore implements Store {
           m.reviewedAt === undefined &&
           m.reviewState === undefined &&
           m.supersededAt === undefined &&
+          m.archivedAt === undefined &&
           !m.key.startsWith('style/'),
       )
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -907,6 +1067,7 @@ export class MemoryStore implements Store {
     item.updatedAt = now;
     item.reviewedAt = now;
     if (changed) this.observations.delete(id);
+    if (changed) this.injectionLog.delete(id);
     return cloneMemory(item);
   }
 
@@ -927,7 +1088,9 @@ export class MemoryStore implements Store {
         this.observations.set(intoId, into);
       }
       for (const [sessionId, obs] of from) {
-        if (!into.has(sessionId)) into.set(sessionId, { ...obs, memoryId: intoId });
+        const kept = into.get(sessionId);
+        if (!kept) into.set(sessionId, { ...obs, memoryId: intoId });
+        else if (obs.stated && !kept.stated) into.set(sessionId, { ...kept, stated: true });
       }
     }
     const a = this.memoryItems.get(fromId);

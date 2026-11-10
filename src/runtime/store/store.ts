@@ -332,7 +332,56 @@ export type MemorySupersededReason =
   | 'tidy-refines'
   | 'tidy-contradicts'
   | 'review-contradicts'
-  | 'question';
+  | 'question'
+  /** memory-tiers R19: a new memory contradicted an ANCHORED one; the new row is
+   *  kept but the anchored row wins, so the NEW row is the one retired. */
+  | 'anchored-wins';
+
+/**
+ * The lifetime tier of a memory IN USE (specs/memory-tiers.md §2, R1).
+ *
+ *   short    — just learned, confirmed once; archived if not promoted in time (R8)
+ *   long     — restated, said by the user, or used across days (R4); archived
+ *              after `min(90d × S, 365d)` unused (R9)
+ *   anchored — emphasized by the user (R5); injected every turn (R15), never
+ *              changed, decayed or archived by naby (R18)
+ *
+ * Absent = no tier: a `proposed` row, a row waiting for its review, or a row
+ * whose status has not reached `confirmed` yet (R1).
+ */
+export type MemoryTier = 'short' | 'long' | 'anchored';
+
+/** How a row became anchored (memory-tiers R5/R6): `auto` = three sessions of
+ *  the user's own restatement, `explicit` = a verified "always remember this",
+ *  `user` = the pin button in the memory screen. */
+export type MemoryAnchorOrigin = 'auto' | 'explicit' | 'user';
+
+/** The tier bookkeeping a caller may set (memory-tiers §3). Every field is
+ *  optional; `null` clears. The rules that decide WHEN to set what are the
+ *  runtime's (memory-tiers.ts) — the store records them. */
+export type MemoryTierPatch = {
+  tier?: MemoryTier | null;
+  /** When the row entered its tier — the clock R8/R11/R20 restart. */
+  tierSince?: number;
+  anchorOrigin?: MemoryAnchorOrigin | null;
+  /** R6: an anchoring the user undid is never made automatically again. */
+  anchorBlocked?: boolean;
+  /** R17: met the anchoring rule while the anchored budget was full. */
+  anchorCandidate?: boolean;
+  /** R5: the user asked for this to be anchored (`naby_remember` pin) and the
+   *  row was still waiting for its review. */
+  pinRequested?: boolean;
+};
+
+/** The evidence promotion counts (memory-tiers R4/R5): one entry per distinct
+ *  session, with WHEN it agreed / was injected. */
+export type MemoryTierEvidence = {
+  /** Corroborating writes — `stated` when the write carried the user's verified
+   *  quote and was marked stated (R5 counts only these). */
+  observations: { sessionId: string; at: number; stated: boolean }[];
+  /** First injection per session (R4 third bullet). */
+  injections: { sessionId: string; at: number }[];
+};
 
 /** One scoped memory row (contract §3). `(scope, scopeKey, key)` is the upsert
  * identity; `id` is the provenance/rollback handle. */
@@ -415,6 +464,22 @@ export type MemoryItem = {
    * `memoryStrength` is the one place the `?? 1` fallback is spelled.
    */
   strength?: number;
+  /** memory-tiers R1 (v18): the lifetime tier of a row in use. Absent = none
+   *  (proposed / pending). */
+  tier?: MemoryTier;
+  /** memory-tiers (v18): when the row entered its current tier. */
+  tierSince?: number;
+  /** memory-tiers R11 (v18): when the row was ARCHIVED — hidden from injection,
+   *  review and tidy, restorable for 30 days, then deleted (R12). */
+  archivedAt?: number;
+  /** memory-tiers R5/R6 (v18): how an anchored row became anchored. */
+  anchorOrigin?: MemoryAnchorOrigin;
+  /** memory-tiers R6 (v18): the user undid an anchoring — never auto-anchor again. */
+  anchorBlocked?: boolean;
+  /** memory-tiers R17 (v18): met R5 while the anchored budget was full. */
+  anchorCandidate?: boolean;
+  /** memory-tiers R5 (v18): an explicit pin request waiting for the review. */
+  pinRequested?: boolean;
 };
 
 /** A write request to the gate (contract §4). Everything a MemoryItem carries
@@ -436,6 +501,15 @@ export type MemoryWriteRequest = Omit<
   | 'strength'
   | 'reviewedAt'
   | 'supersededReason'
+  // memory-tiers: tiers are EARNED (R4/R5) or set by a person, never asserted
+  // by a writer — the same reason strength is omitted.
+  | 'tier'
+  | 'tierSince'
+  | 'archivedAt'
+  | 'anchorOrigin'
+  | 'anchorBlocked'
+  | 'anchorCandidate'
+  | 'pinRequested'
 > & {
   requestedStatus: MemoryStatus;
 };
@@ -479,6 +553,9 @@ export type InjectedMemory = {
   tokensUsed: number;
   /** count omitted PURELY due to the cap (logged, never silent). */
   droppedForBudget: number;
+  /** memory-tiers R15: how many of `items` (always the leading ones) are
+   *  anchored. Absent = none. */
+  anchored?: number;
 };
 
 /**
@@ -545,6 +622,16 @@ export type ScopedMemoryQuery = {
    * confirmed-only filter so both live in one readable place.
    */
   superseded?: boolean;
+  /** memory-tiers §6: keep only rows of this tier. Omit for every tier
+   *  (including the untiered proposed rows). */
+  tier?: MemoryTier;
+  /**
+   * memory-tiers R11: `true` keeps ONLY archived rows (the browser's "보관됨"
+   * filter). OMITTED OR `false` KEEPS ONLY UNARCHIVED ROWS — an archived memory
+   * is hidden from every ordinary read (injection, review, tidy, the counts), so
+   * hiding it is the default and seeing it is the opt-in.
+   */
+  archived?: boolean;
   /** Page size. Omit for "all rows" — which is what every pre-M10 caller gets. */
   limit?: number;
   /** Rows to skip before the page. Ignored without a `limit`. */
@@ -642,6 +729,9 @@ export type MemoryObservation = {
   /** The `provenance.createdFrom` of that write — the message coordinate, when
    *  the writer supplied one (reflection does: "<sessionId>:<seq>"). */
   createdFrom?: string;
+  /** memory-tiers R5 (v18): this session's agreement was the user's own
+   *  verified words. Only ever rises within a session. */
+  stated?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -1510,7 +1600,12 @@ export interface Store {
   corroborateMemory(
     id: string,
     sessionId: string,
-    opts?: { createdFrom?: string; at?: number },
+    opts?: {
+      createdFrom?: string;
+      at?: number;
+      /** memory-tiers R5: this agreement is the user's own verified words. */
+      stated?: boolean;
+    },
   ): boolean;
 
   /** Every CONFIRMED item nobody has used since `before`, across ALL scopes —
@@ -1579,7 +1674,37 @@ export interface Store {
    * the "empty is a no-op" invariant (contract §5) would hold for the prompt and
    * quietly fail for the store.
    */
-  markMemoriesInjected(ids: readonly string[], at?: number): void;
+  markMemoriesInjected(
+    ids: readonly string[],
+    at?: number,
+    /** memory-tiers R4: the session the injection happened in — recorded once
+     *  per (memory, session) so promotion can count distinct days/sessions. */
+    opts?: { sessionId?: string },
+  ): void;
+
+  // -- memory tiers (specs/memory-tiers.md, v18) ---------------------------
+  //
+  // The store RECORDS tiers and REFUSES what must never happen to an anchored
+  // row (supersession by naby, an upsert over its value, archival). Which row
+  // gets which tier, and when, is decided by the pure rules in memory-tiers.ts.
+
+  /** Set tier bookkeeping on one row. Returns the row, or undefined. */
+  setMemoryTierState(id: string, patch: MemoryTierPatch): MemoryItem | undefined;
+  /** Every CONFIRMED, current (not superseded) row, across scopes — the
+   *  promotion and retention pass's read. `archived` as in ScopedMemoryQuery
+   *  (omitted = unarchived only). `tier` narrows. */
+  listTieredMemory(opts?: { tier?: MemoryTier; archived?: boolean }): MemoryItem[];
+  /** The promotion evidence for these ids (R4/R5). Absent ids have none. */
+  getMemoryTierEvidence(ids: readonly string[]): Record<string, MemoryTierEvidence>;
+  /** Archive these rows (R8/R9). An ANCHORED row is never archived, an
+   *  archived row is not re-stamped. Returns how many were archived. */
+  archiveMemory(ids: readonly string[], at?: number): number;
+  /** Bring an archived row back (R11): unarchived, `long`, clock restarted.
+   *  Returns whether anything changed. */
+  restoreMemory(id: string, at?: number): boolean;
+  /** Rows due for deletion (R12/R14): archived before `archivedBefore`, or
+   *  superseded before `supersededBefore`. */
+  listMemoryToPurge(archivedBefore: number, supersededBefore: number): MemoryItem[];
 
   // -- supersession (Phase 3 P3-M13a) --------------------------------------
 

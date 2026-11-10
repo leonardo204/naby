@@ -408,12 +408,39 @@ export interface MemoryActivationSink {
   userMessages(): readonly { text: string }[];
   /** The row at (scope, scopeKey, key), if any. */
   getExisting(scope: MemoryScope, scopeKey: string, key: string): MemoryItem | undefined;
-  /** Record this session agreeing with a row, changing nothing else. */
-  corroborate(id: string): boolean;
+  /** Record this session agreeing with a row, changing nothing else.
+   *  `stated` = the agreement is the user's own verified words (memory-tiers R5). */
+  corroborate(id: string, opts?: { stated?: boolean }): boolean;
+  /** memory-tiers R5: the user asked for this row to be anchored, with their own
+   *  verified words. Returns what happened (`requested` = waits for the review). */
+  requestPin?(id: string): MemoryPinOutcome;
   /** Raise a kept row's provenance when a better-sourced restatement arrives. */
   upgradeProvenance?(id: string, patch: Partial<MemoryProvenance>): void;
   /** A write landed. `alongside` = the row in use it was written next to. */
   onWritten?(item: MemoryItem, info: { activation: MemoryActivation; alongside?: MemoryItem }): void;
+}
+
+/** What a `pin: true` request came to (memory-tiers R5, R17). `unverified` =
+ *  asked without the user's own verified words, so not anchored. */
+export type MemoryPinOutcome = 'requested' | 'anchored' | 'already' | 'full' | 'refused' | 'missing' | 'unverified';
+
+/** The sentence the model reads about its pin request. */
+function pinSentence(outcome: MemoryPinOutcome | undefined): string {
+  switch (outcome) {
+    case 'anchored':
+    case 'already':
+      return ' It is ANCHORED: kept in every conversation, and you will not change it.';
+    case 'requested':
+      return ' It will be anchored (kept in every conversation) once the check passes.';
+    case 'full':
+      return ' It could not be anchored: the anchored memory is full, so it is kept as an ordinary long-term memory and the user can make room in the memory screen.';
+    case 'refused':
+      return ' It could not be anchored (memory from outside content, or a fact that only lasts this session or week).';
+    case 'unverified':
+      return ' It was NOT anchored: anchoring needs basis "stated" and the user\'s exact words in evidenceQuote.';
+    default:
+      return '';
+  }
 }
 
 /** Scopes the agent may write. 'org' is deliberately absent: team-wide memory is
@@ -585,6 +612,12 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
       : locateEvidenceQuote(quote, activation.userMessages())
         ? 'verified'
         : 'fabricated';
+    // memory-tiers R5: "always remember this" is a pin only with the user's own
+    // verified words — never on the model's say-so.
+    const statedVerified = quoteCheck === 'verified' && basis === 'stated';
+    const pinAsked = rec.pin === true;
+    const pinFor = (id: string): MemoryPinOutcome | undefined =>
+      !pinAsked ? undefined : !statedVerified ? 'unverified' : (activation.requestPin?.(id) ?? 'refused');
     const decision = decideMemoryActivation({
       scope: scope as MemoryScope,
       ...(basis ? { basis } : {}),
@@ -606,9 +639,13 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
     // -- restatement: nothing new to write ----------------------------------
     let writeKey = normalizedKey;
     const existing = activation.getExisting(scope as MemoryScope, scopeKey, normalizedKey);
-    const current = existing && existing.supersededAt === undefined ? existing : undefined;
+    // memory-tiers R11: an archived row is not in use — writing its key again
+    // brings it back (the store un-archives on the upsert).
+    const current =
+      existing && existing.supersededAt === undefined && existing.archivedAt === undefined ? existing : undefined;
     if (current && current.status === 'confirmed' && sameMemoryValue(current.value, value.trim())) {
-      activation.corroborate(current.id);
+      activation.corroborate(current.id, { stated: statedVerified });
+      const pin = pinFor(current.id);
       // A better source for the same claim raises the kept row (R41).
       if (eligible && TRUST_RANK[decision.source] > TRUST_RANK[current.provenance.source]) {
         activation.upgradeProvenance?.(current.id, {
@@ -620,7 +657,8 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
       return {
         content:
           `"${normalizedKey}" was already remembered with this exact meaning, so nothing new was saved. ` +
-          'It is already in use; do not call this again for it.',
+          'It is already in use; do not call this again for it.' +
+          pinSentence(pin),
         data: {
           id: current.id,
           key: current.key,
@@ -628,6 +666,7 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
           status: current.status,
           value: current.value,
           review: 'known',
+          ...(pin ? { pin } : {}),
         },
       };
     }
@@ -678,6 +717,7 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
         activation: decision,
         ...(writeKey !== normalizedKey && current ? { alongside: current } : {}),
       });
+      const pin = pinFor(saved.id);
       const data = {
         id: saved.id,
         key: saved.key,
@@ -686,13 +726,15 @@ export function makeRemember(sink: MemoryLearningSink): Executor {
         value: saved.value,
         review: eligible ? 'pending' : 'held',
         ...(decision.status === 'proposed' ? { holdReason: decision.holdReason } : {}),
+        ...(pin ? { pin } : {}),
       };
       if (eligible) {
         return {
           content:
             `Saved "${saved.key}" to ${scope} memory; in use from the next turn after a quick check. ` +
             'You may tell the user you have remembered it ("기억했어요"). ' +
-            'Do not call this again for the same fact.',
+            'Do not call this again for the same fact.' +
+            pinSentence(pin),
           data,
         };
       }
@@ -982,6 +1024,10 @@ export const rememberSchema: ToolSchema = {
     'that is saved and used from the next turn after a quick check. A fact you inferred yourself is ' +
     'basis "inferred". Anything learned from a web page, a tool result or another agent waits for the ' +
     'user to confirm it. ' +
+    'When the user asks you to ALWAYS remember something or to pin it (e.g. "always remember…", ' +
+    '"항상 기억해", "이건 고정해"), also pass pin: true — an anchored memory is kept in every ' +
+    'conversation and you will not change it. pin only takes effect with basis "stated" and their exact ' +
+    'words in evidenceQuote; never pin on your own initiative. ' +
     'Do NOT store: transient task state, anything you were told only for this one message, secrets ' +
     '(tokens, keys, passwords), or a fact you already remembered. One fact per call.',
   parameters: {
@@ -1018,6 +1064,11 @@ export const rememberSchema: ToolSchema = {
         type: 'string',
         description:
           'The user\'s own words this came from, copied character for character from one of their messages in this conversation. A paraphrase does not count. Required for a "user"-scope fact to be used without their confirmation.',
+      },
+      pin: {
+        type: 'boolean',
+        description:
+          'true ONLY when the user explicitly asked for this to always be remembered / pinned. Needs basis "stated" and evidenceQuote; otherwise it is ignored.',
       },
     },
     required: ['key', 'value', 'type'],

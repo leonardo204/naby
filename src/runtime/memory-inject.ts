@@ -37,6 +37,9 @@
 // two-valued. M13b's strength model is NOT lost by that — `isMemoryStale` is
 // the strength-scaled curve, thresholded.
 import { isMemoryStale } from './memory-hygiene.js';
+// memory-tiers R15/R16: anchored rows go first, outside the relevance ranking,
+// inside their own share of the budget.
+import { selectAnchoredForInjection } from './memory-tiers.js';
 import type {
   InjectedMemory,
   MemoryInjectionQuery,
@@ -394,16 +397,28 @@ export function selectMemoryForInjection(
   // how one of them ends up applied on one read path and not another; the store
   // therefore has no opinion about supersession on the injection path at all, and
   // this line is the whole rule.
+  //
+  // memory-tiers R11 adds the third condition beside them: an ARCHIVED row never
+  // shapes a turn, whatever a caller managed to read.
   const injectable = candidates.filter(
-    (c) => c.status === 'confirmed' && c.supersededAt === undefined,
+    (c) => c.status === 'confirmed' && c.supersededAt === undefined && c.archivedAt === undefined,
   );
+  // memory-tiers R15/R16: ANCHORED FIRST — every turn, whatever the query, ahead
+  // of the ranking and inside ANCHORED_TOKEN_BUDGET / ANCHORED_MAX_ROWS of this
+  // turn's budget. Whole values, never summaries (the summary is display only).
+  // An anchored row that does not fit its share still competes below like any
+  // other row rather than vanishing.
+  const anchored = selectAnchoredForInjection(injectable, budget);
+  const anchoredIds = new Set(anchored.items.map((m) => m.id));
   // MMR (P3-M13b §3.2) reorders AFTER the ranking and BEFORE the budget walk, so
   // it can only change which of two equally-affordable memories is reached first
   // — never the ceiling, and never whether something is reachable at all.
-  const ranked = deferNearDuplicates(rankCandidates(injectable, queryText, now));
+  const ranked = deferNearDuplicates(
+    rankCandidates(injectable.filter((c) => !anchoredIds.has(c.id)), queryText, now),
+  );
 
-  const items: MemoryItem[] = [];
-  let tokensUsed = 0;
+  const items: MemoryItem[] = [...anchored.items];
+  let tokensUsed = anchored.tokensUsed;
   let droppedForBudget = 0;
 
   for (const item of ranked) {
@@ -417,6 +432,9 @@ export function selectMemoryForInjection(
     }
   }
 
+  // `anchored` is reported only when there is any, so a turn without anchored
+  // memory returns exactly the shape it always did.
+  if (anchored.items.length > 0) return { items, tokensUsed, droppedForBudget, anchored: anchored.items.length };
   return { items, tokensUsed, droppedForBudget };
 }
 
@@ -484,6 +502,19 @@ export function retrieveForInjection(
 export function renderInjectedMemory(injected: InjectedMemory): string | undefined {
   if (injected.items.length === 0) return undefined;
   const lines = injected.items.map(renderMemoryLine);
+  // memory-tiers R15/R19: anchored rows lead, under their own line, and are
+  // stated to win over anything below that disagrees. Without anchored rows the
+  // block is byte-for-byte what it always was.
+  const anchoredCount = Math.min(injected.anchored ?? 0, lines.length);
+  if (anchoredCount > 0) {
+    const rest = lines.slice(anchoredCount);
+    return [
+      'Relevant remembered context about this user (apply where it fits; do not mention this block):',
+      'Always apply — the user anchored these; they win over anything else here that disagrees:',
+      ...lines.slice(0, anchoredCount),
+      ...(rest.length > 0 ? ['Other remembered context:', ...rest] : []),
+    ].join('\n');
+  }
   return [
     'Relevant remembered context about this user (apply where it fits; do not mention this block):',
     ...lines,
