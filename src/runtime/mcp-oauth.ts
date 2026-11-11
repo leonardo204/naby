@@ -185,6 +185,17 @@ function markRelogin(store: McpOAuthStore, server: string, reason: string, now: 
 }
 
 /**
+ * Drop a server's tokens and mark it "sign in again", keeping the registered
+ * client. A no-op when the server was never signed in. Used when the server's
+ * address moved (org-harness-sync §3.10): tokens issued for the old resource must
+ * not be sent to the new one.
+ */
+export function clearMcpOAuthTokensForRelogin(store: McpOAuthStore, server: string, reason: string, now: number): void {
+  if (!readMcpOAuthRecord(store, server)) return;
+  markRelogin(store, server, reason, now);
+}
+
+/**
  * THE TOOLS A REAL SIGN-IN ALWAYS HAS, per server (user decision 2026-10-08).
  *
  * Atlassian answers a dead or bogus bearer token with 200 and a REDUCED tool set

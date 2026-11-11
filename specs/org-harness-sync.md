@@ -2,11 +2,11 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.10.1
+version: 0.11.0
 status: active
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
 related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution, chat-connection-status, phase-1-contracts, mcp-oauth-catalog]
-updated: 2026-10-13
+updated: 2026-11-11
 ---
 
 # 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
@@ -250,7 +250,7 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 | 항목 | 값 |
 |---|---|
 | 서버 이름 | `atlassian` 그대로. 플러그인의 서버 이름과도 같다 |
-| 전송 | `http`, `https://mcp.atlassian.com/v1/mcp` |
+| 전송 | `http`. 주소는 조직 패키지 `.mcp.json`이 정한 값이고, 없으면 `https://mcp.atlassian.com/v1/mcp`다(§3.10) |
 | 입력 필드 | 없다. "연결" 버튼 하나다. Confluence 주소·계정·API 토큰 입력란과 uvx 확인을 없앤다 |
 | 도구 이름 | `atlassian__getConfluencePage` 꼴로 바뀐다(이전 `atlassian__confluence_get_page`). ctx·pdoc 본문은 뒷부분(`getConfluencePage`)으로 찾으라고 안내한다. Jira 도구도 함께 온다 |
 
@@ -285,6 +285,21 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 ### 3.9 채팅 입력창 아래 연결 상태
 
 채팅 입력창 아래에 Atlassian과 Skill Hub의 연결 상태를 점과 이름으로 늘 보여 준다. 설계(색 표, 문장, 누르면 하는 일, `status.connections`, 점과 색 변수)는 [chat-connection-status](chat-connection-status.md)에 있다. 이 문서와 맞물리는 규칙은 하나다. **상태 줄은 표시만 한다.** 키가 없으면 Skill Hub가 빨강이지만 naby는 조직 하네스 없이 그대로 돈다(§4.3). 사용자가 끄는 설정은 없다(§4.8). 개발·시험용 `NABY_ORG_HARNESS=0`으로 끄면 빨강이고 끈 상태는 그대로 지켜진다. Atlassian은 유예 중에도 빨강이지만 막는 시점은 §4.6 그대로다.
+
+### 3.10 패키지의 MCP 주소를 따라간다
+
+패키지에는 Claude Code 형식의 `.mcp.json`이 들어 있고, 스킬이 부르는 서버(`atlassian`, `skill-hub`, `cic`)의 주소가 적혀 있다. naby는 이 파일을 MCP 설정으로 불러오지 않는다. 서버는 System MCP 프리셋이고 인증도 naby 방식이다(§3.8). 그래도 **주소는 조직이 정하는 값**이라 따라간다. 0.11.1에서 Atlassian 주소가 `/v1/mcp`에서 `/v2/mcp?tools=all`로 바뀌었는데, naby는 주소를 코드에 상수로 두고 이 파일을 읽지 않아 계속 v1에 붙어 있었다.
+
+규칙은 아래와 같다. 행을 반영하는 자리(§3.2: 턴 경계, 받기를 마친 직후)에서 같이 돌고, 패키지 지문(버전·sha256)이 바뀌었을 때만 일한다.
+
+- `.mcp.json`의 `http` 서버 가운데 `https` 주소만 본다. 파일이 없거나 깨졌으면 서버가 없는 것으로 본다.
+- 패키지가 정한 주소를 서버별로 기억한다(`harness.org.mcp.<name>.url`). 나중에 프리셋을 저장하거나 Atlassian 로그인 뒤 행을 만들 때 이 주소를 쓴다. 우선순위는 사용자가 넣은 주소, 패키지 주소, naby 상수 순이다. Atlassian의 옛 설정 키(`atlassian.confluenceUrl`)는 Confluence 사이트 주소였으므로 MCP 주소로 읽지 않는다.
+- 패키지 주소가 **지난번 반영한 값에서 바뀌었을 때만** 같은 이름의 naby 행 주소를 고친다. 헤더·인증 방식·상태는 그대로 둔다. 그래서 사용자가 행 주소를 직접 고쳤으면, 조직이 주소를 다시 바꿀 때까지 그 값이 남는다.
+- OAuth 행의 주소가 바뀌면 "다시 로그인 필요"로 바꾼다(`reloginReason: server-url-changed`). 토큰은 이전 주소에 대해 받은 것이라 새 주소로 보내지 않는다. 등록한 클라이언트 정보는 남긴다.
+- 고치지 않는 행: 에이전트가 제안한 행(`proposed`, 사람이 승인한다), stdio 행(§4.4의 API 토큰 행. 로그인 뒤 바꿀 때 기억한 주소로 만든다).
+- 조직 하네스가 꺼져 있거나 받은 패키지가 없으면 아무것도 하지 않는다.
+
+구현은 런타임 `org-harness-mcp.ts`이고, `spike:org-harness-mcp`(22개)가 위 규칙을 확인한다. 실제 Atlassian v2 계정 로그인과 도구 목록은 사람이 확인한다.
 
 ## 4. 기존 사용자 이전 — 업그레이드하면 끊김 없이 넘어온다
 
@@ -629,6 +644,7 @@ pdoc의 템플릿 받기(`template_source.py`)는 cic 토큰을 `CIC_API_TOKEN`�
 
 ## 변경 이력
 
+- 0.11.0(2026-11-11): §3.10을 더했다. 패키지 `.mcp.json`의 서버 주소를 기억해 같은 이름의 naby 행에 반영한다. 0.11.1의 Atlassian v2 이전이 naby에 들어오지 않던 문제를 고쳤다. §3.8 표의 주소 행을 고쳤다.
 - 0.10.1(2026-10-13): §3.8에 mcp-oauth-catalog 포인터를 더했다. Atlassian 밖의 원격 MCP도 같은 OAuth 코드를 쓴다.
 - 0.10.0(2026-10-12): 조직 하네스를 필수로 정하고 사용자가 끄는 설정을 없앴다(사용자 결정). §1에 결정을 더하고 §4.8을 "끄는 스위치는 없다"로 다시 썼다. 저장된 `harness.org.enabled`는 읽지 않고 지우지도 않는다. 꺼짐은 키 없음·키 거부·개발용 `NABY_ORG_HARNESS=0` 셋만 남는다. §3.1, §3.4, §3.9, §4.9의 4번, 7.2, 7.7, 7.11에서 토글을 가리키던 문구를 고치고 §4.9에 12번을, 7.12를 더했다.
 - 0.9.4(2026-10-12): §3.4에 환경을 읽는 시점을 7.11과 같게 적었다(턴 시작에 한 번, 자율 실행이면 단계마다). 0.9.3 항목의 §6 문구를 실제 변경대로 고쳤다.

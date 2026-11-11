@@ -799,6 +799,18 @@ export {
   type OrgHarnessSyncReport,
   type OrgPackage,
 } from './runtime/org-harness.js';
+// The org package's MCP addresses, followed (org-harness-sync §3.10).
+export {
+  applyOrgHarnessMcpIfDue,
+  atlassianMcpUrl,
+  orgHarnessMcpUrl,
+  orgHarnessMcpUrlKey,
+  readOrgPackageMcpUrls,
+  ORG_HARNESS_MCP_APPLIED_SETTING,
+  ORG_MCP_URL_CHANGED_REASON,
+  type OrgHarnessMcpChange,
+  type OrgHarnessMcpResult,
+} from './runtime/org-harness-mcp.js';
 // The hooks a package names and which of them wait for a naby release (§3.1,
 // §3.5) — a leaf module the sync and the runner share.
 export {

@@ -25,6 +25,7 @@
 import { createHash } from 'node:crypto';
 import { DEFAULT_USER_ID } from './memory-inject.js';
 import { ATLASSIAN_MCP_SERVER_NAME, ATLASSIAN_MCP_URL, mcpOAuthStatus } from './mcp-oauth.js';
+import { atlassianMcpUrl } from './org-harness-mcp.js';
 import type { HarnessItem, HarnessScope, McpEntry, Store } from './store/store.js';
 
 export const CONFLUENCE_UPLOAD_SKILL = 'confluence-upload';
@@ -52,12 +53,13 @@ export const ATLASSIAN_MIGRATION_SETTING = {
  *  mcp-atlassian spellings, which the remote MCP does not have. */
 export const LEGACY_ATLASSIAN_TOOL_RE = /(?:^|[^A-Za-z0-9_])(?:mcp__)?atlassian__(?:confluence|jira)_[a-z0-9_]+/;
 
-/** The row a signed-in user should have. */
-export function atlassianOAuthEntry(): McpEntry {
+/** The row a signed-in user should have. `url` is the org package's address
+ *  when it names one (org-harness-sync §3.10, `atlassianMcpUrl`). */
+export function atlassianOAuthEntry(url: string = ATLASSIAN_MCP_URL): McpEntry {
   return {
     name: ATLASSIAN_MCP_SERVER_NAME,
     transport: 'http',
-    url: ATLASSIAN_MCP_URL,
+    url,
     auth: 'oauth',
     status: 'enabled',
   };
@@ -233,7 +235,7 @@ export function applyAtlassianOAuthSwapIfDue(
   if (row?.status === 'proposed') return undefined;
   // Same name, replaced whole: the stdio command, the env with the API token and
   // the Confluence URL are not carried into the new row.
-  store.upsertMcpEntry(atlassianOAuthEntry());
+  store.upsertMcpEntry(atlassianOAuthEntry(atlassianMcpUrl(store)));
   const userId = opts.userId ?? DEFAULT_USER_ID;
   // Only a user who HAD the API-token preset ever had the withdrawal to make; a
   // first-time sign-in still withdraws an untouched seed (§4.4: the skill is not
