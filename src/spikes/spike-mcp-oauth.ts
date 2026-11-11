@@ -345,6 +345,30 @@ async function reloginDetection(): Promise<void> {
   }
 }
 
+// v2 (`/v2/mcp?tools=all`): renamed page reader, list served in pages
+// (org-harness-sync §3.10). The page reader sits on the LAST page, so reading only
+// the first page would both drop tools and fail the sign-in check.
+async function v2PagedToolset(): Promise<void> {
+  const v2 = ['getAccessibleAtlassianResources', 'searchConfluence', 'createConfluenceContent', 'updateConfluenceContent', 'listConfluenceAttachments', 'createConfluenceAttachment', 'getConfluenceContent'];
+  const fake = await startFakeAtlassian({ tools: v2, toolsPageSize: 3 });
+  const store = freshStore();
+  try {
+    await login(store, fake);
+    const load = await loadMcpToolset([entry(fake)], { oauth: { store } });
+    await load.closeAll();
+    const names = load.toolSchemas.map((t) => t.name);
+    record(
+      'v2: every page of tools/list is read',
+      load.failures.length === 0 && v2.every((t) => names.includes(`atlassian__${t}`)) && names.length === v2.length,
+      JSON.stringify({ failures: load.failures, names }),
+    );
+    record('v2: getConfluenceContent counts as signed in', mcpOAuthStatus(store, SERVER) === 'connected');
+  } finally {
+    await fake.close();
+    store.close();
+  }
+}
+
 async function reducedToolsetIsRelogin(): Promise<void> {
   const fake = await startFakeAtlassian();
   const store = freshStore();
@@ -440,6 +464,7 @@ async function main(): Promise<void> {
     await persistFirstAndSingleFlight();
     await reloginDetection();
     await reducedToolsetIsRelogin();
+    await v2PagedToolset();
     await cancelKeepsOldTokens();
   } catch (e) {
     record('spike ran to completion', false, e instanceof Error ? (e.stack ?? e.message) : String(e));

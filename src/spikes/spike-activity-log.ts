@@ -50,6 +50,7 @@ import {
   pruneActivityLogs,
   resetActivityLogCaches,
   sanitizeActivityPayload,
+  scrubSecretSettingLogs,
   setActivityLogEnabled,
   unregisterActivityLogStore,
 } from '../runtime/activity-log.js';
@@ -519,6 +520,38 @@ record(
   sanitizerThrew === '' && sane,
   sanitizerThrew ? `threw: ${sanitizerThrew}` : 'circular → [circular], deep → [depth limit], 500 items → 200 + a count',
 );
+
+// ---- (j) OAuth records never reach the log; old lines are scrubbed once ----
+{
+  const scrubDir = join(TMP_DIR, 'scrub');
+  mkdirSync(scrubDir, { recursive: true });
+  const secretRec = JSON.stringify({ v: 1, state: 'ok', tokens: { access_token: 'AT-SPIKE-SECRET', refresh_token: 'RT-SPIKE-SECRET' } });
+  const lines = [
+    JSON.stringify({ at: 1, iso: 'x', kind: 'setting_change', key: 'mcp.oauth.atlassian', value: secretRec }),
+    JSON.stringify({ at: 2, iso: 'x', kind: 'setting_change', key: 'memory.autoApply', value: 'true' }),
+    JSON.stringify({ at: 3, iso: 'x', kind: 'tool_call', toolName: 'x' }),
+  ];
+  writeFileSync(join(scrubDir, '2026-11-10.jsonl'), lines.join('\n') + '\n');
+  writeFileSync(join(scrubDir, '2026-11-09.jsonl'), lines[2] + '\n');
+  const n = await scrubSecretSettingLogs(scrubDir);
+  const after = readFileSync(join(scrubDir, '2026-11-10.jsonl'), 'utf8');
+  const parsed = after.trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+  const again = await scrubSecretSettingLogs(scrubDir);
+  record(
+    '(j) old OAuth setting lines are redacted once; other lines are untouched',
+    n === 1 && !after.includes('SPIKE-SECRET') && parsed[0]!.value === '[redacted]' && parsed[1]!.value === 'true' &&
+      parsed[2]!.kind === 'tool_call' && parsed.length === 3 && again === 0 && !existsSync(join(scrubDir, '2026-11-10.jsonl.scrub-tmp')),
+    `redacted=${n} second=${again}`,
+  );
+  const liveDir = activityLogDir();
+  store.setSetting('mcp.oauth.spike', secretRec);
+  const today = liveDir ? readFileSync(join(liveDir, activityLogFileName()), 'utf8') : '';
+  record(
+    '(j) a new mcp.oauth.* setting is logged as [redacted]',
+    !!liveDir && today.includes('"key":"mcp.oauth.spike"') && !today.includes('SPIKE-SECRET'),
+    liveDir ? 'checked today\'s file' : 'no live log dir',
+  );
+}
 
 store.close?.();
 rmSync(TMP_DIR, { recursive: true, force: true });

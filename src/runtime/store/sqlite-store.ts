@@ -34,7 +34,7 @@ import { createRequire } from 'node:module';
 // a static ESM import is hoisted above any code that could suppress it. The
 // actual load happens lazily inside openSilently() below.
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
-import { logActivity, registerActivityLogStore } from '../activity-log.js';
+import { logActivity, registerActivityLogStore, SECRET_SETTING_KEY_RE } from '../activity-log.js';
 import { decideMemoryWrite } from '../memory-gate.js';
 import { decideHarnessImport, provenanceForWrite } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
@@ -3520,9 +3520,7 @@ export class SqliteStore implements Store {
     // consulted: this is the one call site that has to do the masking itself.
     logActivity('setting_change', {
       key,
-      value: /token|secret|password|apikey|api_key|credential/i.test(key)
-        ? '[redacted]'
-        : value,
+      value: SECRET_SETTING_KEY_RE.test(key) ? '[redacted]' : value,
     });
     this.db
       .prepare(

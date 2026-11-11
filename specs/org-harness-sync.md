@@ -2,7 +2,7 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.11.0
+version: 0.11.1
 status: active
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
 related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution, chat-connection-status, phase-1-contracts, mcp-oauth-catalog]
@@ -299,7 +299,12 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 - 고치지 않는 행: 에이전트가 제안한 행(`proposed`, 사람이 승인한다), stdio 행(§4.4의 API 토큰 행. 로그인 뒤 바꿀 때 기억한 주소로 만든다).
 - 조직 하네스가 꺼져 있거나 받은 패키지가 없으면 아무것도 하지 않는다.
 
-구현은 런타임 `org-harness-mcp.ts`이고, `spike:org-harness-mcp`(22개)가 위 규칙을 확인한다. 실제 Atlassian v2 계정 로그인과 도구 목록은 사람이 확인한다.
+v2로 옮기며 두 가지가 더 바뀌었다(1.48.21, 실제 계정에서 연결 테스트가 "다시 로그인 필요"로 실패해 찾았다).
+
+- **도구 이름.** v2는 페이지 읽기 도구가 `getConfluencePage`가 아니라 `getConfluenceContent`다(쓰기는 `createConfluenceContent`·`updateConfluenceContent`, 검색은 `searchConfluence`). 로그인 확인(§7.4의 줄어든 도구 목록 판정)은 둘 중 하나가 있으면 로그인된 것으로 본다. 둘 다 죽은 토큰에 오는 공개 도구 목록에는 없다.
+- **목록이 여러 페이지다.** `?tools=all`은 `tools/list`를 페이지로 나눠 `nextCursor`를 준다. `@ai-sdk/mcp`의 `listTools()`는 한 페이지만 읽으므로, naby가 커서를 따라 끝까지 읽는다(서버 하나에 최대 50페이지, 같은 커서가 다시 오면 멈춘다). 첫 페이지만 읽으면 도구 대부분이 빠지고 로그인 확인도 실패한다.
+
+구현은 런타임 `org-harness-mcp.ts`와 `mcp.ts`의 `listAllTools`다. `spike:org-harness-mcp`(22개)가 주소 규칙을, `spike:mcp-oauth`(32개)가 v2 이름과 여러 페이지 목록을 가짜 서버로 확인한다. 실제 Atlassian v2 계정 로그인과 도구 목록은 사람이 확인한다.
 
 ## 4. 기존 사용자 이전 — 업그레이드하면 끊김 없이 넘어온다
 
@@ -644,6 +649,7 @@ pdoc의 템플릿 받기(`template_source.py`)는 cic 토큰을 `CIC_API_TOKEN`�
 
 ## 변경 이력
 
+- 0.11.1(2026-11-11): §3.10에 v2 도구 이름(`getConfluenceContent`)과 여러 페이지 `tools/list`를 더했다. 로그인 확인이 v1·v2 이름을 모두 받고, 도구 목록을 끝까지 읽는다.
 - 0.11.0(2026-11-11): §3.10을 더했다. 패키지 `.mcp.json`의 서버 주소를 기억해 같은 이름의 naby 행에 반영한다. 0.11.1의 Atlassian v2 이전이 naby에 들어오지 않던 문제를 고쳤다. §3.8 표의 주소 행을 고쳤다.
 - 0.10.1(2026-10-13): §3.8에 mcp-oauth-catalog 포인터를 더했다. Atlassian 밖의 원격 MCP도 같은 OAuth 코드를 쓴다.
 - 0.10.0(2026-10-12): 조직 하네스를 필수로 정하고 사용자가 끄는 설정을 없앴다(사용자 결정). §1에 결정을 더하고 §4.8을 "끄는 스위치는 없다"로 다시 썼다. 저장된 `harness.org.enabled`는 읽지 않고 지우지도 않는다. 꺼짐은 키 없음·키 거부·개발용 `NABY_ORG_HARNESS=0` 셋만 남는다. §3.1, §3.4, §3.9, §4.9의 4번, 7.2, 7.7, 7.11에서 토글을 가리키던 문구를 고치고 §4.9에 12번을, 7.12를 더했다.

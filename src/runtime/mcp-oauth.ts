@@ -204,8 +204,11 @@ export function clearMcpOAuthTokensForRelogin(store: McpOAuthStore, server: stri
  * does not mean "signed in": a listing without these names is treated as a sign-in
  * that has to be redone.
  */
-export const MCP_OAUTH_REQUIRED_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  [ATLASSIAN_MCP_SERVER_NAME]: ['getConfluencePage'],
+export const MCP_OAUTH_REQUIRED_TOOLS: Readonly<Record<string, readonly (string | readonly string[])[]>> = {
+  // Each entry is one requirement; an array means "any one of these". v1 calls
+  // the page reader `getConfluencePage`, v2 (`/v2/mcp`) `getConfluenceContent`
+  // (org-harness-sync §3.10). Neither is in the reduced set a dead token gets.
+  [ATLASSIAN_MCP_SERVER_NAME]: [['getConfluencePage', 'getConfluenceContent']],
 };
 
 /**
@@ -223,7 +226,9 @@ export function checkMcpOAuthToolset(
 ): { reduced: boolean; missing: string[] } {
   const required = MCP_OAUTH_REQUIRED_TOOLS[server] ?? [];
   const have = new Set(remoteToolNames);
-  const missing = required.filter((t) => !have.has(t));
+  const missing = required
+    .filter((t) => !(typeof t === 'string' ? have.has(t) : t.some((alt) => have.has(alt))))
+    .map((t) => (typeof t === 'string' ? t : t.join('|')));
   if (missing.length === 0) return { reduced: false, missing };
   const rec = readMcpOAuthRecord(store, server);
   if (rec && rec.state !== 'relogin') {

@@ -53,6 +53,9 @@ export type FakeOAuthMcpOptions = {
   open?: boolean;
   /** The server's tool names (default: the Confluence trio). */
   tools?: readonly string[];
+  /** Serve `tools/list` this many tools per page, with `nextCursor` (default:
+   *  one page) — Atlassian's `/v2/mcp?tools=all` pages its list. */
+  toolsPageSize?: number;
   /** Access-token lifetime in seconds (default 3600). */
   expiresIn?: number;
   /** Called on every MCP request that carried a VALID access token. */
@@ -345,7 +348,17 @@ export async function startFakeOAuthMcp(opts: FakeOAuthMcpOptions = {}): Promise
           return;
         }
         if (msg.method === 'tools/list') {
-          json(res, 200, { jsonrpc: '2.0', id: msg.id, result: { tools: reduced ? REDUCED_TOOLS : TOOLS } });
+          const all = reduced ? REDUCED_TOOLS : TOOLS;
+          const size = opts.toolsPageSize;
+          if (!size || reduced) {
+            json(res, 200, { jsonrpc: '2.0', id: msg.id, result: { tools: all } });
+            return;
+          }
+          const cursor = (msg.params as { cursor?: unknown } | undefined)?.cursor;
+          const start = typeof cursor === 'string' ? Number(cursor.replace(/^p/, '')) || 0 : 0;
+          const page = all.slice(start, start + size);
+          const next = start + size < all.length ? `p${start + size}` : undefined;
+          json(res, 200, { jsonrpc: '2.0', id: msg.id, result: { tools: page, ...(next ? { nextCursor: next } : {}) } });
           return;
         }
         if (msg.method === 'tools/call') {

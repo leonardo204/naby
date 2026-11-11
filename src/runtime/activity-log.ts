@@ -36,7 +36,8 @@
 //   4. IT NEVER LOGS A SECRET IT CAN RECOGNISE. Best-effort, key-name based —
 //      see `maskSecrets`.
 
-import { appendFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { configuredNabyHome } from './naby-home.js';
 
@@ -336,7 +337,7 @@ export function applyActivityLogSettings(store: {
   if (resolvedFromStore) return;
   resolvedFromStore = true;
   enabled = readActivityLogEnabled(store);
-  if (enabled) initActivityLog();
+  initActivityLog();
 }
 
 /** Whether this process is logging. */
@@ -480,6 +481,74 @@ export function maskSecrets(value: unknown): unknown {
 
 /** Directories whose existence has already been ensured this process. */
 const ensuredDirs = new Set<string>();
+/**
+ * SETTINGS KEYS WHOSE VALUE IS A SECRET. `setting_change` logs a row's value, and
+ * the masker keys on field names, so the setting's own key is what decides. The
+ * `oauth` part covers `mcp.oauth.<server>`, a JSON record holding access and
+ * refresh tokens, which this list missed until 1.48.21.
+ */
+export const SECRET_SETTING_KEY_RE = /token|secret|password|apikey|api_key|credential|oauth/i;
+
+/** Marker that the one-time scrub of already-written secret settings ran. */
+const SCRUB_MARKER = '.scrubbed-secret-settings-v1';
+
+/**
+ * ONE-TIME CLEANUP of day files written before `SECRET_SETTING_KEY_RE` covered
+ * OAuth records: every `setting_change` line whose key matches gets its value
+ * replaced by `[redacted]`. Only files that contain such a line are rewritten,
+ * through a temp file and a rename. Runs in the background; never throws.
+ *
+ * @returns how many lines were redacted (the spike reads it).
+ */
+export async function scrubSecretSettingLogs(dir?: string): Promise<number> {
+  const target = dir ?? activityLogDir();
+  if (!target) return 0;
+  const marker = join(target, SCRUB_MARKER);
+  let redacted = 0;
+  try {
+    if (existsSync(marker)) return 0;
+    for (const name of readdirSync(target)) {
+      if (!LOG_FILE_RE.test(name)) continue;
+      const file = join(target, name);
+      let text: string;
+      try {
+        text = await readFile(file, 'utf8');
+      } catch {
+        continue;
+      }
+      if (!text.includes('"kind":"setting_change"')) continue;
+      let changed = false;
+      const lines = text.split('\n').map((line) => {
+        if (!line.includes('"kind":"setting_change"')) return line;
+        try {
+          const rec = JSON.parse(line) as { key?: unknown; value?: unknown };
+          if (typeof rec.key !== 'string' || !SECRET_SETTING_KEY_RE.test(rec.key)) return line;
+          if (rec.value === REDACTED || rec.value === undefined) return line;
+          rec.value = REDACTED;
+          changed = true;
+          redacted += 1;
+          return JSON.stringify(rec);
+        } catch {
+          return line;
+        }
+      });
+      if (!changed) continue;
+      const tmp = `${file}.scrub-tmp`;
+      try {
+        await writeFile(tmp, lines.join('\n'));
+        await rename(tmp, file);
+      } catch {
+        /* held open or read-only: left as it was, tried again next boot */
+        return redacted;
+      }
+    }
+    writeFileSync(marker, new Date().toISOString());
+  } catch {
+    /* rule 1 */
+  }
+  return redacted;
+}
+
 /** Per-directory day key of the last retention pass — "once per day thereafter". */
 const lastPruneDay = new Map<string, string>();
 
@@ -538,7 +607,10 @@ function ensureDir(dir: string, now: number): void {
 export function initActivityLog(): void {
   try {
     const dir = activityLogDir();
-    if (!dir || !isActivityLogEnabled()) return;
+    if (!dir) return;
+    // Old files can hold secrets even when logging is now off.
+    void scrubSecretSettingLogs(dir);
+    if (!isActivityLogEnabled()) return;
     ensureDir(dir, Date.now());
   } catch {
     /* rule 1 */

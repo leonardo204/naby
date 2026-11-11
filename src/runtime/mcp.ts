@@ -326,6 +326,32 @@ async function openClient(entry: McpEntry, opts?: McpConnectOptions): Promise<Mc
   });
 }
 
+/** Most `tools/list` pages read from one server. A server that keeps handing back
+ *  a cursor past this is broken, not large. */
+export const MCP_TOOLS_MAX_PAGES = 50;
+
+/**
+ * Every page of `tools/list`. `@ai-sdk/mcp`'s `listTools()` returns ONE page and
+ * leaves `nextCursor` to the caller; Atlassian's `/v2/mcp?tools=all` pages its
+ * list, so reading only the first page dropped most of its tools — and the page
+ * reader the sign-in check looks for (org-harness-sync §3.10).
+ */
+export async function listAllTools<T extends { name: string }>(client: {
+  listTools(args?: { params?: { cursor?: string } }): Promise<{ tools: T[]; nextCursor?: string }>;
+}): Promise<{ tools: T[] }> {
+  const first = await client.listTools();
+  const tools = [...first.tools];
+  const seen = new Set<string>();
+  let cursor = first.nextCursor;
+  for (let page = 1; cursor && page < MCP_TOOLS_MAX_PAGES && !seen.has(cursor); page += 1) {
+    seen.add(cursor);
+    const next = await client.listTools({ params: { cursor } });
+    tools.push(...next.tools);
+    cursor = next.nextCursor;
+  }
+  return { tools };
+}
+
 /**
  * Connect one MCP server and build its GATEABLE toolset.
  *
@@ -339,7 +365,7 @@ export async function connectMcpServer(entry: McpEntry, opts?: McpConnectOptions
   const timeout = timeoutFor(entry);
 
   // listTools(), NOT tools(). See the header.
-  const listed = await client.listTools();
+  const listed = await listAllTools(client);
 
   // A BROWSER-OAUTH server that answered with a reduced tool set is NOT signed in
   // (Atlassian serves a public subset to a dead token instead of a 401). The
