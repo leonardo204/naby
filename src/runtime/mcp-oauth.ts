@@ -119,7 +119,8 @@ export type McpOAuthStatus = 'connected' | 'relogin' | 'none';
 
 export type McpOAuthRecord = {
   v: 1;
-  /** The registered client (dynamic registration), reused across launches. */
+  /** The registered client (dynamic registration): refreshes use it across
+   *  launches; each browser login replaces it with a fresh one. */
   client?: OAuthClientInformation & { redirect_uri?: string };
   /** The authorization server that issued the stored credentials. */
   asInfo?: { authorizationServerUrl: string; tokenEndpoint: string };
@@ -215,8 +216,8 @@ export const MCP_OAUTH_REQUIRED_TOOLS: Readonly<Record<string, readonly (string 
  * Check a connected OAuth server's tool listing (REMOTE names). A listing that
  * lacks a required tool sets the status to "re-login needed" — the same state a
  * dead refresh token produces, so the gate, the Settings button and the pills all
- * follow it — but KEEPS the tokens and the client registration: a re-login reuses
- * the registration, and nothing here refreshes (no loop).
+ * follow it — but KEEPS the tokens and the client registration (a re-login
+ * registers afresh anyway), and nothing here refreshes (no loop).
  */
 export function checkMcpOAuthToolset(
   store: McpOAuthStore,
@@ -476,6 +477,8 @@ const DEFAULT_REDIRECT = `http://${MCP_OAUTH_LOOPBACK_HOST}${MCP_OAUTH_CALLBACK_
 export class McpOAuthProvider implements OAuthClientProvider {
   private verifier = '';
   private oauthState: string | undefined;
+  /** Login mode: this instance registered the client now in the record. */
+  private registeredHere = false;
   private readonly mode: 'turn' | 'login';
   private readonly now: () => number;
 
@@ -578,15 +581,20 @@ export class McpOAuthProvider implements OAuthClientProvider {
   clientInformation(): (OAuthClientInformation & { redirect_uri?: string }) | undefined {
     const c = this.rec().client;
     if (!c) return undefined;
-    // A registration is bound to its redirect URI. A login that had to take a
-    // different loopback port registers again rather than presenting a redirect
-    // the server never saw.
-    if (this.mode === 'login' && c.redirect_uri && c.redirect_uri !== this.redirectUrl) return undefined;
+    // EVERY LOGIN REGISTERS A FRESH CLIENT (org-harness-sync §3.8). A stored
+    // registration can be gone at the authorization server (expired, deleted,
+    // issued before the server moved) and the server says so only on its own
+    // authorize page ("failed to retrieve client") — the browser never comes back
+    // to the loopback, so naby could not learn it and every "sign in again" would
+    // present the same dead client_id. Registration is cheap for a public client;
+    // only the one this login made is used for its authorize and code exchange.
+    if (this.mode === 'login' && !this.registeredHere) return undefined;
     return c;
   }
 
   saveClientInformation(info: OAuthClientInformation): void {
     const rec = this.rec();
+    this.registeredHere = true;
     this.write({ ...rec, client: { ...info, redirect_uri: String(this.redirectUrl) } });
   }
 
@@ -730,8 +738,8 @@ function htmlPage(title: string, body: string): string {
  * Start a browser sign-in for one OAuth MCP server.
  *
  * Binds a loopback listener (the port of the stored registration when it is
- * free, otherwise any port — and then the client registers again for the new
- * redirect), runs the library's `auth()` up to its redirect, and returns the
+ * free, otherwise any port), registers a fresh client for that redirect, runs
+ * the library's `auth()` up to its redirect, and returns the
  * authorization URL for the shell to open. `done` settles after the code
  * exchange; the tokens are in the store by then.
  *
@@ -762,7 +770,7 @@ export async function startMcpOAuthLogin(args: {
     }
   }
   const rec = readMcpOAuthRecord(args.store, args.server) ?? blankRecord();
-  // Drop the tokens (keep the registration) so the flow reaches the browser. They
+  // Drop the tokens (the login registers a fresh client) so the flow reaches the browser. They
   // are held here and put back if this login does not complete, so a cancelled
   // "sign in again" never costs a sign-in that still worked.
   const { tokens: stashed, ...kept } = rec;
@@ -786,10 +794,9 @@ export async function startMcpOAuthLogin(args: {
       /* ephemeral */
     }
   }
-  // The registered port first — a registration is bound to its redirect, so a
-  // free port means no new registration. A previous login's listener may still be
-  // closing, so a busy port is retried briefly before falling back to any port
-  // (which then registers again).
+  // The previous registration's port first, so the redirect stays stable across
+  // logins. A previous login's listener may still be closing, so a busy port is
+  // retried briefly before falling back to any port.
   let port = -1;
   if (preferred !== 0) {
     for (let attempt = 0; attempt < 5 && port < 0; attempt += 1) {

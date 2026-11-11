@@ -2,7 +2,7 @@
 id: org-harness-sync
 title: 조직 하네스 동기화 — altimedia-harness를 naby 기본 하네스로 따라간다
 type: design
-version: 0.11.1
+version: 0.11.2
 status: active
 scope: Skill Hub의 altimedia-harness 플러그인을 naby의 조직 하네스로 받아 와 자동 갱신하고, 스킬·훅·집계·인증 차단을 두 엔진에서 같은 동작으로 실행한다. 기존 사용자가 앱을 업그레이드할 때 끊김 없이 넘어오는 이전 계획을 포함한다. 플러그인 형식 일반 지원(임의 마켓플레이스)은 범위 밖이다.
 related: [skill-hub-builtin, harness-standalone, phase-1_6-harness-contracts, phase-1_6-harness-ownership, packaging-path-resolution, chat-connection-status, phase-1-contracts, mcp-oauth-catalog]
@@ -256,7 +256,7 @@ H1~H4는 패키지의 `metrics-emit.js`를 §3.5 실행기로 그대로 돌린�
 
 **OAuth 흐름.** `@ai-sdk/mcp` 2.0.15의 `authProvider`(`OAuthClientProvider`)를 구현해 `mcp.ts`의 http 연결에 넘긴다. 구현은 런타임(`src/runtime/mcp-oauth.ts`)에 둔다. 브라우저를 여는 일만 셸이 한다.
 
-1. Atlassian 인증 서버 정보를 받아 동적 클라이언트 등록을 한다(공개 클라이언트, `token_endpoint_auth_method: none`). 등록 결과는 저장해 다시 쓴다.
+1. Atlassian 인증 서버 정보를 받아 동적 클라이언트 등록을 한다(공개 클라이언트, `token_endpoint_auth_method: none`). 브라우저 로그인은 할 때마다 새로 등록한다. 저장한 등록은 그 로그인에서 받은 토큰을 갱신할 때만 쓴다. 저장한 `client_id`를 인증 서버가 지웠거나 만료시키면 서버는 자기 인증 화면에만 "failed to retrieve client"를 띄우고 돌아오는 주소로 오지 않는다. 그래서 naby는 등록이 죽은 줄 알 수 없고, 다시 쓰면 "다시 로그인"이 계속 같은 화면에서 막힌다(1.48.22에서 고쳤다).
 2. PKCE(S256)로 인증 주소를 만들고, `127.0.0.1`의 임시 포트로 돌아오는 주소를 둔다. 시스템 브라우저로 연다.
 3. 돌아온 코드를 토큰으로 바꾼다.
 4. 턴마다 MCP에 연결할 때 `authProvider`가 토큰을 준다. 만료 60초 전부터 미리 갱신한다.
@@ -649,6 +649,7 @@ pdoc의 템플릿 받기(`template_source.py`)는 cic 토큰을 `CIC_API_TOKEN`�
 
 ## 변경 이력
 
+- 0.11.2(2026-11-11): §3.8 OAuth 흐름 1번을 고쳤다. 브라우저 로그인마다 클라이언트를 새로 등록한다. 저장한 등록을 다시 쓰다가 인증 서버가 그 등록을 모르면 "failed to retrieve client"에서 빠져나오지 못하던 문제다.
 - 0.11.1(2026-11-11): §3.10에 v2 도구 이름(`getConfluenceContent`)과 여러 페이지 `tools/list`를 더했다. 로그인 확인이 v1·v2 이름을 모두 받고, 도구 목록을 끝까지 읽는다.
 - 0.11.0(2026-11-11): §3.10을 더했다. 패키지 `.mcp.json`의 서버 주소를 기억해 같은 이름의 naby 행에 반영한다. 0.11.1의 Atlassian v2 이전이 naby에 들어오지 않던 문제를 고쳤다. §3.8 표의 주소 행을 고쳤다.
 - 0.10.1(2026-10-13): §3.8에 mcp-oauth-catalog 포인터를 더했다. Atlassian 밖의 원격 MCP도 같은 OAuth 코드를 쓴다.

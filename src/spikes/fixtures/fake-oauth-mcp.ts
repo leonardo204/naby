@@ -91,6 +91,9 @@ export type FakeOAuthMcp = {
   };
   /** Next refresh answers with this OAuth error (once), e.g. `invalid_grant`. */
   failNextRefresh(error: string, status?: number): void;
+  /** Forget every registered client, as an authorization server does when a
+   *  registration expires: an authorize with an old client_id is refused. */
+  forgetClients(): void;
   /** Revoke the current access token (the next MCP call is a 401 — or, with
    *  `invalidTokenGetsReducedSet`, a 200 with the reduced tool set). */
   revokeAccess(): void;
@@ -384,6 +387,9 @@ export async function startFakeOAuthMcp(opts: FakeOAuthMcpOptions = {}): Promise
     stats,
     failNextRefresh(error, status = 400) {
       failNext = { error, status };
+    },
+    forgetClients() {
+      clients.clear();
     },
     revokeAccess() {
       access = token('revoked');

@@ -29,7 +29,7 @@
 //   reduced     a listing without getConfluencePage (what the live server serves a
 //               dead token, with a 200) → status `relogin`, tokens and registration
 //               KEPT, no refresh / registration / browser, the next connect refuses
-//               offline, a new login reuses the registration and recovers
+//               offline, a new login (fresh registration) recovers
 //   cancel      a cancelled re-login gives the old working tokens back
 //
 // Prints PASS/FAIL per assertion; exits non-zero on any FAIL.
@@ -160,14 +160,36 @@ async function discoveryAndLogin(): Promise<void> {
     record('connect: a tool call goes through', call.content === 'ok' && !call.isError, JSON.stringify(call));
     await load.closeAll();
 
-    // A second login reuses the registration (no second /register).
+    // A second login registers a fresh client (a stored one may be dead at the
+    // server, and the server only says so on its own authorize page).
     const regsBefore = fake.stats.registrations;
+    const oldClient = readMcpOAuthRecord(store, SERVER)?.client?.client_id;
     await login(store, fake);
+    const newClient = readMcpOAuthRecord(store, SERVER)?.client?.client_id;
     record(
-      'login again: the persisted registration is reused (no new dynamic registration)',
-      fake.stats.registrations === regsBefore && mcpOAuthStatus(store, SERVER) === 'connected',
+      'login again: a fresh client is registered and stored',
+      fake.stats.registrations === regsBefore + 1 &&
+        !!newClient &&
+        newClient !== oldClient &&
+        mcpOAuthStatus(store, SERVER) === 'connected',
       `registrations ${regsBefore} → ${fake.stats.registrations}`,
     );
+
+    // The reported failure: the server forgot the stored client ("failed to
+    // retrieve client" on its authorize page). The next login still works.
+    fake.forgetClients();
+    const lost = await startMcpOAuthLogin({ store, server: SERVER, serverUrl: fake.mcpUrl });
+    const lostClient = new URL(lost.authorizationUrl).searchParams.get('client_id');
+    const lostBack = await fake.consent(lost.authorizationUrl);
+    const lostDone = await lost.done;
+    record(
+      'stale client: a login after the server forgot the client authorizes with a new one and signs in',
+      lostDone.ok && lostClient !== newClient && lostBack.status < 400 && mcpOAuthStatus(store, SERVER) === 'connected',
+      JSON.stringify({ ok: lostDone.ok, status: lostBack.status, body: lostBack.body.slice(0, 80) }),
+    );
+    const after = await loadMcpToolset([entry(fake)], { oauth: { store } });
+    await after.closeAll();
+    record('stale client: the tools load after that login', after.failures.length === 0, JSON.stringify(after.failures));
   } finally {
     await fake.close();
     store.close();
@@ -416,13 +438,13 @@ async function reducedToolsetIsRelogin(): Promise<void> {
       again.failures.length === 1 && fake.stats.mcpRequests === mcpBefore && fake.stats.refreshes === refreshes,
       JSON.stringify(again.failures),
     );
-    // Logging in again reuses the stored registration and clears the state.
+    // Logging in again (a fresh registration) clears the state.
     await login(store, fake);
     const ok = await loadMcpToolset([entry(fake)], { oauth: { store } });
     await ok.closeAll();
     record(
-      'reduced: logging in again reuses the registration and recovers the full tool set',
-      fake.stats.registrations === regs &&
+      'reduced: logging in again recovers the full tool set',
+      fake.stats.registrations === regs + 1 &&
         mcpOAuthStatus(store, SERVER) === 'connected' &&
         ok.failures.length === 0 &&
         ok.toolSchemas.some((t) => t.name === 'atlassian__getConfluencePage') &&
