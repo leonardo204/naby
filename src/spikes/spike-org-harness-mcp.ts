@@ -14,7 +14,13 @@ const SPIKE_ROOT = mkdtempSync(join(tmpdir(), 'naby-spike-org-mcp-'));
 process.env.NABY_HOME = SPIKE_ROOT;
 process.env.NABY_DB_PATH = join(SPIKE_ROOT, 'app.db');
 
-import { applyAtlassianOAuthSwapIfDue, atlassianOAuthEntry } from '../runtime/atlassian-migration.js';
+import {
+  applyAtlassianOAuthSwapIfDue,
+  atlassianOAuthEntry,
+  currentLegacyAtlassianToolRefs,
+  isAtlassianV2Url,
+} from '../runtime/atlassian-migration.js';
+import { DEFAULT_USER_ID } from '../runtime/memory-inject.js';
 import { ATLASSIAN_MCP_URL, mcpOAuthStatus, readMcpOAuthRecord, writeMcpOAuthRecord } from '../runtime/mcp-oauth.js';
 import { orgHarnessRoot } from '../runtime/org-harness.js';
 import {
@@ -199,6 +205,59 @@ const ON = { apiKey: 'shub_spike', env: {} };
   });
   applyOrgHarnessMcpIfDue(odd.store, { home: odd.home, ...ON });
   record('a non-https address is ignored', urlOf(row(odd.store, 'atlassian')) === V1 && atlassianMcpUrl(odd.store) === ATLASSIAN_MCP_URL);
+}
+
+// 6. The old-name warning, counted against the server the row points at now.
+{
+  const { store } = freshCase();
+  const skill = (name: string, instructions: string, toolRefs: string[] = []) =>
+    store.putHarnessItem({
+      item: {
+        scope: 'user',
+        scopeKey: DEFAULT_USER_ID,
+        kind: 'skill',
+        name,
+        description: name,
+        provenance: { source: 'user' },
+        skill: { instructions, triggers: [name], toolRefs },
+      },
+      requestedStatus: 'enabled',
+    });
+  skill('reader', 'Read the page with getConfluencePage, then summarise.');
+  skill('both', 'Use getConfluenceContent (v2) or getConfluencePage (v1), whichever exists.');
+  skill('comments', 'List comments with getConfluencePageFooterComments.');
+  skill('jira', 'Look up the issue with getJiraIssue.');
+  skill('ancient', 'x', ['atlassian__confluence_get_page']);
+  store.putPolicyRule({ scope: 'user', scopeKey: DEFAULT_USER_ID, toolPattern: 'atlassian__searchConfluenceUsingCql', effect: 'allow' });
+  store.putPolicyRule({ scope: 'user', scopeKey: DEFAULT_USER_ID, toolPattern: 'atlassian__getConfluencePageDescendants', effect: 'allow' });
+
+  store.upsertMcpEntry(atlassianOAuthEntry(V1));
+  const onV1 = currentLegacyAtlassianToolRefs(store).map((r) => r.ref).sort();
+  record('on v1, v1 names are not old; only mcp-atlassian names are', onV1.join(',') === 'atlassian__confluence_get_page', onV1.join(','));
+
+  store.upsertMcpEntry(atlassianOAuthEntry(V2));
+  const refs = currentLegacyAtlassianToolRefs(store);
+  const by = (name: string) => refs.find((r) => r.name === name);
+  record('on v2, a v1 name in a skill body is old, with its v2 name', by('reader')?.ref === 'getConfluencePage' && by('reader')?.suggest === 'getConfluenceContent', JSON.stringify(by('reader')));
+  record('a skill naming the v1 and v2 tools side by side is not flagged', by('both') === undefined);
+  record('a v1 name with no one-to-one v2 tool is flagged without a guess', by('comments')?.ref === 'getConfluencePageFooterComments' && by('comments')?.suggest === undefined, JSON.stringify(by('comments')));
+  record('a Jira name (unchanged in v2) is not flagged', by('jira') === undefined);
+  record('mcp-atlassian names are still flagged on v2', by('ancient')?.ref === 'atlassian__confluence_get_page');
+  record(
+    'a permission rule naming a v1 tool is flagged, with the prefix kept',
+    by('atlassian__searchConfluenceUsingCql')?.ref === 'atlassian__searchConfluenceUsingCql' &&
+      by('atlassian__searchConfluenceUsingCql')?.suggest === 'searchConfluence' &&
+      by('atlassian__getConfluencePageDescendants')?.suggest === undefined,
+    JSON.stringify(refs.filter((r) => r.kind === 'policy')),
+  );
+  record('the count is exactly those five', refs.length === 5, refs.map((r) => r.name).join(','));
+
+  store.upsertMcpEntry({ name: 'atlassian', transport: 'stdio', command: 'uvx', args: ['mcp-atlassian'], status: 'enabled' });
+  record('no OAuth row: nothing is counted', currentLegacyAtlassianToolRefs(store).length === 0);
+  record(
+    'the v2 test reads the path, not the host',
+    isAtlassianV2Url(V2) && isAtlassianV2Url('https://mcp.atlassian.com/v2/mcp') && !isAtlassianV2Url(V1) && !isAtlassianV2Url('https://x.test/a/v2/mcp') && !isAtlassianV2Url('not a url'),
+  );
 }
 
 let failed = 0;

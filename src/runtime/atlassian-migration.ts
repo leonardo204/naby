@@ -53,6 +53,58 @@ export const ATLASSIAN_MIGRATION_SETTING = {
  *  mcp-atlassian spellings, which the remote MCP does not have. */
 export const LEGACY_ATLASSIAN_TOOL_RE = /(?:^|[^A-Za-z0-9_])(?:mcp__)?atlassian__(?:confluence|jira)_[a-z0-9_]+/;
 
+/**
+ * THE v1 CONFLUENCE TOOLS v2 DOES NOT HAVE (org-harness-sync §3.10). v2
+ * (`/v2/mcp`) renamed and regrouped Confluence; Jira names did not change. The
+ * names are the v1 server's tool list; "not in v2" is Atlassian's v2 tool page
+ * (support.atlassian.com/atlassian-ai-gateway/docs/supported-tools), read
+ * 2026-11-11.
+ */
+export const ATLASSIAN_V1_ONLY_TOOLS: readonly string[] = [
+  'getConfluencePage',
+  'getConfluencePageDescendants',
+  'getConfluencePageFooterComments',
+  'getConfluencePageInlineComments',
+  'getConfluenceCommentChildren',
+  'getConfluenceSpaces',
+  'getPagesInConfluenceSpace',
+  'searchConfluenceUsingCql',
+  'createConfluencePage',
+  'updateConfluencePage',
+  'createConfluenceFooterComment',
+  'createConfluenceInlineComment',
+];
+
+/**
+ * The v2 name for a v1 tool, only where Atlassian's v2 page names a one-to-one
+ * replacement. For the rest the arguments differ enough (comments, descendants,
+ * spaces) that a suggestion would be a guess, so none is shown.
+ *
+ * A HINT FOR SETTINGS, NOT A CALL REWRITE. naby does not translate a model's call
+ * from a v1 name to a v2 one: the arguments are not the same shape, and the model
+ * already sees the real v2 tool list.
+ */
+export const ATLASSIAN_V1_TO_V2_TOOL: Readonly<Record<string, string>> = {
+  getConfluencePage: 'getConfluenceContent',
+  searchConfluenceUsingCql: 'searchConfluence',
+  createConfluencePage: 'createConfluenceContent',
+  updateConfluencePage: 'updateConfluenceContent',
+};
+
+const V1_ONLY_RE = new RegExp(`(?<![A-Za-z0-9])(?:(?:mcp__)?atlassian__)?(${ATLASSIAN_V1_ONLY_TOOLS.join('|')})(?![A-Za-z0-9])`, 'g');
+/** Any v2 Confluence tool name: a text that has one was written for v2 too. */
+const V2_CONFLUENCE_RE = /(?<![A-Za-z0-9])(?:get|list|search|create|update)Confluence(?:Content|Spaces?|Comments?|Attachments?)?(?![A-Za-z0-9])/;
+
+/** True for the v2 remote MCP address (`/v2/…`). */
+export function isAtlassianV2Url(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return /^\/v2(?:\/|$)/.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** The row a signed-in user should have. `url` is the org package's address
  *  when it names one (org-harness-sync §3.10, `atlassianMcpUrl`). */
 export function atlassianOAuthEntry(url: string = ATLASSIAN_MCP_URL): McpEntry {
@@ -84,12 +136,28 @@ export type AtlassianLegacyRef = {
   id: string;
   name: string;
   ref: string;
+  /** The v2 name to use instead, when there is a one-to-one one. */
+  suggest?: string;
 };
 
-function legacyMatch(text: string | undefined): string | undefined {
+type LegacyHit = { ref: string; suggest?: string };
+
+function legacyMatch(text: string | undefined, v2: boolean): LegacyHit | undefined {
   if (!text) return undefined;
   const m = LEGACY_ATLASSIAN_TOOL_RE.exec(text);
-  return m ? m[0].replace(/^[^A-Za-z0-9_]/, '') : undefined;
+  if (m) return { ref: m[0].replace(/^[^A-Za-z0-9_]/, '') };
+  if (!v2) return undefined;
+  // A v1 name is stale on v2 unless the same text also names the v2 tool — a
+  // skill written for both servers (v1 and v2 names side by side) is fine.
+  for (const hit of text.matchAll(V1_ONLY_RE)) {
+    const v1 = hit[1]!;
+    const suggest = ATLASSIAN_V1_TO_V2_TOOL[v1];
+    const covered = suggest
+      ? new RegExp(`(?<![A-Za-z0-9])${suggest}(?![A-Za-z0-9])`).test(text)
+      : V2_CONFLUENCE_RE.test(text);
+    if (!covered) return { ref: hit[0], ...(suggest ? { suggest } : {}) };
+  }
+  return undefined;
 }
 
 type ScanStore = Pick<Store, 'listPolicyRules' | 'listHarness' | 'listProjects'>;
@@ -107,14 +175,20 @@ function scopes(store: ScanStore, userId: string): { scope: HarnessScope; scopeK
   return out;
 }
 
-/** Rules and harness rows that still name an mcp-atlassian tool (§4.4 step 4). */
-export function findLegacyAtlassianToolRefs(store: ScanStore, userId = DEFAULT_USER_ID): AtlassianLegacyRef[] {
+/** Rules and harness rows that still name an mcp-atlassian tool (§4.4 step 4),
+ *  and — with `v2` — a v1 Confluence tool v2 does not have (§3.10). */
+export function findLegacyAtlassianToolRefs(
+  store: ScanStore,
+  userId = DEFAULT_USER_ID,
+  opts: { v2?: boolean } = {},
+): AtlassianLegacyRef[] {
+  const v2 = opts.v2 === true;
   const out: AtlassianLegacyRef[] = [];
   for (const s of scopes(store, userId)) {
     try {
       for (const r of store.listPolicyRules(s.scope, s.scopeKey)) {
-        const ref = legacyMatch(r.toolPattern);
-        if (ref) out.push({ kind: 'policy', scope: s.scope, scopeKey: s.scopeKey, id: r.id, name: r.toolPattern, ref });
+        const hit = legacyMatch(r.toolPattern, v2);
+        if (hit) out.push({ kind: 'policy', scope: s.scope, scopeKey: s.scopeKey, id: r.id, name: r.toolPattern, ...hit });
       }
     } catch {
       /* no rules table */
@@ -132,15 +206,15 @@ export function findLegacyAtlassianToolRefs(store: ScanStore, userId = DEFAULT_U
       if (row.subagent) texts.push(...(row.subagent.toolRefs ?? []), row.subagent.systemPrompt);
       if (row.command?.template) texts.push(row.command.template);
       for (const t of texts) {
-        const ref = legacyMatch(t);
-        if (ref) {
+        const hit = legacyMatch(t, v2);
+        if (hit) {
           out.push({
             kind: row.kind === 'skill' ? 'skill' : row.kind === 'subagent' ? 'subagent' : 'command',
             scope: s.scope,
             scopeKey: s.scopeKey,
             id: row.id,
             name: row.name,
-            ref,
+            ...hit,
           });
           break;
         }
@@ -206,6 +280,22 @@ export function readAtlassianMigrationReport(store: Pick<Store, 'getSetting'>): 
   }
 }
 
+/**
+ * The old-name warning as of NOW (§3.10): the store's rules and harness rows
+ * against the server the `atlassian` row points at. The swap's report only ever
+ * counted mcp-atlassian names, once, at the API-token → OAuth swap; a later move
+ * from v1 to v2 renamed Confluence tools and nothing re-counted. Settings reads
+ * this instead. Empty unless the row is the OAuth row.
+ */
+export function currentLegacyAtlassianToolRefs(
+  store: ScanStore & Pick<Store, 'listMcpEntries'>,
+  userId = DEFAULT_USER_ID,
+): AtlassianLegacyRef[] {
+  const row = store.listMcpEntries().find((e) => e.name === ATLASSIAN_MCP_SERVER_NAME);
+  if (!row || row.transport === 'stdio' || row.auth !== 'oauth') return [];
+  return findLegacyAtlassianToolRefs(store, userId, { v2: isAtlassianV2Url(row.url) });
+}
+
 export type AtlassianSwapStore = Pick<
   Store,
   | 'listMcpEntries'
@@ -235,7 +325,8 @@ export function applyAtlassianOAuthSwapIfDue(
   if (row?.status === 'proposed') return undefined;
   // Same name, replaced whole: the stdio command, the env with the API token and
   // the Confluence URL are not carried into the new row.
-  store.upsertMcpEntry(atlassianOAuthEntry(atlassianMcpUrl(store)));
+  const url = atlassianMcpUrl(store);
+  store.upsertMcpEntry(atlassianOAuthEntry(url));
   const userId = opts.userId ?? DEFAULT_USER_ID;
   // Only a user who HAD the API-token preset ever had the withdrawal to make; a
   // first-time sign-in still withdraws an untouched seed (§4.4: the skill is not
@@ -245,7 +336,7 @@ export function applyAtlassianOAuthSwapIfDue(
     at: opts.now ?? Date.now(),
     from,
     confluenceUpload,
-    legacyRefs: from === 'legacy' ? findLegacyAtlassianToolRefs(store, userId) : [],
+    legacyRefs: from === 'legacy' ? findLegacyAtlassianToolRefs(store, userId, { v2: isAtlassianV2Url(url) }) : [],
   };
   store.setSetting(ATLASSIAN_MIGRATION_SETTING.report, JSON.stringify(report));
   return report;

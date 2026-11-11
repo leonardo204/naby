@@ -304,7 +304,10 @@ v2로 옮기며 두 가지가 더 바뀌었다(1.48.21, 실제 계정에서 연�
 - **도구 이름.** v2는 페이지 읽기 도구가 `getConfluencePage`가 아니라 `getConfluenceContent`다(쓰기는 `createConfluenceContent`·`updateConfluenceContent`, 검색은 `searchConfluence`). 로그인 확인(§7.4의 줄어든 도구 목록 판정)은 둘 중 하나가 있으면 로그인된 것으로 본다. 둘 다 죽은 토큰에 오는 공개 도구 목록에는 없다.
 - **목록이 여러 페이지다.** `?tools=all`은 `tools/list`를 페이지로 나눠 `nextCursor`를 준다. `@ai-sdk/mcp`의 `listTools()`는 한 페이지만 읽으므로, naby가 커서를 따라 끝까지 읽는다(서버 하나에 최대 50페이지, 같은 커서가 다시 오면 멈춘다). 첫 페이지만 읽으면 도구 대부분이 빠지고 로그인 확인도 실패한다.
 
-구현은 런타임 `org-harness-mcp.ts`와 `mcp.ts`의 `listAllTools`다. `spike:org-harness-mcp`(22개)가 주소 규칙을, `spike:mcp-oauth`(32개)가 v2 이름과 여러 페이지 목록을 가짜 서버로 확인한다. 실제 Atlassian v2 계정 로그인과 도구 목록은 사람이 확인한다.
+- **이전 이름 경고.** 설정의 Atlassian 카드는 규칙과 하네스 항목이 지금 서버에 없는 도구 이름을 가리키면 경고한다. 전에는 API 토큰에서 브라우저 로그인으로 넘어갈 때 mcp-atlassian 이름(`confluence_get_page` 꼴)만 한 번 세었다. 그래서 v1에서 v2로 옮긴 뒤에는 v1 이름이 남아 있어도 경고가 없었고, 문구는 v1 이름을 새 이름 예로 들었다. 1.48.22부터 화면을 열 때마다 `atlassian` 행의 주소로 다시 센다(`currentLegacyAtlassianToolRefs`). 주소가 `/v2/`이면 v2에 없는 v1 Confluence 도구 12개(`ATLASSIAN_V1_ONLY_TOOLS`)도 이전 이름으로 본다. 다만 같은 글에 v2 이름이 함께 있으면 두 서버에 맞춰 쓴 것으로 보고 세지 않는다. Atlassian v2 도구 페이지에서 일대일로 바뀐 네 개(`getConfluencePage`→`getConfluenceContent`, `searchConfluenceUsingCql`→`searchConfluence`, `createConfluencePage`→`createConfluenceContent`, `updateConfluencePage`→`updateConfluenceContent`)만 새 이름을 함께 보여 준다. 댓글·하위 페이지·스페이스 도구는 인자 모양이 달라 새 이름을 짐작해 적지 않는다. Jira 이름은 v2에서 바뀌지 않았다.
+- **호출 이름은 바꿔 주지 않는다.** 이 대응표는 설정 화면의 안내다. 모델이 v1 이름으로 부른 호출을 v2 이름으로 바꿔 보내지 않는다. 인자 모양이 다르고, 모델은 서버가 준 v2 도구 목록을 그대로 본다. 로그인 확인의 `getConfluencePage`·`getConfluenceContent` 짝(`MCP_OAUTH_REQUIRED_TOOLS`)도 "둘 중 하나가 있으면 로그인됨"이라는 판정일 뿐 이름 변환이 아니다.
+
+구현은 런타임 `org-harness-mcp.ts`, `mcp.ts`의 `listAllTools`, `atlassian-migration.ts`의 `currentLegacyAtlassianToolRefs`다. `spike:org-harness-mcp`(32개)가 주소 규칙과 이전 이름 경고를, `spike:mcp-oauth`(34개)가 v2 이름, 여러 페이지 목록, 로그인마다 새로 하는 클라이언트 등록을 가짜 서버로 확인한다. 실제 Atlassian v2 계정 로그인과 도구 목록은 사람이 확인한다.
 
 ## 4. 기존 사용자 이전 — 업그레이드하면 끊김 없이 넘어온다
 
@@ -649,7 +652,7 @@ pdoc의 템플릿 받기(`template_source.py`)는 cic 토큰을 `CIC_API_TOKEN`�
 
 ## 변경 이력
 
-- 0.11.2(2026-11-11): §3.8 OAuth 흐름 1번을 고쳤다. 브라우저 로그인마다 클라이언트를 새로 등록한다. 저장한 등록을 다시 쓰다가 인증 서버가 그 등록을 모르면 "failed to retrieve client"에서 빠져나오지 못하던 문제다.
+- 0.11.2(2026-11-11): §3.8 OAuth 흐름 1번을 고쳤다. 브라우저 로그인마다 클라이언트를 새로 등록한다. 저장한 등록을 다시 쓰다가 인증 서버가 그 등록을 모르면 "failed to retrieve client"에서 빠져나오지 못하던 문제다. §3.10에 이전 이름 경고(지금 주소 기준으로 다시 세기, v1 이름 12개, 일대일 새 이름 4개)와 "호출 이름은 바꿔 주지 않는다"를 더했다.
 - 0.11.1(2026-11-11): §3.10에 v2 도구 이름(`getConfluenceContent`)과 여러 페이지 `tools/list`를 더했다. 로그인 확인이 v1·v2 이름을 모두 받고, 도구 목록을 끝까지 읽는다.
 - 0.11.0(2026-11-11): §3.10을 더했다. 패키지 `.mcp.json`의 서버 주소를 기억해 같은 이름의 naby 행에 반영한다. 0.11.1의 Atlassian v2 이전이 naby에 들어오지 않던 문제를 고쳤다. §3.8 표의 주소 행을 고쳤다.
 - 0.10.1(2026-10-13): §3.8에 mcp-oauth-catalog 포인터를 더했다. Atlassian 밖의 원격 MCP도 같은 OAuth 코드를 쓴다.
