@@ -44,6 +44,13 @@ export type RunTurnOptions = {
   sessionId: string;
   model: ModelSelection;
   userText: string;
+  /**
+   * WHAT TO STORE as the user row when it differs from what the model is sent
+   * this turn — the text the user typed, when `userText` is that text with
+   * `/command` bodies expanded. The engine answers `userText` now; the store
+   * (and so every later turn's replay) keeps this. Plain user rows only.
+   */
+  storedUserText?: string;
   /** Images attached to THIS user turn (multimodal input). Attached to the
    *  just-appended user message for the engine to build a native image block —
    *  TRANSIENT: not persisted (so a large paste is neither stored on disk nor
@@ -368,7 +375,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   } else if (opts.harnessOrigin) {
     store.appendMessage(sessionId, { role: 'user', content: userText, harness: opts.harnessOrigin });
   } else {
-    store.appendMessage(sessionId, { role: 'user', content: userText });
+    // What the user TYPED is what the transcript keeps; an expanded `/command`
+    // body rides this one turn only (see `storedUserText`).
+    store.appendMessage(sessionId, { role: 'user', content: opts.storedUserText ?? userText });
   }
 
   // -- MEMORY INJECTION (Phase 1.5, P15-02) ---------------------------------
@@ -530,6 +539,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       content: ev.text,
       ...(opts.speaker ? { speaker: opts.speaker } : {}),
       ...(routing ? { routing } : {}),
+      // A subagent's narration: shown, but not replayed into later turns.
+      ...(ev.agentToolCallId !== undefined ? { subagentToolCallId: ev.agentToolCallId } : {}),
     });
     // THE RESPONSE, IN FULL — but only once. A streaming engine emits the same
     // sentence twice, as `partial` token deltas and then as one complete event;
@@ -693,6 +704,18 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       ? { hubId: (opts.hub?.agentId ?? opts.routing?.from.agentId)! }
       : {}),
   });
+  // THE EXPANDED PROMPT, FOR THIS TURN ONLY. The store kept what was typed;
+  // the engine still answers the expanded text now. Later turns replay the short
+  // form, so a long skill body is not re-sent with every message after it.
+  if (opts.storedUserText !== undefined && opts.storedUserText !== userText) {
+    for (let i = turnMessages.length - 1; i >= 0; i -= 1) {
+      const m = turnMessages[i];
+      if (m && m.role === 'user') {
+        turnMessages[i] = { ...m, content: userText };
+        break;
+      }
+    }
+  }
   if (opts.images && opts.images.length > 0) {
     for (let i = turnMessages.length - 1; i >= 0; i -= 1) {
       const m = turnMessages[i];
@@ -749,6 +772,26 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       ...(opts.speaker
         ? {}
         : {
+            // THE ENGINE'S OWN CONTINUATION HANDLE (e.g. the Agent SDK session
+            // id), so the next turn can resume instead of re-sending the whole
+            // transcript. naby's view only, for the same reason as the summary
+            // below. A settings row per session; '' means none.
+            resume: {
+              load: () => {
+                try {
+                  return store.getSetting(`engine.resume.${sessionId}`) || undefined;
+                } catch {
+                  return undefined;
+                }
+              },
+              save: (state: string | undefined) => {
+                try {
+                  store.setSetting(`engine.resume.${sessionId}`, state ?? '');
+                } catch {
+                  // A failed write costs the next turn a full replay, nothing else.
+                }
+              },
+            },
             rollingSummary: {
               load: () => {
                 try {

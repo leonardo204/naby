@@ -1061,6 +1061,15 @@ export {
 export {
   AGENT_SDK_UNAVAILABLE_MESSAGE,
   ClaudeAgentSdkEngine,
+  BACKGROUND_SDK_MODEL,
+  buildQueryOptions,
+  buildAgentPrompt,
+  renderPrompt,
+  planSdkResume,
+  parseSdkResumeState,
+  sdkResumeStateFor,
+  withoutSubagentRows,
+  REPLAYED_TOOL_OUTPUT_MAX_CHARS,
   isClaudeAgentSdkAvailable,
   resolveClaudeAgentSdkPath,
   // Asks the LOCAL sign-in which models it may use, so the chat bar's list is not

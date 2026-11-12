@@ -50,6 +50,8 @@
 
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -488,6 +490,10 @@ export function buildQueryOptions(args: {
    * so it can never move `CLAUDE_CONFIG_DIR`, and before the session-state flag.
    */
   extraEnv?: Record<string, string | undefined>;
+  /** The SDK session to continue (see `planSdkResume`). Absent = a new session. */
+  resume?: string;
+  /** A background call that uses no tools (see the engine's `toolless`). */
+  toolless?: boolean;
 }): QueryOptions {
   const { input, mcpServer, preToolUse, abortController, onStderr } = args;
   const inherited = withExtraEnv(args.env ?? process.env, args.extraEnv);
@@ -521,6 +527,11 @@ export function buildQueryOptions(args: {
     // built-in call — including calls issued INSIDE a spawned subagent — and can
     // authoritatively deny mutation/exec before it runs. See the header block.
     mcpServers: { [MCP_SERVER_NAME]: mcpServer },
+    // A TOOLLESS BACKGROUND CALL (a rewrite, a summary, a JSON judgement) takes no
+    // built-ins at all. Without this every such call carried the full built-in
+    // tool schemas (Bash, Read, Task, …) — thousands of tokens for a prompt that
+    // can never call one. Never set for a user's turn: see the note below.
+    ...(args.toolless ? { tools: [] } : {}),
     // THE BUILT-INS WE TAKE BACK are listed further down, on `disallowedTools`,
     // next to the isolation options they belong with. `tools` stays unset (above)
     // so the rest of the harness built-ins stay live.
@@ -616,6 +627,7 @@ export function buildQueryOptions(args: {
     abortController,
     stderr: onStderr,
     ...(input.model.model ? { model: input.model.model } : {}),
+    ...(args.resume ? { resume: args.resume } : {}),
     // Phase 2.5 (M4): expose Naby's enabled subagents as NATIVE SDK agents, keyed
     // by name, so the model can delegate to them through the built-in Task tool.
     // A delegated subagent's own tool calls still pass through THIS turn's
@@ -641,6 +653,14 @@ export function buildQueryOptions(args: {
       : {}),
   };
 }
+
+/**
+ * THE MODEL A BACKGROUND SUBSCRIPTION CALL RUNS ON when nothing else names one.
+ * Leaving it unset meant the sign-in's default — Opus on most plans — for every
+ * rewrite, summary and judgement, which spent the same plan window as the user's
+ * own work. An alias, so it follows whatever Sonnet the sign-in offers.
+ */
+export const BACKGROUND_SDK_MODEL = 'sonnet';
 
 /** True when the dev engine can actually run here. Cheap; no module is loaded. */
 export function isClaudeAgentSdkAvailable(): boolean {
@@ -1285,10 +1305,46 @@ function lastUserText(messages: EngineRunInput['messages']): string {
 // A first turn renders as the bare user text, so the single-turn spikes see
 // exactly the prompt they saw before this existed.
 
+/**
+ * HOW MUCH OF ONE PAST TOOL RESULT IS REPLAYED. A replayed transcript re-sends
+ * every earlier tool output on every later turn; a single file read or web page
+ * could be tens of thousands of tokens, paid again each turn. The model already
+ * acted on the full output in the turn that produced it; what later turns need
+ * is that it happened and roughly what it said.
+ */
+export const REPLAYED_TOOL_OUTPUT_MAX_CHARS = 2000;
+
+function clipToolOutput(content: string): string {
+  if (content.length <= REPLAYED_TOOL_OUTPUT_MAX_CHARS) return content;
+  const head = content.slice(0, REPLAYED_TOOL_OUTPUT_MAX_CHARS);
+  return `${head}\n[… ${content.length - REPLAYED_TOOL_OUTPUT_MAX_CHARS} more characters omitted from the replay]`;
+}
+
+/**
+ * THE ROWS A SUBAGENT PRODUCED: its tool calls, their results, and its prose.
+ * The `Task` call itself and its final result are the MAIN agent's and are
+ * kept — that is the delegation's answer. Everything inside it is the working
+ * the delegation existed to keep out of the main context.
+ */
+export function withoutSubagentRows(messages: readonly RuntimeMessage[]): RuntimeMessage[] {
+  const subagentCallIds = new Set<string>();
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !m.toolCalls) continue;
+    for (const c of m.toolCalls) if (c.subagent) subagentCallIds.add(c.toolCallId);
+  }
+  return messages.filter((m) => {
+    if (m.role === 'tool') return !subagentCallIds.has(m.toolCallId);
+    if (m.role !== 'assistant') return true;
+    if (m.subagentToolCallId !== undefined) return false;
+    if (m.toolCalls?.length && m.toolCalls.every((c) => c.subagent) && !m.content) return false;
+    return true;
+  });
+}
+
 function renderHistoryLine(m: RuntimeMessage): string | null {
   if (m.role === 'tool') {
     const status = m.output.isError ? ' (failed)' : '';
-    return `Tool ${m.toolName}${status} returned: ${m.output.content}`;
+    return `Tool ${m.toolName}${status} returned: ${clipToolOutput(m.output.content)}`;
   }
   if (m.role === 'assistant') {
     if (m.toolCalls?.length) {
@@ -1338,7 +1394,7 @@ export function renderPrompt(messages: EngineRunInput['messages']): string {
   }
   const current = lastUserText(messages);
   const prior = lastUserIndex >= 0 ? messages.slice(0, lastUserIndex) : [];
-  const lines = prior
+  const lines = withoutSubagentRows(prior)
     .map(renderHistoryLine)
     .filter((l): l is string => l !== null && l.length > 0);
   if (lines.length === 0) return current;
@@ -1359,6 +1415,138 @@ export function renderPrompt(messages: EngineRunInput['messages']): string {
       : 'The user now says:',
     current,
   ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// RESUME — continue the SDK's own session instead of replaying the transcript.
+// ---------------------------------------------------------------------------
+//
+// WHY. Replaying the whole history as one fresh user message every turn made the
+// N-th turn cost O(N) and the session O(N²), and the prompt cache could not help:
+// the replay's tail changes shape each turn. Claude Code itself resumes, and pays
+// most of a long session as cache reads. This is the single largest reason a
+// naby session spent dramatically more than the same work in Claude Code.
+//
+// THE STORE STAYS THE SOURCE OF TRUTH. Resume is taken only when the saved
+// handle provably continues THIS transcript: same cwd and account (the SDK keeps
+// sessions per config dir and project), the user row it last answered is still
+// where it was with the same text, and nothing but that turn's own assistant and
+// tool rows has been written since. Anything else — another engine answered in
+// between, history was edited, participants are in the room — falls back to the
+// replay, which is exactly the old behaviour. A resume the CLI rejects is
+// retried once as a replay (see `run`).
+
+type SdkResumeState = {
+  v: 1;
+  sdkSessionId: string;
+  cwd: string;
+  accountId: string | null;
+  /** Index + 1 of the user row the saved session last answered. */
+  coveredLen: number;
+  /** That row's identity (`userRowIdentity`). */
+  lastUser: string;
+};
+
+function textHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 24);
+}
+
+/** Identity of a user row across turns. Its store timestamp when it has one —
+ *  the content the engine sees can legitimately differ from what was stored (an
+ *  expanded `/command` rides one turn only) — else its text. */
+function userRowIdentity(m: RuntimeMessage): string {
+  if (m.role === 'tool') return textHash(m.output.content);
+  return m.at !== undefined ? `at:${m.at}` : textHash(m.content);
+}
+
+function lastUserIndexOf(messages: readonly RuntimeMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i]?.role === 'user') return i;
+  return -1;
+}
+
+export function parseSdkResumeState(raw: string | undefined): SdkResumeState | undefined {
+  if (!raw) return undefined;
+  try {
+    const o = JSON.parse(raw) as Partial<SdkResumeState>;
+    if (o.v !== 1 || typeof o.sdkSessionId !== 'string' || !SAFE_SESSION_ID.test(o.sdkSessionId)) return undefined;
+    if (typeof o.cwd !== 'string' || typeof o.coveredLen !== 'number' || typeof o.lastUser !== 'string') return undefined;
+    return {
+      v: 1,
+      sdkSessionId: o.sdkSessionId,
+      cwd: o.cwd,
+      accountId: typeof o.accountId === 'string' ? o.accountId : null,
+      coveredLen: o.coveredLen,
+      lastUser: o.lastUser,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+const SAFE_SESSION_ID = /^[A-Za-z0-9-]{8,80}$/;
+
+/** The handle to save after a turn the SDK answered as `sdkSessionId`. */
+export function sdkResumeStateFor(
+  messages: readonly RuntimeMessage[],
+  ctx: { sdkSessionId: string; cwd?: string; accountId?: string },
+): string | undefined {
+  const i = lastUserIndexOf(messages);
+  const row = messages[i];
+  if (i < 0 || !ctx.cwd || !row || row.role !== 'user' || !SAFE_SESSION_ID.test(ctx.sdkSessionId)) return undefined;
+  const state: SdkResumeState = {
+    v: 1,
+    sdkSessionId: ctx.sdkSessionId,
+    cwd: ctx.cwd,
+    accountId: ctx.accountId ?? null,
+    coveredLen: i + 1,
+    lastUser: userRowIdentity(row),
+  };
+  return JSON.stringify(state);
+}
+
+/**
+ * The session id to resume, or undefined to replay. Pure: every condition is
+ * about the transcript and the saved handle, so it is assertable without a CLI.
+ */
+export function planSdkResume(
+  messages: readonly RuntimeMessage[],
+  state: SdkResumeState | undefined,
+  ctx: { cwd?: string; accountId?: string },
+): string | undefined {
+  if (!state || !ctx.cwd) return undefined;
+  if (state.cwd !== ctx.cwd || state.accountId !== (ctx.accountId ?? null)) return undefined;
+  // Participants: each speaker sees a relabelled view, which the SDK's single
+  // transcript cannot represent.
+  for (const m of messages) {
+    if (m.role !== 'tool' && (m.speaker || m.routing)) return undefined;
+  }
+  const current = lastUserIndexOf(messages);
+  const c = state.coveredLen;
+  if (current < 0 || c < 1 || c > current) return undefined;
+  const anchor = messages[c - 1];
+  if (!anchor || anchor.role !== 'user' || userRowIdentity(anchor) !== state.lastUser) return undefined;
+  // Only the answered turn's own rows may sit between it and the new message.
+  for (let i = c; i < current; i += 1) if (messages[i]?.role === 'user') return undefined;
+  return state.sdkSessionId;
+}
+
+/**
+ * Does the CLI still have the session on disk? The layout
+ * (`<config>/projects/<cwd with non-alphanumerics as '-'>/<id>.jsonl`) is the
+ * CLI's, not a contract — so a miss only means "replay", never an error.
+ */
+export function sdkSessionFileExists(
+  sdkSessionId: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  try {
+    const configDir = env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+    const project = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    return existsSync(join(configDir, 'projects', project, `${sdkSessionId}.jsonl`));
+  } catch {
+    return false;
+  }
 }
 
 /** The images on the newest user turn, or undefined. `runTurn` attaches this
@@ -1407,8 +1595,11 @@ function extractThinking(content: unknown): string {
 export function buildAgentPrompt(
   messages: EngineRunInput['messages'],
   holdOpen?: Promise<void>,
+  /** RESUMING: the backend already holds the earlier turns, so only the new
+   *  user text is sent (see `planSdkResume`). */
+  resuming = false,
 ): string | AsyncIterable<SDKUserMessage> {
-  const text = renderPrompt(messages);
+  const text = resuming ? lastUserText(messages) : renderPrompt(messages);
   const images = lastUserImages(messages);
   if (holdOpen === undefined && (!images || images.length === 0)) return text;
 
@@ -1836,9 +2027,78 @@ export class ClaudeAgentSdkEngine implements Engine {
   // class does with the SDK's messages and hook callbacks — the gate on
   // PreToolUse, tool_result mapping, subagent attribution — runs for real
   // without a sign-in, a CLI process or a model call.
-  constructor(private readonly opts: { accountId?: string; sdk?: ClaudeAgentSdkModule } = {}) {}
+  //
+  // `toolless` is for BACKGROUND callers only (the naby layer's rewrite, the
+  // hand-off summary, the reflection and memory judges): calls that are answered
+  // in one text reply. It strips every built-in from the request. A user's turn
+  // never passes it — that would take away Task, Read and the rest.
+  constructor(
+    private readonly opts: { accountId?: string; sdk?: ClaudeAgentSdkModule; toolless?: boolean } = {},
+  ) {}
 
+  /**
+   * One turn. RESUMES the SDK's own session when the saved handle provably
+   * continues this transcript (see `planSdkResume`), otherwise replays the
+   * transcript as text. A resume the CLI rejects before the turn starts (the
+   * session was pruned, the CLI changed its layout) is retried ONCE as a replay,
+   * so the user never sees the optimisation fail.
+   */
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
+    const accountId = this.opts.accountId;
+    let resumeId: string | undefined;
+    if (input.resume && input.cwd) {
+      let saved: string | undefined;
+      try {
+        saved = input.resume.load();
+      } catch {
+        saved = undefined;
+      }
+      const planned = planSdkResume(input.messages, parseSdkResumeState(saved), {
+        cwd: input.cwd,
+        ...(accountId ? { accountId } : {}),
+      });
+      if (planned) {
+        const env = accountId ? claudeAccountEnvFor(accountId, process.env) ?? process.env : process.env;
+        if (sdkSessionFileExists(planned, input.cwd, env)) resumeId = planned;
+      }
+    }
+    if (!resumeId) {
+      yield* this.runOnce(input, undefined);
+      return;
+    }
+
+    // Hold everything until the CLI proves the session started (`init`). An
+    // error before that is a rejected resume, not a turn the user should see.
+    const held: EngineEvent[] = [];
+    let started = false;
+    for await (const ev of this.runOnce(input, resumeId)) {
+      if (!started && ev.kind !== 'init') {
+        held.push(ev);
+        continue;
+      }
+      if (!started) {
+        started = true;
+        for (const h of held) yield h;
+        held.length = 0;
+      }
+      yield ev;
+    }
+    if (started) return;
+    const rejected = held.some((ev) => ev.kind === 'error');
+    if (rejected && !input.signal.aborted) {
+      console.warn('[engine:claude-agent-sdk] resume rejected; replaying the transcript');
+      try {
+        input.resume?.save(undefined);
+      } catch {
+        /* see EngineResumePort */
+      }
+      yield* this.runOnce(input, undefined);
+      return;
+    }
+    for (const h of held) yield h;
+  }
+
+  private async *runOnce(input: EngineRunInput, resumeId: string | undefined): AsyncIterable<EngineEvent> {
     // The SDK is loaded HERE, inside run(), so that constructing the engine is
     // always safe. A packaged build can hold a reference to this class without
     // the module existing; only an attempt to actually answer fails, and it
@@ -1915,6 +2175,7 @@ export class ClaudeAgentSdkEngine implements Engine {
     // subagent runs in its own window on possibly its own model.
     let lastStepModel: string | undefined;
     let initModel: string | undefined;
+    let sdkSessionId: string | undefined;
     let initBetas: readonly string[] | undefined;
 
     // ...and the OTHER side of that discriminant: the `Task` calls whose model has
@@ -2165,7 +2426,7 @@ export class ClaudeAgentSdkEngine implements Engine {
     }
 
     const q = query({
-      prompt: buildAgentPrompt(input.messages, inputReleased),
+      prompt: buildAgentPrompt(input.messages, inputReleased, resumeId !== undefined),
       // Built by the exported pure function above, so the EXACT object this
       // production path sends can be asserted without a model call.
       options: buildQueryOptions({
@@ -2178,6 +2439,8 @@ export class ClaudeAgentSdkEngine implements Engine {
         // change invisible there (see the note on `buildQueryOptions`).
         ...(this.opts.accountId ? { accountId: this.opts.accountId } : {}),
         ...(extraEnv ? { extraEnv } : {}),
+        ...(resumeId ? { resume: resumeId } : {}),
+        ...(this.opts.toolless ? { toolless: true } : {}),
         onStderr: (data: string) => {
           diagnostics.stderr.push(data);
           if (data.includes(SHADOW_WARNING)) diagnostics.shadowWarningSeen = true;
@@ -2224,6 +2487,7 @@ export class ClaudeAgentSdkEngine implements Engine {
             // the gauge back to where the user found it.
             initModel = msg.model || undefined;
             if (msg.betas) initBetas = msg.betas;
+            if (typeof msg.session_id === 'string' && msg.session_id) sdkSessionId = msg.session_id;
             channel.push({
               kind: 'init',
               providerId: input.model.providerId,
@@ -2496,5 +2760,25 @@ export class ClaudeAgentSdkEngine implements Engine {
 
     yield* channel;
     await driver;
+
+    // REMEMBER WHERE THIS TURN LIVES so the next one can resume it. Saved even
+    // for an aborted or failed turn once the session existed: the CLI wrote this
+    // turn to its transcript, and naby wrote its own rows, so the two still agree
+    // on what was said. No session at all clears the handle.
+    if (input.resume) {
+      try {
+        input.resume.save(
+          sdkSessionId
+            ? sdkResumeStateFor(input.messages, {
+                sdkSessionId,
+                ...(input.cwd ? { cwd: input.cwd } : {}),
+                ...(this.opts.accountId ? { accountId: this.opts.accountId } : {}),
+              })
+            : undefined,
+        );
+      } catch {
+        /* see EngineResumePort */
+      }
+    }
   }
 }

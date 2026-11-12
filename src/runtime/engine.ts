@@ -277,6 +277,12 @@ export type RuntimeMessage =
        *  provider payload is built from it. Absent on rows written before it
        *  existed — the view then shows nothing. Inert JSON, no migration. */
       at?: number;
+      /** ASSISTANT rows only: text a SUBAGENT wrote, naming the delegating
+       *  `Task` call. Kept in the transcript for display, but an engine that
+       *  replays history as text leaves it out — the point of delegating is that
+       *  the subagent's working does not occupy the main context, and replaying it
+       *  every later turn undid that. Inert JSON, no migration. */
+      subagentToolCallId?: string;
     }
   | {
       role: 'tool';
@@ -766,6 +772,8 @@ export type EngineRunInput = {
    * payload of their own to size (the Claude Agent SDK compacts itself) ignore it.
    */
   rollingSummary?: RollingSummaryPort;
+  /** See `EngineResumePort`. Absent = always replay the transcript. */
+  resume?: EngineResumePort;
   /**
    * WHEN THE ENGINE COMPACTS (org-harness-sync §3.5: `PreCompact`, and the
    * `SessionStart` with `source: "compact"` that follows). Both engines call it at
@@ -819,6 +827,22 @@ export type CompactionPort = {
  * NOTHING HERE TOUCHES THE TRANSCRIPT. The stored messages are never rewritten;
  * this is a description of the payload, kept beside the session (contract §6).
  */
+/**
+ * WHERE AN ENGINE MAY KEEP ITS OWN CONTINUATION HANDLE for this session — e.g.
+ * the Agent SDK's session id, so the next turn RESUMES the backend's own
+ * transcript instead of re-sending the whole history as text.
+ *
+ * Opaque to the runtime (a string the engine wrote), owned by the engine, and
+ * strictly an optimisation: an engine that cannot validate what it loads must
+ * ignore it and replay the transcript as it always did. The store's transcript
+ * stays the single source of truth (contract §6).
+ */
+export type EngineResumePort = {
+  load(): string | undefined;
+  /** Replace (or with `undefined`, clear) the handle. Must not throw. */
+  save(state: string | undefined): void;
+};
+
 export type RollingSummaryPort = {
   /** The stored summary, or undefined when this session has never folded. */
   load(): RollingSummary | undefined;
