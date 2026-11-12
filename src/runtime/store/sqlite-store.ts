@@ -40,7 +40,7 @@ import { decideHarnessImport, provenanceForWrite } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 // The "is this the same claim" rule (P3-M8b §5.3) lives with the type so both
 // drivers reset corroboration on exactly the same edits.
-import { sameMemoryValue } from './store.js';
+import { sameMemoryValue, stampMessageTime } from './store.js';
 // The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model in
 // memory-hygiene, so the SQL that raises strength and the predicate that reads it
 // can never disagree about the cap.
@@ -1862,7 +1862,7 @@ export class SqliteStore implements Store {
     const seq = Number(row?.m ?? -1) + 1;
     this.db
       .prepare('INSERT INTO messages (session_id, seq, role, payload) VALUES (?, ?, ?, ?)')
-      .run(sessionId, seq, msg.role, JSON.stringify(msg));
+      .run(sessionId, seq, msg.role, JSON.stringify(stampMessageTime(msg)));
   }
 
   getMessages(sessionId: string): RuntimeMessage[] {

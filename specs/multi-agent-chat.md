@@ -2,11 +2,11 @@
 id: multi-agent-chat
 title: 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자 (요구사항 검토 리포트)
 type: design
-version: 0.8.0
+version: 0.8.1
 status: review
 scope: 한 대화 세션에 나비 외의 대화형 에이전트(참가자)를 여럿 두는 기능. 나비가 기본 참가자이자 관리자다. 사용자의 질의를 나비가 확인해 참가자에게 위임하고, 위임받은 참가자가 채팅에 직접 답한다. 에이전트 간 대화는 나비와 참가자 사이로 한정한다. 참가자 명세(지식·지시·가드레일·외부 자원·스킬), 사용자 추가와 외부 정의 가져오기·변환, 다중 참가자 대화의 UI/UX와 관리를 다룬다. §1~§6은 요구사항과 결정(2026-10-16 승인), §8은 설계다. 가져오기 어댑터는 agent-import-adapters, 룩앤필은 shell-look-and-feel이 맡는다. 나비의 학습·신뢰 지표는 persona-agent와 butterfly-trust-meter가, 단일 에이전트 내보내기·가져오기 형식은 agent-export가 그대로 맡는다.
 related: [agent-import-adapters, cross-session-messaging, shell-look-and-feel, phase-3-persona-agent, phase-3-persona-hardening, phase-3-agent-export, phase-3-butterfly-trust-meter, phase-1_5-memory-contracts, subagent-delegation, session-context-management, skill-hub-builtin, mcp-oauth-catalog, telegram-chat, settings-ia-reorg, naby-activity-log, model-auto-routing]
-updated: 2026-10-29
+updated: 2026-11-12
 ---
 
 # 대화형 다중 에이전트 — 나비가 관리하는 대화 참가자
@@ -427,7 +427,7 @@ END                                               // 스트림 result, 활동 �
 | `participant.import` | `{format?, fileName, bytesBase64, apply?, decisions?}` | [agent-import-adapters](agent-import-adapters.md) §4 |
 | `participant.export` | `{id}` | 사이드카 v2 + `.md`. 기존 `agent.export`는 v1 그대로 |
 | `session.participants.list` | `{sessionId}` | 나비 + `active` 행 |
-| `session.participants.add` | `{sessionId, agentId}` | 상한 검사(R2.4), `added_by:'user'` |
+| `session.participants.add` | `{sessionId?, agentId, cwd?}` | 상한 검사(R2.4), `added_by:'user'`. `sessionId`가 없으면(첫 메시지 전의 새 대화) 세션을 만들어 참가자를 넣고 `sessionId`를 돌려준다. 채팅은 그 세션을 받아 첫 메시지를 거기로 보내므로 첫 턴부터 참가자가 보인다. 참가자가 아니거나 상한에 걸리면 세션을 남기지 않는다 |
 | `session.participants.remove` | `{sessionId, agentId}` | 나비는 거부 |
 
 **설정 키**(`settings` 테이블, 기존 `persona.autonomy.*`와 같은 자리): `participants.proposals.enabled`(기본 `true`, D13) · `participants.maxPerSession`(5) · `participants.maxSpeechesPerRound`(6) · `participants.maxRoundTrips`(3) · `participants.showRouting`(기본 `false`, 클라이언트에서 토글하면 저장된다) · `participants.recommendations.enabled`(기본 `true`, §8.13). `participants.get/set` 액션 하나로 읽고 쓴다.
@@ -764,6 +764,7 @@ CREATE TABLE participant_recommendation_cursor (
 
 ## 변경 이력
 
+- 0.8.1 (2026-11-12) — 첫 메시지 전의 새 대화에서도 참가자를 추가한다. `session.participants.add`가 세션 없이 오면 세션을 만들어 돌려준다(§8.4 액션 표). 엔진은 "이 턴이 대화를 시작한다"를 행을 새로 만들었는지가 아니라 메시지가 아직 없는지로 판정한다(조직 훅 SessionStart, 세션 시작 알림).
 - 0.8.0 (2026-10-29) — 사용자 결정: 라운드의 마지막 발언은 항상 나비가 한다(R3.11, `participantRound.ts`의 `wrapup` 발언). R11.4의 "나비가 다시 말하지 않는다"를 바꾼다. 입력창 위 라운드 진행 줄(`RoundProgressStrip`)을 없애고 진행 표시를 생각 중 말풍선으로 모은다(R6.5 개정).
 - 0.7.1 (2026-10-29) — MAC-M8 구현(§8.11). 런타임 `round-loop`(라운드 원장·반복 감지·진행 요약), 라운드의 발언·왕복 상한을 비상 한도 60과 반복 중지로 교체, 설정 두 항목 제거. 도구를 부른 발언과 작업 뒤 같은 요지는 반복에서 빼고, 단어 3개 이하 발언은 새 정보 없음으로 센다.
 - 0.7.0 (2026-10-29) — 사용자 결정: 발언·왕복 상한을 없애고 라운드 작업 기록과 반복 감지로 바꾼다(R3.5 개정, §8.15 R11.1~R11.5).

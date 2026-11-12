@@ -12,6 +12,7 @@ related:
   - phase-3-butterfly-trust-meter
   - skill-hub-builtin
   - chat-connection-status
+  - user-instructions
 updated: 2026-10-16
 ---
 

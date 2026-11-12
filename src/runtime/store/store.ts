@@ -2286,3 +2286,14 @@ export interface Store {
   /** Release the underlying handle. Safe to call twice. */
   close(): void;
 }
+
+/**
+ * Stamp a user/assistant row with the time it was written (`RuntimeMessage.at`)
+ * unless the caller already did. Tool rows are left alone: the transcript never
+ * draws a time for them. Shared with the in-memory store so both read back the
+ * same shape.
+ */
+export function stampMessageTime(msg: RuntimeMessage, now: number = Date.now()): RuntimeMessage {
+  if (msg.role === 'tool' || typeof msg.at === 'number') return msg;
+  return { ...msg, at: now };
+}

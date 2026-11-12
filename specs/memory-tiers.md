@@ -5,7 +5,7 @@ type: design
 version: 0.3.1
 status: active
 scope: 쓰이는 기억(confirmed)을 단기·장기·고정 세 단계로 나누는 기준, 단계 사이의 승격 규칙, 단기·장기 기억의 보존 기간과 보관·삭제, 고정 기억의 주입·예산·불변 규칙, 기존 기억의 이전을 다룬다. 사용자 확인을 기다리는 기억(proposed), 쓰기 게이트, 모델 검수, 관련도 순위 계산은 바꾸지 않는다.
-related: [memory-worker, memory-auto-apply, phase-3-memory-hygiene, phase-3-conversational-learning-hardening, phase-3-continuous-learning, phase-1_5-memory-contracts]
+related: [memory-worker, memory-auto-apply, phase-3-memory-hygiene, phase-3-conversational-learning-hardening, phase-3-continuous-learning, phase-1_5-memory-contracts, user-instructions]
 updated: 2026-11-11
 ---
 

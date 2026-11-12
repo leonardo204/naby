@@ -1726,6 +1726,17 @@ export {
   type StyleFingerprint,
 } from './runtime/style-fingerprint.js';
 
+// -- the user's standing instructions (specs/user-instructions.md) -----------
+// One free-text block from Settings, injected on every turn in every project.
+export {
+  readUserInstructions,
+  userInstructionsBlock,
+  USER_INSTRUCTIONS_KEY,
+  USER_INSTRUCTIONS_MAX_CHARS,
+  writeUserInstructions,
+  type WriteUserInstructionsResult,
+} from './runtime/user-instructions.js';
+
 // -- the naby layer (Phase 3, P3-M14a) ---------------------------------------
 // The PURE half of specs/naby-voice-layer.md: what counts as a deviation, when a
 // rewrite is worth a model call, what the call says, and — the part that makes

@@ -232,7 +232,19 @@ async function exerciseStore(label: string, store: Store): Promise<unknown> {
   ];
   store.touchSession('s3');
   for (const m of msgs) store.appendMessage('s3', m);
-  const got = store.getMessages('s3');
+  // The store stamps each user/assistant row with the time it was written
+  // (`RuntimeMessage.at`) — a wall-clock value, so it is checked for presence
+  // and dropped before the round-trip and driver-parity comparisons.
+  const stamped = store.getMessages('s3');
+  check(
+    `${label}: user/assistant rows are stamped with the time they were written`,
+    stamped.every((m) => m.role === 'tool' || typeof m.at === 'number'),
+  );
+  const got = stamped.map((m) => {
+    if (m.role === 'tool') return m;
+    const { at: _at, ...rest } = m;
+    return rest as typeof m;
+  });
   check(
     `${label}: RuntimeMessage speaker/routing round-trip`,
     JSON.stringify(got) === JSON.stringify(msgs),

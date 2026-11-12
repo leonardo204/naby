@@ -19,7 +19,7 @@ import { decideHarnessImport, provenanceForWrite } from '../harness-gate.js';
 import { buildHarnessSet, mergeHarnessSet } from './harness-set.js';
 // The "is this the same claim" rule (P3-M8b §5.3) and the search-fold rule
 // (P3-M10 §4) live with the type so both drivers answer them identically.
-import { memoryMatchesSearch, sameMemoryValue } from './store.js';
+import { memoryMatchesSearch, sameMemoryValue, stampMessageTime } from './store.js';
 // The strength ceiling (P3-M13b §3.2) lives with the rest of the decay model, so
 // the two drivers cannot cap rehearsal at different numbers.
 import { memoryStrength, STRENGTH_CAP } from '../memory-hygiene.js';
@@ -339,7 +339,7 @@ export class MemoryStore implements Store {
   // -- messages ------------------------------------------------------------
 
   appendMessage(sessionId: string, msg: RuntimeMessage): void {
-    this.state(sessionId).messages.push(msg);
+    this.state(sessionId).messages.push(stampMessageTime(msg));
   }
 
   getMessages(sessionId: string): RuntimeMessage[] {

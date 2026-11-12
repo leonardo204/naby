@@ -270,6 +270,13 @@ export type RuntimeMessage =
        *  the user's words and no memory can quote it as evidence. Inert JSON in
        *  the payload — no migration. */
       harness?: HarnessUserOrigin;
+      /** WHEN THE ROW WAS WRITTEN (epoch ms), stamped by the store on append
+       *  when the caller did not set one. It is what the transcript shows under
+       *  a bubble that is not the turn's last (the last one shows the turn's
+       *  duration and end time from `turn`). Descriptive like `turn`: no
+       *  provider payload is built from it. Absent on rows written before it
+       *  existed — the view then shows nothing. Inert JSON, no migration. */
+      at?: number;
     }
   | {
       role: 'tool';
