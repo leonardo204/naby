@@ -284,16 +284,36 @@ export type McpConnectOptions = {
   oauth?: McpOAuthConnectContext;
 };
 
-async function openClient(entry: McpEntry, opts?: McpConnectOptions): Promise<McpClient> {
+/**
+ * A fetch whose requests are also cancelled by `signal` — the connect deadline.
+ * Only a connect that ran out of time ever aborts it, and that connection is
+ * thrown away, so a live connection's later calls are never affected.
+ */
+function fetchUntil(signal: AbortSignal | undefined, base: typeof fetch = fetch): typeof fetch | undefined {
+  if (!signal) return undefined;
+  return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+    base(input, {
+      ...init,
+      signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+    })) as typeof fetch;
+}
+
+async function openClient(
+  entry: McpEntry,
+  opts?: McpConnectOptions,
+  /** The connect deadline (see `connectMcpServer`). */
+  deadline?: AbortSignal,
+  /** Receives a way to tear the transport down if the deadline passes first. */
+  onTransport?: (close: () => Promise<void>) => void,
+): Promise<McpClient> {
   if (entry.transport === 'stdio') {
-    return createMCPClient({
-      transport: new GracefulStdioTransport({
-        command: entry.command,
-        ...(entry.args ? { args: entry.args } : {}),
-        ...(entry.env ? { env: entry.env } : {}),
-      }),
-      clientName: 'naby',
+    const transport = new GracefulStdioTransport({
+      command: entry.command,
+      ...(entry.args ? { args: entry.args } : {}),
+      ...(entry.env ? { env: entry.env } : {}),
     });
+    onTransport?.(() => transport.close());
+    return createMCPClient({ transport, clientName: 'naby' });
   }
   // BROWSER-OAUTH ENTRIES. The provider reads and refreshes the token store; a
   // missing or dead sign-in throws here — before any network — so the turn gets
@@ -311,16 +331,18 @@ async function openClient(entry: McpEntry, opts?: McpConnectOptions): Promise<Mc
         url: entry.url,
         ...(entry.headers ? { headers: entry.headers } : {}),
         authProvider: oauth.authProvider,
-        fetch: oauth.fetch,
+        fetch: fetchUntil(deadline, oauth.fetch) ?? oauth.fetch,
       },
       clientName: 'naby',
     });
   }
+  const deadlineFetch = fetchUntil(deadline);
   return createMCPClient({
     transport: {
       type: entry.transport,
       url: entry.url,
       ...(entry.headers ? { headers: entry.headers } : {}),
+      ...(deadlineFetch ? { fetch: deadlineFetch } : {}),
     },
     clientName: 'naby',
   });
@@ -361,7 +383,65 @@ export async function listAllTools<T extends { name: string }>(client: {
  * of these two values that results in an ungated MCP call.
  */
 export async function connectMcpServer(entry: McpEntry, opts?: McpConnectOptions): Promise<McpConnection> {
-  const client = await openClient(entry, opts);
+  // A DEADLINE ON CONNECTING. Opening the client and listing its tools had no
+  // limit at all — only tool CALLS did — so one server that accepted the
+  // connection and then went quiet held the whole turn forever, before the model
+  // was ever asked (field case 2026-11-12: a stalled Atlassian tools/list kept a
+  // chat "thinking" for minutes). Past the deadline the server becomes a failure
+  // entry like any other unreachable one, and what it had opened is torn down.
+  const limit = connectTimeoutFor(entry);
+  const deadline = new AbortController();
+  let closeTransport: (() => Promise<void>) | undefined;
+  const attempt = connectWithin(entry, opts, deadline.signal, (close) => {
+    closeTransport = close;
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new McpConnectTimeoutError(entry.name, limit)), limit);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([attempt, expired]);
+  } catch (e) {
+    if (e instanceof McpConnectTimeoutError) {
+      deadline.abort();
+      void closeTransport?.().catch(() => undefined);
+      // If it does finish after all, it is not wanted: close it.
+      void attempt.then((c) => c.close()).catch(() => undefined);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** How long connecting (open + list tools) may take. A stdio server may need a
+ *  cold start (`npx`, `uvx`), so it gets the longer allowance. */
+export const MCP_CONNECT_TIMEOUT_MS = 20_000;
+export const MCP_STDIO_CONNECT_TIMEOUT_MS = 30_000;
+
+function connectTimeoutFor(entry: McpEntry): number {
+  if (entry.transport === 'stdio') return MCP_STDIO_CONNECT_TIMEOUT_MS;
+  return Math.min(timeoutFor(entry), MCP_CONNECT_TIMEOUT_MS);
+}
+
+export class McpConnectTimeoutError extends Error {
+  constructor(
+    readonly serverName: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`MCP server "${serverName}" did not finish connecting within ${Math.round(timeoutMs / 1000)}s`);
+    this.name = 'McpConnectTimeoutError';
+  }
+}
+
+async function connectWithin(
+  entry: McpEntry,
+  opts: McpConnectOptions | undefined,
+  deadline: AbortSignal,
+  onTransport: (close: () => Promise<void>) => void,
+): Promise<McpConnection> {
+  const client = await openClient(entry, opts, deadline, onTransport);
   const timeout = timeoutFor(entry);
 
   // listTools(), NOT tools(). See the header.
@@ -483,16 +563,21 @@ export async function loadMcpToolset(
   const connections: McpConnection[] = [];
   const failures: { name: string; message: string }[] = [];
 
-  for (const entry of entries) {
-    try {
-      connections.push(await connectMcpServer(entry, opts));
-    } catch (e) {
-      failures.push({
-        name: entry.name,
-        message: e instanceof Error ? e.message : String(e),
-      });
+  // ALL AT ONCE, each under its own deadline (see `connectMcpServer`). One at a
+  // time made a turn wait for the sum of every server's handshake, and a stalled
+  // one blocked every server after it. Results are taken in ENTRY order, so the
+  // tool list is the same whichever server answered first.
+  const settled = await Promise.allSettled(entries.map((entry) => connectMcpServer(entry, opts)));
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      connections.push(r.value);
+      return;
     }
-  }
+    failures.push({
+      name: entries[i]!.name,
+      message: r.reason instanceof Error ? r.reason.message : String(r.reason),
+    });
+  });
 
   const toolSchemas: ToolSchema[] = [];
   const executors: Record<string, Executor> = {};
