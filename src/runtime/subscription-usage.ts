@@ -107,22 +107,28 @@ export type SubscriptionUsage = {
 /**
  * HOW OFTEN A READING MAY BE REFETCHED — the poll FLOOR, not a target.
  *
- * Fifteen minutes, because both sources ultimately resolve to the same
- * server-side accounting and that accounting is rate-limited in practice (an
- * observed `rate_limit_error` from the usage endpoint on a live account). The
- * dotclaude HUD polls at this interval and is the reason a `.hud_cache` exists at
- * all, so matching it means naby adds no load beyond what the machine was already
- * generating.
+ * One minute. It used to be fifteen (matching the dotclaude HUD poller), and
+ * users read that as "the limit bar is broken": a heavy turn could move the
+ * 5-hour window by tens of percent and the bar would not show it for a quarter
+ * of an hour. The usage endpoint is rate-limited in practice (an observed
+ * `rate_limit_error` on a live account), but one look per minute per account is
+ * well inside what Claude Code itself does, and a failed look is harmless: the
+ * route falls back to the last good reading until `SUBSCRIPTION_USAGE_MAX_STALE_MS`.
  *
  * The client is free to ASK on any natural event (a turn completing, a mount) —
  * this constant is enforced server-side, so those asks are cache reads and only
- * one in fifteen minutes reaches a source.
+ * one per minute reaches a source.
  */
-export const SUBSCRIPTION_USAGE_TTL_MS = 15 * 60 * 1000;
+export const SUBSCRIPTION_USAGE_TTL_MS = 60 * 1000;
 
 /**
- * HOW STALE A READING MAY GET BEFORE IT IS NO LONGER A READING — thirty minutes,
- * twice the TTL.
+ * HOW STALE A READING MAY GET BEFORE IT IS NO LONGER A READING — thirty minutes.
+ *
+ * DELIBERATELY NOT DERIVED FROM THE TTL. It was once "twice the TTL", which was
+ * fine at fifteen minutes; at a one-minute TTL that rule would blank the bar
+ * after two minutes of a rate-limited endpoint, which is the flicker the
+ * fallback exists to prevent. Freshness of a GOOD reading and tolerance of a BAD
+ * look are separate policies and are pinned separately.
  *
  * TWO DIFFERENT FAILURES ARE BOTH THIS NUMBER, on purpose:
  *
