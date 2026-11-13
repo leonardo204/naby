@@ -100,6 +100,12 @@ export type RunTurnOptions = {
    * appended to the history — `ai@7` rejects `role:'system'` inside `messages`
    * and a system prompt is not part of the transcript we replay (contract §6). */
   system?: string;
+  /** Instructions true for THIS TURN ONLY (org-hook output, a round's progress).
+   *  Reaches every engine inside `system`, after `system` itself; an engine with
+   *  a prompt cache receives it apart, through `EngineRunInput.systemParts`, so
+   *  the session-long part of the prompt stays byte-identical turn to turn.
+   *  Injected memory and skills join it automatically. */
+  turnContext?: string;
   /** The directory this turn is ABOUT — passed straight through to the engine.
    * Callers that name a working directory in `system` should pass the SAME one
    * here: the two disagreeing is the bug documented on `EngineRunInput.cwd`
@@ -389,7 +395,14 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   // would have been without Phase 1.5 — the no-op invariant (contract §5). The
   // injected block rides on the system field only; it is never appended to the
   // transcript we store (contract §3 "no role:'system' leakage").
-  let effectiveSystem = opts.system;
+  // The session-long part, kept apart so `systemParts` can say where it ends.
+  const stableSystem = opts.system;
+  let effectiveSystem =
+    opts.turnContext && opts.turnContext.length > 0
+      ? stableSystem && stableSystem.length > 0
+        ? `${stableSystem}\n\n${opts.turnContext}`
+        : opts.turnContext
+      : opts.system;
   if (opts.memoryInjection) {
     const query: MemoryInjectionQuery = {
       sessionId,
@@ -411,7 +424,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
     if (opts.memoryInjection.orgId !== undefined)
       injectOpts.orgId = opts.memoryInjection.orgId;
     const injected = retrieveForInjection(store, query, injectOpts);
-    effectiveSystem = composeSystemWithMemory(opts.system, injected);
+    effectiveSystem = composeSystemWithMemory(effectiveSystem, injected);
     // -- ACCESS RECORDING (P3-M10, memory-hygiene §2.1) --------------------
     //
     // SELECTION IS ACCESS. The retrieval above just decided these particular
@@ -737,6 +750,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       model,
       messages: turnMessages,
       ...(effectiveSystem !== undefined ? { system: effectiveSystem } : {}),
+      ...(() => {
+        const parts = splitSystem(stableSystem, effectiveSystem);
+        return parts ? { systemParts: parts } : {};
+      })(),
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       ...(opts.subagents !== undefined && opts.subagents.length > 0
         ? { subagents: opts.subagents }
@@ -769,29 +786,35 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
       // map of the transcript, so a prefix of it is the view of a prefix — every
       // naby turn counts in the same coordinates. A session without participants
       // is the identity view, i.e. exactly the old behaviour.
+      // THE ENGINE'S OWN CONTINUATION HANDLE (e.g. the Agent SDK session id),
+      // so the next turn can resume instead of re-sending the whole transcript.
+      // ONE PER SEAT (v1.48.27): naby and each participant see different views
+      // of the transcript, so each keeps its own backend session — naby's under
+      // the session id, a participant's under the session id and its agent id.
+      // A view is a row-by-row map of the transcript, so a seat's saved
+      // position stays valid in that seat's view. A settings row; '' = none.
+      resume: (() => {
+        const key = resumeKeyFor(sessionId, opts.speaker?.agentId);
+        return {
+          load: () => {
+            try {
+              return store.getSetting(key) || undefined;
+            } catch {
+              return undefined;
+            }
+          },
+          save: (state: string | undefined) => {
+            try {
+              store.setSetting(key, state ?? '');
+            } catch {
+              // A failed write costs the next turn a full replay, nothing else.
+            }
+          },
+        };
+      })(),
       ...(opts.speaker
         ? {}
         : {
-            // THE ENGINE'S OWN CONTINUATION HANDLE (e.g. the Agent SDK session
-            // id), so the next turn can resume instead of re-sending the whole
-            // transcript. naby's view only, for the same reason as the summary
-            // below. A settings row per session; '' means none.
-            resume: {
-              load: () => {
-                try {
-                  return store.getSetting(`engine.resume.${sessionId}`) || undefined;
-                } catch {
-                  return undefined;
-                }
-              },
-              save: (state: string | undefined) => {
-                try {
-                  store.setSetting(`engine.resume.${sessionId}`, state ?? '');
-                } catch {
-                  // A failed write costs the next turn a full replay, nothing else.
-                }
-              },
-            },
             rollingSummary: {
               load: () => {
                 try {
@@ -1093,4 +1116,29 @@ export async function runTurn(opts: RunTurnOptions): Promise<EngineEvent[]> {
   });
 
   return events;
+}
+
+/**
+ * `system` split into its session-long head and this turn's tail (see
+ * `EngineRunInput.systemParts`). Every per-turn block — `turnContext`, memory,
+ * skills — is APPENDED to the stable part, so the tail is whatever follows it.
+ * Undefined when nothing was added this turn: the field is then simply absent
+ * and every engine behaves exactly as before.
+ */
+export function splitSystem(
+  stable: string | undefined,
+  full: string | undefined,
+): { stable?: string; turn: string } | undefined {
+  if (full === undefined || full === stable) return undefined;
+  const head = stable ?? '';
+  if (head.length > 0 && !full.startsWith(head)) return undefined;
+  const turn = full.slice(head.length).replace(/^\n\n/, '');
+  if (turn.length === 0) return undefined;
+  return head.length > 0 ? { stable: head, turn } : { turn };
+}
+
+/** The settings key of a seat's resume handle (see the `resume` port). */
+export function resumeKeyFor(sessionId: string, speakerAgentId?: string): string {
+  if (!speakerAgentId) return `engine.resume.${sessionId}`;
+  return `engine.resume.${sessionId}:${speakerAgentId.replace(/[^\w-]/g, '_')}`;
 }

@@ -550,7 +550,15 @@ export function buildQueryOptions(args: {
     // The system prompt travels on its OWN field (contract §2/§6), never as
     // a `role:'system'` message. The Agent SDK's native slot for it is
     // `systemPrompt`; passing a bare string replaces the default preset.
-    ...(input.system ? { systemPrompt: input.system } : {}),
+    //
+    // THE SESSION-LONG PART ONLY, when the caller split it (`systemParts`):
+    // this turn's part rides in the user message (`withTurnContext`), so the
+    // system prompt — and the cached conversation behind it — stays identical
+    // from one turn to the next.
+    ...(() => {
+      const sys = splitSystemFor(input) ? input.systemParts!.stable : input.system;
+      return sys ? { systemPrompt: sys } : {};
+    })(),
     // WHERE THIS TURN RUNS. Omitting `cwd` does not mean "no directory" —
     // the SDK documents it as defaulting to `process.cwd()`, which for us
     // is the Electron main process's cwd (naby's own source checkout), NOT
@@ -1515,18 +1523,30 @@ export function planSdkResume(
 ): string | undefined {
   if (!state || !ctx.cwd) return undefined;
   if (state.cwd !== ctx.cwd || state.accountId !== (ctx.accountId ?? null)) return undefined;
-  // Participants: each speaker sees a relabelled view, which the SDK's single
-  // transcript cannot represent.
-  for (const m of messages) {
-    if (m.role !== 'tool' && (m.speaker || m.routing)) return undefined;
-  }
   const current = lastUserIndexOf(messages);
   const c = state.coveredLen;
   if (current < 0 || c < 1 || c > current) return undefined;
   const anchor = messages[c - 1];
   if (!anchor || anchor.role !== 'user' || userRowIdentity(anchor) !== state.lastUser) return undefined;
-  // Only the answered turn's own rows may sit between it and the new message.
-  for (let i = c; i < current; i += 1) if (messages[i]?.role === 'user') return undefined;
+  // WHAT MAY SIT BETWEEN the answered row and the new message: first that
+  // turn's OWN answer (assistant and tool rows — the backend wrote them), then
+  // user-side rows only. In a room those are the other speakers' lines and the
+  // hand-offs, which the seat's view turns into user rows; they are sent with
+  // the new message (`renderResumePrompt`). An assistant or tool row AFTER a
+  // user row is an answer this backend session never wrote — another engine,
+  // or this seat answering without the handle — so the transcript is replayed.
+  //
+  // PARTICIPANTS NO LONGER FORCE A REPLAY (v1.48.27). They used to, and since a
+  // session that once had a participant keeps its labelled rows forever, such
+  // a session replayed its whole history — at full cache-write price — on
+  // every turn, and on every speaker's turn within a round.
+  let sawUserRow = false;
+  for (let i = c; i < current; i += 1) {
+    const m = messages[i];
+    if (!m) return undefined;
+    if (m.role === 'user') sawUserRow = true;
+    else if (sawUserRow) return undefined;
+  }
   return state.sdkSessionId;
 }
 
@@ -1547,6 +1567,60 @@ export function sdkSessionFileExists(
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether this turn sends `systemParts.stable` as the system prompt and the
+ * turn part inside the user message. Only when there IS a stable part: with
+ * none, a split would leave the SDK with no system prompt at all, which means
+ * its default preset — a different agent, not a cheaper one.
+ */
+export function splitSystemFor(input: Pick<EngineRunInput, 'systemParts'>): boolean {
+  const p = input.systemParts;
+  return !!p && !!p.stable && p.stable.length > 0 && !!p.turn && p.turn.length > 0;
+}
+
+/** This turn's own instructions, ahead of the user's text, framed the way the
+ *  CLI frames its own per-turn context. */
+export function withTurnContext(text: string, turn: string | undefined): string {
+  if (!turn) return text;
+  return `<system-reminder>\n${turn}\n</system-reminder>\n\n${text}`;
+}
+
+/**
+ * THE PROMPT FOR A RESUMED TURN: the backend already holds everything up to
+ * and including its own last answer, so only what came AFTER is sent — the
+ * new message, and, in a room, what the others said in between (the other
+ * speakers' lines and naby's hand-offs, all user-side rows in this seat's view).
+ * `from` is the saved `coveredLen`.
+ */
+export function renderResumePrompt(messages: EngineRunInput['messages'], from: number): string {
+  const current = lastUserIndexOf(messages);
+  const text = lastUserText(messages);
+  const lines = messages
+    .slice(Math.max(0, from), Math.max(0, current))
+    .filter((m) => m.role === 'user')
+    .map(renderHistoryLine)
+    .filter((l): l is string => l !== null && l.length > 0);
+  const speaker = lastUserSpeaker(messages);
+  if (lines.length === 0 && !speaker) return text;
+  return [
+    ...(lines.length > 0
+      ? [
+          'Messages since your last reply, for context only — do not answer them again:',
+          '<conversation_update>',
+          ...lines,
+          '</conversation_update>',
+          '',
+        ]
+      : []),
+    speaker
+      ? speaker.selfNote
+        ? 'Your next step in this conversation:'
+        : `@${speaker.name} (the host) now says to you:`
+      : 'The user now says:',
+    text,
+  ].join('\n');
 }
 
 /** The images on the newest user turn, or undefined. `runTurn` attaches this
@@ -1595,11 +1669,21 @@ function extractThinking(content: unknown): string {
 export function buildAgentPrompt(
   messages: EngineRunInput['messages'],
   holdOpen?: Promise<void>,
-  /** RESUMING: the backend already holds the earlier turns, so only the new
-   *  user text is sent (see `planSdkResume`). */
-  resuming = false,
+  /** RESUMING: the backend already holds the earlier turns, so only what came
+   *  after them is sent (see `planSdkResume`). A number is the saved
+   *  `coveredLen` (rows from there on are new); `true` means "only the newest
+   *  message". */
+  resuming: boolean | number = false,
+  /** This turn's own instructions (`systemParts.turn`), sent ahead of the text. */
+  turnContext?: string,
 ): string | AsyncIterable<SDKUserMessage> {
-  const text = resuming ? lastUserText(messages) : renderPrompt(messages);
+  const body =
+    resuming === false
+      ? renderPrompt(messages)
+      : resuming === true
+        ? lastUserText(messages)
+        : renderResumePrompt(messages, resuming);
+  const text = withTurnContext(body, turnContext);
   const images = lastUserImages(messages);
   if (holdOpen === undefined && (!images || images.length === 0)) return text;
 
@@ -2046,6 +2130,7 @@ export class ClaudeAgentSdkEngine implements Engine {
   async *run(input: EngineRunInput): AsyncIterable<EngineEvent> {
     const accountId = this.opts.accountId;
     let resumeId: string | undefined;
+    let resumeFrom = 0;
     if (input.resume && input.cwd) {
       let saved: string | undefined;
       try {
@@ -2053,13 +2138,17 @@ export class ClaudeAgentSdkEngine implements Engine {
       } catch {
         saved = undefined;
       }
-      const planned = planSdkResume(input.messages, parseSdkResumeState(saved), {
+      const state = parseSdkResumeState(saved);
+      const planned = planSdkResume(input.messages, state, {
         cwd: input.cwd,
         ...(accountId ? { accountId } : {}),
       });
-      if (planned) {
+      if (planned && state) {
         const env = accountId ? claudeAccountEnvFor(accountId, process.env) ?? process.env : process.env;
-        if (sdkSessionFileExists(planned, input.cwd, env)) resumeId = planned;
+        if (sdkSessionFileExists(planned, input.cwd, env)) {
+          resumeId = planned;
+          resumeFrom = state.coveredLen;
+        }
       }
     }
     if (!resumeId) {
@@ -2071,7 +2160,7 @@ export class ClaudeAgentSdkEngine implements Engine {
     // error before that is a rejected resume, not a turn the user should see.
     const held: EngineEvent[] = [];
     let started = false;
-    for await (const ev of this.runOnce(input, resumeId)) {
+    for await (const ev of this.runOnce(input, resumeId, resumeFrom)) {
       if (!started && ev.kind !== 'init') {
         held.push(ev);
         continue;
@@ -2098,7 +2187,11 @@ export class ClaudeAgentSdkEngine implements Engine {
     for (const h of held) yield h;
   }
 
-  private async *runOnce(input: EngineRunInput, resumeId: string | undefined): AsyncIterable<EngineEvent> {
+  private async *runOnce(
+    input: EngineRunInput,
+    resumeId: string | undefined,
+    resumeFrom = 0,
+  ): AsyncIterable<EngineEvent> {
     // The SDK is loaded HERE, inside run(), so that constructing the engine is
     // always safe. A packaged build can hold a reference to this class without
     // the module existing; only an attempt to actually answer fails, and it
@@ -2426,7 +2519,12 @@ export class ClaudeAgentSdkEngine implements Engine {
     }
 
     const q = query({
-      prompt: buildAgentPrompt(input.messages, inputReleased, resumeId !== undefined),
+      prompt: buildAgentPrompt(
+        input.messages,
+        inputReleased,
+        resumeId !== undefined ? resumeFrom : false,
+        splitSystemFor(input) ? input.systemParts!.turn : undefined,
+      ),
       // Built by the exported pure function above, so the EXACT object this
       // production path sends can be asserted without a model call.
       options: buildQueryOptions({

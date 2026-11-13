@@ -718,6 +718,20 @@ export type EngineRunInput = {
    * option, the Agent SDK's `systemPrompt`). Provider-independent: the same
    * string is passed whichever engine runs. */
   system?: string;
+  /**
+   * THE SAME `system`, SPLIT by how long it stays true (v1.48.27). `stable` is
+   * what holds for the whole session (persona, policy, rules); `turn` is what
+   * was chosen for THIS turn only (injected memory and skills, org-hook context,
+   * a round's progress). `system` is always `stable` + `turn`, so an engine that
+   * ignores this field sees exactly what it always saw.
+   *
+   * WHY IT EXISTS. A backend with a prompt cache (the Agent SDK) caches the
+   * conversation behind the system prompt; a system prompt that changes every
+   * turn — memory is re-ranked against each turn's words — throws the whole
+   * cached conversation away on every turn. Such an engine sends `stable` as its
+   * system prompt and delivers `turn` inside this turn's user message instead.
+   */
+  systemParts?: { stable?: string; turn?: string };
   /** JSON-schema tool definitions; NO execute — the engine surfaces, we run. */
   toolSchemas: ToolSchema[];
   /** runtime-owned gate; the engine attaches it at its pre-execution point. */

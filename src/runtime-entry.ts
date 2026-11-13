@@ -507,7 +507,7 @@ export {
 export { MemoryStore } from './runtime/store/memory-store.js';
 export { SqliteStore, type SqliteStoreOptions } from './runtime/store/sqlite-store.js';
 
-export { runTurn, type RunTurnOptions } from './runtime/session.js';
+export { runTurn, splitSystem, resumeKeyFor, type RunTurnOptions } from './runtime/session.js';
 
 // -- the activity log (naby-activity-log) ------------------------------------
 //
@@ -1066,6 +1066,9 @@ export {
   buildAgentPrompt,
   renderPrompt,
   planSdkResume,
+  renderResumePrompt,
+  splitSystemFor,
+  withTurnContext,
   parseSdkResumeState,
   sdkResumeStateFor,
   withoutSubagentRows,
