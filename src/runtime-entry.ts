@@ -656,6 +656,53 @@ export {
   type RecordSpeechInput,
 } from './runtime/round-loop.js';
 
+// THE REVIEW LEDGER: control of a review-and-fix loop (field case 2026-11-16).
+// Pure: finding chains, reopen escalation, the fix-round limit, per-file assignments
+// and the hand-off report. The runner that calls models is separate.
+export {
+  ReviewLedger,
+  REVIEW_MAX_FIX_ROUNDS,
+  REVIEW_TOPIC_REOPEN_LIMIT,
+  REVIEW_MIN_FIX_SEVERITY,
+  REVIEW_TOPIC_TITLE_MAX,
+  type ReviewSeverity,
+  type ReviewEvidence,
+  type FindingRelation,
+  type ReviewFindingInput,
+  type ReviewFindingStatus,
+  type ReviewFinding,
+  type ReviewTopic,
+  type FixOutcome,
+  type FixAssignment,
+  type ReviewNextStep,
+  type ReviewHandoffReason,
+  type ReviewHandoffReport,
+  type ReviewLedgerOptions,
+} from './runtime/review-loop.js';
+export {
+  REVIEW_LOOP_TOOL_NAME,
+  REVIEW_LOOP_CONCURRENCY,
+  REVIEW_LOOP_RULE,
+  REVIEW_LOOP_MAX_SEED_FINDINGS,
+  REVIEW_READ_TOOLS,
+  reviewLoopSchema,
+  validateReviewLoopInput,
+  reviewRoleRefusal,
+  reviewerPrompt,
+  fixerPrompt,
+  parseReviewerReply,
+  parseFixerReply,
+  capIndex,
+  runReviewLoop,
+  renderReviewReport,
+  type ReviewGroup,
+  type ReviewLoopInput,
+  type ReviewRole,
+  type ReviewLoopDeps,
+  type ReviewLoopResult,
+  type NestedReply,
+} from './runtime/review-loop-run.js';
+
 // PARTICIPANT RECOMMENDATIONS (specs/multi-agent-chat.md §8.13, MAC-M6). Pure:
 // the cursor rule, the transcript the recommender reads, its prompt and the
 // strict parser that applies the threshold (R9.1) and the dedupe rules (R9.5).

@@ -1,6 +1,6 @@
 {
   "name": "naby",
-  "version": "1.48.28",
+  "version": "1.48.29",
   "private": true,
   "type": "module",
   "description": "Personalized persona agent desktop app",
@@ -85,6 +85,7 @@
     "spike:cross-project": "tsx src/spikes/spike-cross-project.ts",
     "spike:participant-recommend": "npm run build:runtime && tsx src/spikes/spike-participant-recommend.ts",
     "spike:round-loop": "npm run build:runtime && tsx src/spikes/spike-round-loop.ts",
+    "spike:review-loop": "tsx src/spikes/spike-review-loop.ts",
     "spike:participant-round": "npm run build:runtime && cd shell && npx vitest run packages/feature/agent/src/server/engines/participantRound.test.ts",
     "spike:autonomy": "npm run build:runtime && tsx src/spikes/spike-autonomy.ts",
     "spike:routing": "npm run build:runtime && tsx src/spikes/spike-routing.ts",
