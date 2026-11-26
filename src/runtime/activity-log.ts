@@ -184,6 +184,9 @@ export type ActivityKind =
   // word set, never the body) and the tools it called. `round_completed` keeps
   // the round's totals and, when the round stopped itself, the loop evidence.
   | 'participant_round_step'
+  // The repetition check's verdict on a round (2026-11-26): advice naby reads
+  // in its next decision, never a stop. Which rule, on which steps, and why.
+  | 'round_loop_hint'
   | 'round_completed'
   // -- sessions asking each other (cross-session-messaging R9) ---------------
   //

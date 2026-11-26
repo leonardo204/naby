@@ -784,6 +784,9 @@ export type RoutePromptInput = {
    *  first — `RoundLedger.summaryLines()`. Shown so naby does not hand out work
    *  already done. Replaces the 0.6 speech / round-trip counters (R3.5). */
   progress?: string[];
+  /** The repetition check's hint (`roundLoopHintBlock`), when it noticed one.
+   *  Advice only: naby decides whether the round is going in circles. */
+  loopHint?: string;
   proposalsEnabled: boolean;
   /** Names the user declined in this session — never offered again (R3.9). */
   declined?: string[];
@@ -883,6 +886,7 @@ export function routePrompt(input: RoutePromptInput): string {
     for (const l of input.progress) lines.push(untrusted(l, 300));
     lines.push(`</${UNTRUSTED_TRANSCRIPT}>`);
   }
+  if (input.loopHint) lines.push('', input.loopHint);
   lines.push(
     '',
     '## Actions',

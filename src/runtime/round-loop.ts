@@ -13,8 +13,14 @@
 //   * naby reads a short progress summary of the round, so it does not hand out
 //     work already done — R11.2;
 //   * after every speech, and before every hand-off, the judge asks whether the
-//     round is going in circles — R11.3. When it is, the round stops (R11.4).
-//   * a backstop (60 speeches) catches whatever the judge misses (R3.5 d).
+//     round is going in circles — R11.3.
+//
+// THE JUDGE ADVISES, NABY DECIDES (2026-11-26 user decision). Whether a round is
+// repeating itself is the orchestrator's call, and there is no turn limit: a
+// verdict no longer stops the round. It becomes a HINT (`roundLoopHintBlock`)
+// in naby's next routing call and speech, and naby decides whether the work is
+// moving or should stop. `ROUND_BACKSTOP_SPEECHES` and `roundStopNote` remain
+// only for rows written before that.
 //
 // The judge is deliberately CONSERVATIVE: "when in doubt, do not stop" (R11.3).
 // A speech that called tools is doing work, so the near-duplicate rules leave it
@@ -429,6 +435,19 @@ export function roundStopNote(
     return `Round stopped automatically: it reached ${stop.limit} speeches (the emergency limit). Nobody was handed the turn after that.`;
   }
   return `Round stopped automatically by loop detection: ${stop.verdict.detail}. Do not repeat that step; if the work is still open, take a different approach or ask the user.`;
+}
+
+/**
+ * The judge's HINT for naby (no longer a stop): what looked like repetition, and
+ * that the call is naby's. `undefined` when the judge saw nothing.
+ */
+export function roundLoopHintBlock(verdict: RoundLoopVerdict | undefined): string | undefined {
+  if (!verdict) return undefined;
+  return [
+    '## Possible repetition in this round',
+    `The round's repetition check noticed: ${defuseUntrusted(verdict.detail, 300)}.`,
+    'This does not stop anything; you decide. If each step is still doing new work, carry on. If the round is going in circles, stop handing the same thing on: change the approach, or close the round and ask the user.',
+  ].join('\n');
 }
 
 /**
