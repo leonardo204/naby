@@ -2,11 +2,11 @@
 id: skill-hub-builtin
 title: System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
 type: design
-version: 0.10.3
+version: 0.11.0
 status: active
 scope: 사내 표준 MCP(skill-hub, Atlassian 공식 원격 MCP, cic)를 naby 레이어의 내장 System MCP 프리셋으로 만든다. 프리셋은 내장 하네스 번들의 스위치도 겸한다 — cic는 confluence-context 스킬 + confluence-researcher 서브에이전트를 켠다. atlassian은 0.9.0부터 브라우저 OAuth 프리셋이고 번들을 켜지 않는다(confluence-upload 회수, org-harness-sync §3.8·§4.4). 프리셋 없이 항상 켜지는 번들(core)은 0.8.0에서 더해졌다. 0.10.0에서 로컬 CLI를 띄우는 무필드 stdio 프리셋 aside(Aside 브라우저)가 더해졌다. 기본은 연결 준비만 한다. 프리셋 레지스트리(선언적 필드 정의 + 서버 측 엔트리 조립), 첫 실행 온보딩 스텝, 설정의 System MCP 카드, 비밀값이 클라이언트로 왕복하지 않는 쓰기 경로를 다룬다. MCP 로더·게이트·스킬 주입은 기존 계약을 그대로 쓴다.
 related: [phase-3-persona-agent, phase-1_6-harness-ownership, harness-standalone, subagent-delegation, org-harness-sync, mcp-oauth-catalog]
-updated: 2026-10-29
+updated: 2026-11-27
 ---
 
 # System MCP — 내장 프리셋(skill-hub · Atlassian · cic · Aside)
@@ -180,6 +180,8 @@ skill-hub의 설치 안내는 Claude Code 관례(`~/.claude/skills`)를 따르�
 - 테스트: 레지스트리 단위, 액션 왕복(연결·끊기·CLI 없음 거절·다시 확인·수동 엔트리), 카드 세 상태 렌더(en/ko)를 넣었다. `vitest.setup.ts`는 `NABY_ASIDE_PATH`를 없는 경로로 고정해 테스트가 실제 `aside`를 찾지 않게 한다. 스크린샷 스크립트에는 `--system-mcp`를 더했다.
 - 설치 직후 감지(0.10.2, 2026-10-22 실기 보고): Windows에서 naby를 켠 채 Aside CLI를 설치하면 "다시 확인"이 계속 "CLI 없음"이라고 답했고, naby를 다시 시작해야 감지됐다. 설치 프로그램은 레지스트리의 사용자 PATH를 바꾸지만, 이미 떠 있는 프로세스의 `PATH`는 시작 시점 값 그대로이기 때문이다. 그래서 Windows에서 시작 시점 `PATH`로 못 찾으면 `reg query`로 사용자·시스템 PATH를 새로 읽어(`%VAR%` 펼침) 한 번 더 찾는다. 이 탐색은 `commandPath.resolveCommandPath`에 있으므로 uvx(atlassian) 등 다른 stdio 프리셋도 같은 덕을 본다. 테스트는 레지스트리 읽기를 주입해 실제 `reg`를 부르지 않는다.
 - 남은 확인(사용자 실기): CLI가 깔린 Mac에서 연결 → 채팅에서 Aside 도구 호출 한 번, Windows에서 `aside.exe` 경로 해석과 `.cmd` 심 감싸기(단위 테스트로만 확인했다).
+
+**사용 안내(0.11.0, 2026-11-27).** `aside mcp`는 일하는 방식이 둘이다. `exec`는 Aside 자체 에이전트에게 일을 넘기고(사이트별 스킬과 사용자 기억을 쓴다), `repl`은 호출한 모델이 Playwright 코드로 화면을 직접 조작한다. Aside 공식 안내(`aside guide`)는 exec를 기본으로, repl은 DOM이나 스크린샷을 직접 봐야 할 때만 쓰라고 한다. 그런데 서버가 instructions를 보내지 않고 naby에도 안내가 없어서, @aside 참가자는 repl 1,747번, exec 23번을 불렀다. 결과물이 Aside 브라우저에서 직접 시킨 것보다 못하다는 피드백이 나온 이유다. 그래서 툴셋에 Aside 도구가 있으면 `lib/asideUsage.ts`의 안내 블록을 붙인다. 붙는 곳은 naby의 시스템 프롬프트, 참가자 발언의 시스템 프롬프트, 중첩 실행(naby_delegate, 리뷰 루프), Aside 서버가 연결돼 있을 때의 네이티브 SDK 서브에이전트다. 안내 내용은 exec 기본, repl은 DOM과 스크린샷 전용, exec는 대화를 보지 못하므로 사용자의 원래 요청과 URL, 완료 기준을 프롬프트에 다 담을 것, 후속 요청은 같은 `session_id`로 이어 갈 것, 사용자 맥락은 `memory_search`로 먼저 찾을 것이다. 도구가 없으면 블록도 없다.
 
 ## 3. 검증 계획
 
